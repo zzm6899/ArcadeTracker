@@ -288,7 +288,7 @@ function scanFrame() {
     var code = jsQR(imageData.data, imageData.width, imageData.height);
     if (code && code.data) {
         var url = code.data;
-        if (url.includes('icardinc.net') || url.includes('kokoamusement') || url.includes('BalanceMobile')) {
+        if (url.toLowerCase().includes('icardinc.net') || url.toLowerCase().includes('kokoamusement') || url.toLowerCase().includes('balancemobile')) {
             stopScanner();
             document.getElementById('scanner-status').textContent = '✅ QR code found! Fetching card details...';
             resolveQR(url);
