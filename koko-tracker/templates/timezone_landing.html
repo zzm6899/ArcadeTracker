@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}Connecting Timezone – Koko Tracker{% endblock %}
+{% block content %}
+
+<div class="max-w-md mx-auto mt-8">
+    <div class="card rounded-2xl p-8 text-center">
+
+        <!-- Loading state -->
+        <div id="state-loading">
+            <div class="text-5xl mb-4">🔐</div>
+            <h2 class="text-xl font-bold text-white mb-2">Reading your session...</h2>
+            <p class="text-slate-400 text-sm mb-6">Looking for your Timezone login</p>
+            <div class="flex justify-center mb-4">
+                <div class="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+            </div>
+        </div>
+
+        <!-- Success state -->
+        <div id="state-success" class="hidden">
+            <div class="text-5xl mb-4">✅</div>
+            <h2 class="text-xl font-bold text-white mb-2">Connected!</h2>
+            <p class="text-slate-400 text-sm mb-6" id="success-msg">Loading your cards...</p>
+            <div id="card-list" class="space-y-3 text-left mb-6"></div>
+            <a href="/dashboard" class="block w-full btn-primary py-3 rounded-xl text-white font-medium">
+                Go to Dashboard →
+            </a>
+        </div>
+
+        <!-- Not logged in state -->
+        <div id="state-notloggedin" class="hidden">
+            <div class="text-5xl mb-4">⚠️</div>
+            <h2 class="text-xl font-bold text-white mb-2">Not logged in yet</h2>
+            <p class="text-slate-400 text-sm mb-6">It looks like you haven't completed the Timezone login. Please go back and log in first.</p>
+            <a href="/timezone/start"
+                class="block w-full btn-primary py-3 rounded-xl text-white font-medium mb-3">
+                ← Go back and log in
+            </a>
+        </div>
+
+        <!-- Error state -->
+        <div id="state-error" class="hidden">
+            <div class="text-5xl mb-4">❌</div>
+            <h2 class="text-xl font-bold text-white mb-2">Something went wrong</h2>
+            <p id="error-msg" class="text-slate-400 text-sm mb-6"></p>
+            <a href="/timezone/start"
+                class="block w-full py-3 rounded-xl font-medium border border-slate-600 text-slate-300 mb-3">
+                Try again
+            </a>
+            <a href="/dashboard" class="text-sm text-slate-500 hover:text-slate-300">Skip for now</a>
+        </div>
+
+    </div>
+</div>
+
+<script>
+function showState(name, msg) {
+    ['loading','success','notloggedin','error'].forEach(s => {
+        document.getElementById(`state-${s}`).classList.add('hidden');
+    });
+    document.getElementById(`state-${name}`).classList.remove('hidden');
+    if (msg) {
+        const el = document.getElementById(name === 'error' ? 'error-msg' : 'success-msg');
+        if (el) el.textContent = msg;
+    }
+}
+
+function isJWT(str) {
+    return typeof str === 'string' && str.startsWith('eyJ') && str.split('.').length === 3;
+}
+
+function scanStorage(storage) {
+    try {
+        for (let i = 0; i < storage.length; i++) {
+            const key = storage.key(i);
+            const val = storage.getItem(key);
+            if (isJWT(val)) return { token: val, key };
+            try {
+                const parsed = JSON.parse(val);
+                if (!parsed || typeof parsed !== 'object') continue;
+                // Direct fields
+                for (const field of ['access_token','token','id_token','secret']) {
+                    if (isJWT(parsed[field])) return { token: parsed[field], key };
+                }
+                // MSAL nested format: {secret: "eyJ..."}
+                for (const v of Object.values(parsed)) {
+                    if (isJWT(v)) return { token: v, key };
+                    if (v && typeof v === 'object') {
+                        for (const vv of Object.values(v)) {
+                            if (isJWT(vv)) return { token: vv, key };
+                        }
+                    }
+                }
+            } catch(e) {}
+        }
+    } catch(e) {}
+    return null;
+}
+
+function getAllCookies() {
+    const result = {};
+    document.cookie.split(';').forEach(c => {
+        const [k, ...v] = c.trim().split('=');
+        if (k) result[k.trim()] = decodeURIComponent(v.join('='));
+    });
+    return result;
+}
+
+function renderCards(cards, name) {
+    const list = document.getElementById('card-list');
+    if (!cards.length) {
+        showState('success', `Connected as ${name}! No cards found on this account.`);
+        return;
+    }
+    showState('success', `Connected as ${name}! Found ${cards.length} card(s) — tap to track:`);
+    list.innerHTML = cards.map(card => `
+        <div class="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
+            <div>
+                <div class="font-mono font-bold text-white">${card.number}</div>
+                <div class="text-sm mt-1 flex gap-2 flex-wrap">
+                    <span class="text-green-400">$${(card.cashBalance + card.bonusBalance).toFixed(2)}</span>
+                    <span class="text-orange-400">🎫 ${card.tickets}</span>
+                    <span class="text-slate-500 text-xs">${card.country}</span>
+                </div>
+            </div>
+            <form method="POST" action="/timezone/add-card">
+                <input type="hidden" name="card_number" value="${card.number}">
+                <input type="hidden" name="cash_balance" value="${card.cashBalance}">
+                <input type="hidden" name="bonus_balance" value="${card.bonusBalance}">
+                <input type="hidden" name="tickets" value="${card.tickets}">
+                <input type="hidden" name="card_label" value="Timezone ${card.number}">
+                <button type="submit" class="btn-primary px-4 py-2 rounded-lg text-sm font-medium text-white">
+                    + Track
+                </button>
+            </form>
+        </div>
+    `).join('');
+}
+
+async function run() {
+    // Small delay to let any storage writes settle
+    await new Promise(r => setTimeout(r, 600));
+
+    let found = null;
+
+    // 1. Scan localStorage
+    found = scanStorage(localStorage);
+    if (found) console.log('[Landing] Found token in localStorage, key:', found.key);
+
+    // 2. Scan sessionStorage
+    if (!found) {
+        found = scanStorage(sessionStorage);
+        if (found) console.log('[Landing] Found token in sessionStorage, key:', found.key);
+    }
+
+    // 3. Check URL hash/params (some B2C flows put token in URL)
+    if (!found) {
+        const hash = new URLSearchParams(window.location.hash.slice(1));
+        const params = new URLSearchParams(window.location.search);
+        for (const p of [hash, params]) {
+            for (const [k, v] of p.entries()) {
+                if (isJWT(v)) { found = { token: v, key: k }; break; }
+            }
+            if (found) break;
+        }
+        if (found) console.log('[Landing] Found token in URL');
+    }
+
+    if (!found) {
+        console.log('[Landing] No token found in any storage');
+        showState('notloggedin');
+        return;
+    }
+
+    // Send to server
+    try {
+        const resp = await fetch('/timezone/extract-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                bearer_token: found.token,
+                cookies: getAllCookies()
+            })
+        });
+        const result = await resp.json();
+        if (result.success) {
+            renderCards(result.cards, result.name);
+        } else {
+            showState('error', result.error || 'Could not validate session. Please try logging in again.');
+        }
+    } catch(e) {
+        showState('error', 'Network error: ' + e.message);
+    }
+}
+
+run();
+</script>
+
+{% endblock %}

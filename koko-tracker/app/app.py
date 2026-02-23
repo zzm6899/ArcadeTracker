@@ -434,6 +434,23 @@ def timezone_extract_token():
 
     return jsonify({'success': False, 'error': 'Could not extract token'})
 
+@app.route('/timezone/landing')
+@login_required
+def timezone_landing():
+    """
+    Mobile-friendly landing page after Timezone login.
+    User is redirected here from their browser after logging in.
+    Page reads token from localStorage and sends it to the server.
+    """
+    return render_template('timezone_landing.html', user=get_current_user())
+
+@app.route('/timezone/start')
+@login_required  
+def timezone_start():
+    """Redirect user to Timezone portal, with our landing page as the return destination."""
+    app_url = os.environ.get('APP_URL', request.host_url.rstrip('/'))
+    return render_template('timezone_start.html', user=get_current_user(), app_url=app_url)
+
 if __name__ == '__main__':
     init_db()
     threading.Thread(target=poll_cards, daemon=True).start()

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Connect Timezone – Koko Tracker{% endblock %}
+{% block content %}
+
+<div class="flex items-center gap-4 mb-6">
+    <a href="/dashboard" class="text-slate-400 hover:text-white transition">← Dashboard</a>
+</div>
+
+<div class="max-w-md mx-auto">
+    <div class="card rounded-2xl p-8 text-center">
+        <div class="text-5xl mb-4">🕹️</div>
+        <h1 class="text-2xl font-bold text-white mb-2">Connect Timezone</h1>
+        <p class="text-slate-400 text-sm mb-8">Follow these steps to link your Timezone account</p>
+
+        <!-- Steps -->
+        <div class="text-left space-y-4 mb-8">
+            <div class="flex gap-4 items-start">
+                <div class="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 mt-0.5">1</div>
+                <div>
+                    <div class="text-white font-medium">Open Timezone Portal</div>
+                    <div class="text-slate-400 text-sm mt-0.5">Tap the button below — it opens in your browser</div>
+                </div>
+            </div>
+            <div class="flex gap-4 items-start">
+                <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 mt-0.5">2</div>
+                <div>
+                    <div class="text-white font-medium">Log in with phone or email</div>
+                    <div class="text-slate-400 text-sm mt-0.5">Complete the OTP verification as normal</div>
+                </div>
+            </div>
+            <div class="flex gap-4 items-start">
+                <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 mt-0.5">3</div>
+                <div>
+                    <div class="text-white font-medium">Come back here</div>
+                    <div class="text-slate-400 text-sm mt-0.5">Tap "I've logged in" below after completing login</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Open portal button -->
+        <a href="https://portal.timezonegames.com" target="_blank" rel="noopener"
+            id="open-btn"
+            onclick="stepTwo()"
+            class="block w-full btn-primary py-3 rounded-xl text-white font-medium mb-4">
+            Open Timezone Portal →
+        </a>
+
+        <!-- Step 2: return button (hidden until portal opened) -->
+        <div id="return-section" class="hidden">
+            <div class="border-t border-slate-700 pt-4 mt-2">
+                <p class="text-slate-400 text-sm mb-3">Logged in to Timezone? Come back here:</p>
+                <a href="/timezone/landing"
+                    class="block w-full py-3 rounded-xl font-medium text-white border border-green-700 bg-green-900/30 hover:bg-green-900/50 transition">
+                    ✅ I've logged in — capture my session
+                </a>
+            </div>
+        </div>
+
+        <p class="text-slate-600 text-xs mt-4">Your session will be saved for ~30 days</p>
+    </div>
+</div>
+
+<script>
+function stepTwo() {
+    setTimeout(() => {
+        document.getElementById('return-section').classList.remove('hidden');
+        document.getElementById('open-btn').textContent = '↗ Re-open Timezone Portal';
+        document.getElementById('open-btn').classList.remove('btn-primary');
+        document.getElementById('open-btn').classList.add('border', 'border-indigo-700', 'bg-transparent', 'text-indigo-400');
+    }, 1500);
+}
+
+// If they already opened it (came back to this page), show step 2 immediately
+if (document.referrer.includes('timezonegames.com')) {
+    stepTwo();
+}
+</script>
+
+{% endblock %}

@@ -14,6 +14,7 @@ services:
       - SECRET_KEY=change_me_to_something_random_and_long_please
       # Optional: set a custom DB path
       # - DB_PATH=/data/koko.db
+      - APP_URL=http://localhost:5055
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 30s
