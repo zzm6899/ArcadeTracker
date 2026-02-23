@@ -65,7 +65,10 @@
                     </div>
                 </div>
                 <div class="flex items-center justify-between mt-3">
-                    <span class="text-xs text-slate-500">{{ card.last_updated or 'Pending...' }}</span>
+                    <div class="flex items-center gap-1.5 text-xs text-slate-500">
+                        <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block"></span>
+                        <span title="{{ card.last_updated }}">{{ card.last_updated | string | truncate(16, True, '') if card.last_updated else 'Pending first poll...' }}</span>
+                    </div>
                     <div class="flex gap-2">
                         <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-purple-400 px-3 py-1 border border-purple-900 rounded-lg">View →</a>
                         <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
@@ -122,7 +125,10 @@
                     </div>
                 </div>
                 <div class="flex items-center justify-between mt-3">
-                    <span class="text-xs text-slate-500">{{ card.last_updated or 'Pending...' }}</span>
+                    <div class="flex items-center gap-1.5 text-xs text-slate-500">
+                        <span class="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse inline-block"></span>
+                        <span title="{{ card.last_updated }}">{{ card.last_updated | string | truncate(16, True, '') if card.last_updated else 'Pending first poll...' }}</span>
+                    </div>
                     <div class="flex gap-2">
                         <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-yellow-400 px-3 py-1 border border-yellow-900 rounded-lg">View →</a>
                         <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">

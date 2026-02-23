@@ -54,21 +54,35 @@ function renderCards(cards, name) {
         return;
     }
     list.innerHTML = cards.map(card => `
-        <div class="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
-            <div>
-                <div class="flex items-center gap-2 mb-1">
-                    <div class="font-mono font-bold text-white">${card.number}</div>
-                    ${card.tier ? `<span class="text-xs px-2 py-0.5 rounded-full font-medium ${
-                        card.tier === 'Platinum' ? 'bg-purple-900/60 text-purple-300 border border-purple-700' :
-                        card.tier === 'Gold' ? 'bg-yellow-900/60 text-yellow-300 border border-yellow-700' :
-                        card.tier === 'Silver' ? 'bg-slate-600 text-slate-300 border border-slate-500' :
-                        'bg-orange-900/60 text-orange-300 border border-orange-700'
-                    }">${card.tier}</span>` : ''}
+        <div class="bg-slate-800 rounded-xl p-4">
+            <div class="flex items-start justify-between gap-3 mb-3">
+                <div>
+                    <div class="flex items-center gap-2 mb-1">
+                        <div class="font-mono font-bold text-white text-lg">${card.number}</div>
+                        ${card.tier ? `<span class="text-xs px-2 py-0.5 rounded-full font-medium ${
+                            card.tier === 'Platinum' ? 'bg-purple-900/60 text-purple-300 border border-purple-700' :
+                            card.tier === 'Gold' ? 'bg-yellow-900/60 text-yellow-300 border border-yellow-700' :
+                            card.tier === 'Silver' ? 'bg-slate-600 text-slate-300 border border-slate-500' :
+                            'bg-orange-900/60 text-orange-300 border border-orange-700'
+                        }">${card.tier}</span>` : ''}
+                        ${card.status ? `<span class="text-xs px-2 py-0.5 rounded-full bg-green-900/50 text-green-400 border border-green-800">${card.status}</span>` : ''}
+                    </div>
+                    <div class="text-xs text-slate-500 font-mono">${card.fullCardNumber || ''}</div>
                 </div>
-                <div class="text-sm flex gap-3 flex-wrap">
-                    <span class="text-green-400">💳 $${(card.cashBalance + card.bonusBalance).toFixed(2)}</span>
-                    <span class="text-orange-400">🎫 ${card.tickets} tickets</span>
-                    <span class="text-slate-500 text-xs">${card.country}</span>
+                <span class="text-slate-500 text-xs">${card.country}</span>
+            </div>
+            <div class="grid grid-cols-3 gap-2 mb-3">
+                <div class="bg-slate-900 rounded-lg p-2 text-center">
+                    <div class="text-xs text-slate-500 mb-0.5">Credits</div>
+                    <div class="font-bold text-green-400 text-sm">$${card.cashBalance.toFixed(2)}</div>
+                </div>
+                <div class="bg-slate-900 rounded-lg p-2 text-center">
+                    <div class="text-xs text-slate-500 mb-0.5">Bonus</div>
+                    <div class="font-bold text-yellow-400 text-sm">$${card.bonusBalance.toFixed(2)}</div>
+                </div>
+                <div class="bg-slate-900 rounded-lg p-2 text-center">
+                    <div class="text-xs text-slate-500 mb-0.5">e-Tickets</div>
+                    <div class="font-bold text-orange-400 text-sm">${card.tickets}</div>
                 </div>
             </div>
             <form method="POST" action="/timezone/add-card">
@@ -78,7 +92,7 @@ function renderCards(cards, name) {
                 <input type="hidden" name="tickets" value="${card.tickets}">
                 <input type="hidden" name="tier" value="${card.tier || ''}">
                 <input type="hidden" name="card_label" value="Timezone ${card.number}">
-                <button type="submit" class="btn-primary px-4 py-2 rounded-lg text-sm font-medium text-white">+ Track</button>
+                <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">+ Track this card</button>
             </form>
         </div>
     `).join('');
