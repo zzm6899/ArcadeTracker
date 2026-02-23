@@ -448,8 +448,15 @@ def timezone_extract_token():
                 token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
             sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
             save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'))
-            cards = [{'number': str(c.get('number','')), 'cashBalance': c.get('cashBalance',0),
-                      'bonusBalance': c.get('bonusBalance',0), 'tickets': c.get('tickets', c.get('eTickets',0)),
+            cards = [{'number': str(c.get('number','')), 
+                      'cashBalance': c.get('cashBalance',0),
+                      'bonusBalance': c.get('bonusBalance',0), 
+                      'tickets': c.get('eTickets', c.get('tickets',0)),
+                      'paperTickets': c.get('paperTickets',0),
+                      'cumulativeBalance': c.get('cumulativeBalance',0),
+                      'tier': c.get('tier',''),
+                      'status': c.get('status','Active'),
+                      'fullCardNumber': c.get('fullCardNumber',''),
                       'country': c.get('country','')} for c in guest.get('cards',[])]
             return jsonify({'success': True, 'cards': cards, 'name': guest.get('givenName','')})
 
