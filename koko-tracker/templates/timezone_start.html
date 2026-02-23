@@ -7,72 +7,84 @@
 </div>
 
 <div class="max-w-md mx-auto">
-    <div class="card rounded-2xl p-8 text-center">
-        <div class="text-5xl mb-4">🕹️</div>
-        <h1 class="text-2xl font-bold text-white mb-2">Connect Timezone</h1>
-        <p class="text-slate-400 text-sm mb-8">Follow these steps to link your Timezone account</p>
+    <div class="card rounded-2xl p-8">
+        <div class="text-center mb-6">
+            <div class="text-5xl mb-3">🕹️</div>
+            <h1 class="text-2xl font-bold text-white mb-1">Connect Timezone</h1>
+            <p class="text-slate-400 text-sm">Takes about 1 minute</p>
+        </div>
 
         <!-- Steps -->
-        <div class="text-left space-y-4 mb-8">
+        <div class="space-y-5 mb-8">
+
+            <!-- Step 1 -->
             <div class="flex gap-4 items-start">
-                <div class="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 mt-0.5">1</div>
-                <div>
-                    <div class="text-white font-medium">Open Timezone Portal</div>
-                    <div class="text-slate-400 text-sm mt-0.5">Tap the button below — it opens in your browser</div>
+                <div class="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-sm flex-shrink-0">1</div>
+                <div class="flex-1">
+                    <div class="text-white font-medium mb-1">Open Timezone Portal & log in</div>
+                    <a href="https://portal.timezonegames.com" target="_blank" rel="noopener"
+                        class="inline-block btn-primary px-4 py-2 rounded-lg text-sm text-white font-medium">
+                        Open Timezone Portal →
+                    </a>
+                    <p class="text-slate-500 text-xs mt-1">Complete your phone/email OTP login</p>
                 </div>
             </div>
+
+            <!-- Step 2 -->
             <div class="flex gap-4 items-start">
-                <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 mt-0.5">2</div>
-                <div>
-                    <div class="text-white font-medium">Log in with phone or email</div>
-                    <div class="text-slate-400 text-sm mt-0.5">Complete the OTP verification as normal</div>
+                <div class="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold text-sm flex-shrink-0">2</div>
+                <div class="flex-1">
+                    <div class="text-white font-medium mb-2">Once logged in, paste this into the address bar</div>
+                    <div class="relative">
+                        <div id="bookmarklet-code"
+                            class="bg-slate-900 border border-slate-600 rounded-lg p-3 text-xs font-mono text-yellow-300 break-all select-all cursor-pointer"
+                            onclick="copyCode(this)">javascript:void(function(){var t=null;for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var v=localStorage.getItem(k);if(v&&v.startsWith('eyJ')&&v.split('.').length===3){t=v;break;}if(v){try{var p=JSON.parse(v);var vals=Object.values(p||{});for(var j=0;j<vals.length;j++){if(typeof vals[j]==='string'&&vals[j].startsWith('eyJ')&&vals[j].split('.').length===3){t=vals[j];break;}if(vals[j]&&typeof vals[j]==='object'){var vv=Object.values(vals[j]);for(var l=0;l<vv.length;l++){if(typeof vv[l]==='string'&&vv[l].startsWith('eyJ')&&vv[l].split('.').length===3){t=vv[l];break;}}}if(t)break;}}catch(e){}}}if(t){window.location='{{ app_url }}/timezone/landing?token='+encodeURIComponent(t);}else{alert('Not logged in yet — please log in to Timezone first, then try again.');}})();</div>
+                        <button onclick="copyCode(document.getElementById('bookmarklet-code'))"
+                            class="absolute top-2 right-2 text-xs text-slate-400 hover:text-white bg-slate-700 px-2 py-1 rounded">
+                            Copy
+                        </button>
+                    </div>
+                    <p class="text-slate-500 text-xs mt-2">👆 Tap the code to copy it, then paste it into the Timezone portal's address bar and press Enter</p>
                 </div>
             </div>
+
+            <!-- Step 3 -->
             <div class="flex gap-4 items-start">
-                <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-white font-bold text-sm flex-shrink-0 mt-0.5">3</div>
+                <div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-slate-400 font-bold text-sm flex-shrink-0">3</div>
                 <div>
-                    <div class="text-white font-medium">Come back here</div>
-                    <div class="text-slate-400 text-sm mt-0.5">Tap "I've logged in" below after completing login</div>
+                    <div class="text-slate-400 font-medium">You'll be redirected back here automatically</div>
+                    <p class="text-slate-500 text-xs mt-0.5">Your cards will appear ready to track</p>
                 </div>
             </div>
         </div>
 
-        <!-- Open portal button -->
-        <a href="https://portal.timezonegames.com" target="_blank" rel="noopener"
-            id="open-btn"
-            onclick="stepTwo()"
-            class="block w-full btn-primary py-3 rounded-xl text-white font-medium mb-4">
-            Open Timezone Portal →
-        </a>
-
-        <!-- Step 2: return button (hidden until portal opened) -->
-        <div id="return-section" class="hidden">
-            <div class="border-t border-slate-700 pt-4 mt-2">
-                <p class="text-slate-400 text-sm mb-3">Logged in to Timezone? Come back here:</p>
-                <a href="/timezone/landing"
-                    class="block w-full py-3 rounded-xl font-medium text-white border border-green-700 bg-green-900/30 hover:bg-green-900/50 transition">
-                    ✅ I've logged in — capture my session
-                </a>
-            </div>
+        <!-- Mobile tip -->
+        <div class="bg-slate-800 rounded-xl p-4 text-xs text-slate-400">
+            <strong class="text-slate-300">📱 On mobile?</strong> After copying the code, go to the Timezone portal tab, tap the address bar, <strong class="text-slate-300">clear it</strong>, paste the code, and tap Go.
         </div>
-
-        <p class="text-slate-600 text-xs mt-4">Your session will be saved for ~30 days</p>
     </div>
 </div>
 
 <script>
-function stepTwo() {
-    setTimeout(() => {
-        document.getElementById('return-section').classList.remove('hidden');
-        document.getElementById('open-btn').textContent = '↗ Re-open Timezone Portal';
-        document.getElementById('open-btn').classList.remove('btn-primary');
-        document.getElementById('open-btn').classList.add('border', 'border-indigo-700', 'bg-transparent', 'text-indigo-400');
-    }, 1500);
-}
-
-// If they already opened it (came back to this page), show step 2 immediately
-if (document.referrer.includes('timezonegames.com')) {
-    stepTwo();
+function copyCode(el) {
+    const text = el.textContent.trim();
+    navigator.clipboard.writeText(text).then(() => {
+        const orig = el.style.borderColor;
+        el.style.borderColor = '#16a34a';
+        setTimeout(() => el.style.borderColor = orig, 1500);
+        // Show toast
+        const toast = document.createElement('div');
+        toast.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 bg-green-800 text-green-200 px-4 py-2 rounded-lg text-sm z-50';
+        toast.textContent = '✅ Copied to clipboard!';
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 2000);
+    }).catch(() => {
+        // Fallback: select text
+        const range = document.createRange();
+        range.selectNode(el);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(range);
+    });
 }
 </script>
 
