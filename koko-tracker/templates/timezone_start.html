@@ -71,16 +71,7 @@
 document.addEventListener('DOMContentLoaded', function() {
     var appUrl = {{ app_url | tojson }};
 
-    var bookmarklet = 'javascript:void(function(){' +
-        'var t=null;' +
-        'for(var i=0;i<localStorage.length;i++){' +
-            'var k=localStorage.key(i);' +
-            'var v=localStorage.getItem(k);' +
-            'if(v){try{var p=JSON.parse(v);if(p.secret&&p.secret.startsWith("eyJ")){t=p.secret;break;}}catch(e){}}' +
-        '}' +
-        'if(t){window.location="' + '" + appUrl + "' + '/timezone/landing?token="+encodeURIComponent(t);}' +
-        'else{alert("Not logged in to Timezone yet - please log in first.");}' +
-    '})();';
+    var bookmarklet = 'javascript:void(function(){var t=null;for(var i=0;i<localStorage.length;i++){var v=localStorage.getItem(localStorage.key(i));if(v){try{var p=JSON.parse(v);if(p.secret&&p.secret.startsWith(\'eyJ\')){t=p.secret;break;}}catch(e){}}}if(t){window.location=\''+appUrl+'/timezone/landing?token=\'+encodeURIComponent(t);}else{alert(\'Not logged in yet!\');}})();';
 
     var display = document.getElementById('bookmarklet-display');
     if (display) display.textContent = bookmarklet;
