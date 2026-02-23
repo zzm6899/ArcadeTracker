@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Register – Koko Tracker{% endblock %}
+{% block content %}
+<div class="max-w-sm mx-auto mt-16">
+    <div class="card rounded-2xl p-8">
+        <div class="text-center mb-8">
+            <div class="text-5xl mb-3">🎮</div>
+            <h1 class="text-2xl font-bold text-white">Create Account</h1>
+            <p class="text-slate-400 text-sm mt-1">Start tracking your Koko card</p>
+        </div>
+        <form method="POST" class="space-y-4">
+            <div>
+                <label class="block text-sm text-slate-400 mb-1">Username</label>
+                <input name="username" type="text" required
+                    class="input-field w-full px-4 py-2.5 rounded-lg text-sm" placeholder="choose a username">
+            </div>
+            <div>
+                <label class="block text-sm text-slate-400 mb-1">Password</label>
+                <input name="password" type="password" required
+                    class="input-field w-full px-4 py-2.5 rounded-lg text-sm" placeholder="••••••••">
+            </div>
+            <button type="submit" class="btn-primary w-full py-2.5 rounded-lg text-sm font-medium text-white transition">
+                Create Account
+            </button>
+        </form>
+        <p class="text-center text-sm text-slate-500 mt-4">
+            Already have an account? <a href="/login" class="text-indigo-400 hover:text-indigo-300">Sign in</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

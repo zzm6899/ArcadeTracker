@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Koko Tracker{% endblock %}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
+    <style>
+        body { background: #0f172a; color: #e2e8f0; }
+        .card { background: #1e293b; border: 1px solid #334155; }
+        .btn-primary { background: #6366f1; }
+        .btn-primary:hover { background: #4f46e5; }
+        .btn-danger { background: #dc2626; }
+        .btn-danger:hover { background: #b91c1c; }
+        .input-field { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; }
+        .input-field:focus { outline: none; border-color: #6366f1; }
+        .flash-success { background: #166534; border: 1px solid #16a34a; }
+        .flash-error { background: #7f1d1d; border: 1px solid #dc2626; }
+        .stat-card { background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); }
+    </style>
+</head>
+<body class="min-h-screen">
+    <nav class="border-b border-slate-700 px-6 py-4 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <span class="text-2xl">🎮</span>
+            <span class="font-bold text-lg text-indigo-400">Koko Tracker</span>
+        </div>
+        {% if session.user_id %}
+        <div class="flex items-center gap-4">
+            <span class="text-slate-400 text-sm">{{ user.username if user else '' }}</span>
+            <a href="/logout" class="text-sm text-slate-400 hover:text-white transition">Logout</a>
+        </div>
+        {% endif %}
+    </nav>
+
+    <div class="max-w-5xl mx-auto px-4 py-6">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        {% for category, message in messages %}
+        <div class="mb-4 px-4 py-3 rounded-lg flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+        {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

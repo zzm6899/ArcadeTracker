@@ -1,0 +1,245 @@
+{% extends "base.html" %}
+{% block title %}{{ card.card_label or card.card_number or 'Card' }} – Koko Tracker{% endblock %}
+{% block content %}
+
+<div class="flex items-center gap-4 mb-6">
+    <a href="/dashboard" class="text-slate-400 hover:text-white transition">← Dashboard</a>
+</div>
+
+<div class="card rounded-2xl p-6 mb-6">
+    <div class="flex items-start justify-between">
+        <div>
+            <div class="text-xs text-indigo-400 font-medium uppercase tracking-wider mb-1">Game Card</div>
+            <h1 class="text-2xl font-bold text-white">{{ card.card_label or card.card_number or card.card_token }}</h1>
+            {% if card.card_number %}
+            <p class="text-slate-500 text-sm mt-0.5 font-mono">{{ card.card_number }}</p>
+            {% endif %}
+        </div>
+        <span class="text-3xl">🎰</span>
+    </div>
+    
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6" id="stats-container">
+        <div class="bg-slate-800 rounded-xl p-4">
+            <div class="text-xs text-slate-400 mb-1">Cash Balance</div>
+            <div class="font-bold text-green-400 text-2xl" id="stat-balance">–</div>
+        </div>
+        <div class="bg-slate-800 rounded-xl p-4">
+            <div class="text-xs text-slate-400 mb-1">Cash Bonus</div>
+            <div class="font-bold text-yellow-400 text-2xl" id="stat-bonus">–</div>
+        </div>
+        <div class="bg-slate-800 rounded-xl p-4">
+            <div class="text-xs text-slate-400 mb-1">Points</div>
+            <div class="font-bold text-purple-400 text-2xl" id="stat-points">–</div>
+        </div>
+        <div class="bg-slate-800 rounded-xl p-4">
+            <div class="text-xs text-slate-400 mb-1">Spent (24h)</div>
+            <div class="font-bold text-red-400 text-2xl" id="stat-spent">–</div>
+        </div>
+    </div>
+</div>
+
+<!-- Charts -->
+<div class="card rounded-2xl p-6 mb-6">
+    <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <h2 class="text-lg font-bold text-white">Balance History</h2>
+        <div class="flex gap-2">
+            <button onclick="loadChart('day')" id="btn-day"
+                class="period-btn active px-4 py-1.5 rounded-lg text-sm font-medium border transition">24h</button>
+            <button onclick="loadChart('week')" id="btn-week"
+                class="period-btn px-4 py-1.5 rounded-lg text-sm font-medium border transition">7 Days</button>
+            <button onclick="loadChart('month')" id="btn-month"
+                class="period-btn px-4 py-1.5 rounded-lg text-sm font-medium border transition">30 Days</button>
+        </div>
+    </div>
+    <div class="relative" style="height: 300px;">
+        <canvas id="balanceChart"></canvas>
+        <div id="chart-loading" class="absolute inset-0 flex items-center justify-center text-slate-400">
+            Loading chart...
+        </div>
+        <div id="chart-empty" class="hidden absolute inset-0 flex flex-col items-center justify-center text-slate-400">
+            <div class="text-4xl mb-2">📊</div>
+            <p>Not enough data yet. Check back soon!</p>
+            <p class="text-sm mt-1">Polling runs every 60 seconds.</p>
+        </div>
+    </div>
+</div>
+
+<div class="card rounded-2xl p-6">
+    <h2 class="text-lg font-bold text-white mb-6">Points History</h2>
+    <div class="relative" style="height: 200px;">
+        <canvas id="pointsChart"></canvas>
+    </div>
+</div>
+
+<style>
+.period-btn {
+    background: #1e293b;
+    border-color: #334155;
+    color: #94a3b8;
+}
+.period-btn.active {
+    background: #4f46e5;
+    border-color: #6366f1;
+    color: white;
+}
+.period-btn:hover:not(.active) {
+    border-color: #6366f1;
+    color: #a5b4fc;
+}
+</style>
+
+<script>
+const CARD_ID = {{ card.id }};
+let balanceChart, pointsChart;
+
+const chartDefaults = {
+    plugins: {
+        legend: { labels: { color: '#94a3b8', font: { size: 11 } } },
+        tooltip: {
+            backgroundColor: '#1e293b',
+            borderColor: '#334155',
+            borderWidth: 1,
+            titleColor: '#e2e8f0',
+            bodyColor: '#94a3b8',
+        }
+    },
+    scales: {
+        x: {
+            ticks: { color: '#475569', maxTicksLimit: 8, font: { size: 10 } },
+            grid: { color: '#1e293b' },
+        },
+        y: {
+            ticks: { color: '#475569', font: { size: 10 } },
+            grid: { color: '#1e293b' },
+        }
+    },
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 400 }
+};
+
+function formatLabel(ts) {
+    const d = new Date(ts + 'Z');
+    return d.toLocaleString('en-AU', { 
+        month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit'
+    });
+}
+
+async function loadStats() {
+    try {
+        const r = await fetch(`/api/cards/${CARD_ID}/stats`);
+        const d = await r.json();
+        if (d.latest) {
+            document.getElementById('stat-balance').textContent = '$' + (d.latest.cash_balance || 0).toFixed(2);
+            document.getElementById('stat-bonus').textContent = '$' + (d.latest.cash_bonus || 0).toFixed(2);
+            document.getElementById('stat-points').textContent = d.latest.points || 0;
+        }
+        if (d.spent_24h !== null) {
+            const spent = d.spent_24h;
+            document.getElementById('stat-spent').textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
+            document.getElementById('stat-spent').className = spent > 0 
+                ? 'font-bold text-red-400 text-2xl' 
+                : 'font-bold text-green-400 text-2xl';
+        }
+    } catch(e) { console.error(e); }
+}
+
+async function loadChart(period = 'day') {
+    // Update active button
+    document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(`btn-${period}`).classList.add('active');
+
+    document.getElementById('chart-loading').classList.remove('hidden');
+    document.getElementById('chart-empty').classList.add('hidden');
+
+    try {
+        const r = await fetch(`/api/cards/${CARD_ID}/history?period=${period}`);
+        const d = await r.json();
+        
+        document.getElementById('chart-loading').classList.add('hidden');
+        
+        if (!d.labels || d.labels.length < 2) {
+            document.getElementById('chart-empty').classList.remove('hidden');
+            return;
+        }
+
+        const labels = d.labels.map(formatLabel);
+
+        // Balance chart
+        if (balanceChart) balanceChart.destroy();
+        const ctx1 = document.getElementById('balanceChart').getContext('2d');
+        balanceChart = new Chart(ctx1, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [
+                    {
+                        label: 'Cash Balance',
+                        data: d.cash_balance,
+                        borderColor: '#4ade80',
+                        backgroundColor: 'rgba(74,222,128,0.08)',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: d.labels.length > 50 ? 0 : 3,
+                        borderWidth: 2,
+                    },
+                    {
+                        label: 'Cash Bonus',
+                        data: d.cash_bonus,
+                        borderColor: '#facc15',
+                        backgroundColor: 'rgba(250,204,21,0.08)',
+                        fill: true,
+                        tension: 0.3,
+                        pointRadius: d.labels.length > 50 ? 0 : 3,
+                        borderWidth: 2,
+                    }
+                ]
+            },
+            options: {
+                ...chartDefaults,
+                scales: {
+                    ...chartDefaults.scales,
+                    y: { ...chartDefaults.scales.y, ticks: { ...chartDefaults.scales.y.ticks, callback: v => '$' + v.toFixed(2) } }
+                }
+            }
+        });
+
+        // Points chart
+        if (pointsChart) pointsChart.destroy();
+        const ctx2 = document.getElementById('pointsChart').getContext('2d');
+        pointsChart = new Chart(ctx2, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label: 'Points',
+                    data: d.points,
+                    borderColor: '#c084fc',
+                    backgroundColor: 'rgba(192,132,252,0.08)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: d.labels.length > 50 ? 0 : 3,
+                    borderWidth: 2,
+                }]
+            },
+            options: chartDefaults
+        });
+    } catch(e) {
+        document.getElementById('chart-loading').classList.add('hidden');
+        console.error(e);
+    }
+}
+
+loadStats();
+loadChart('day');
+
+// Auto refresh every minute
+setInterval(() => {
+    loadStats();
+    const active = document.querySelector('.period-btn.active');
+    if (active) loadChart(active.id.replace('btn-', ''));
+}, 60000);
+</script>
+
+{% endblock %}

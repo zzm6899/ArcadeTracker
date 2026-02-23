@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  koko-tracker:
+    build: .
+    container_name: koko-tracker
+    restart: unless-stopped
+    ports:
+      - "5055:5000"        # Change 5055 to whatever port you want on TrueNAS
+    volumes:
+      - koko-data:/data   # Persistent SQLite database
+    environment:
+      - POLL_INTERVAL=60   # How often to poll (seconds). Default: 60
+      - SECRET_KEY=change_me_to_something_random_and_long_please
+      # Optional: set a custom DB path
+      # - DB_PATH=/data/koko.db
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  koko-data:
+    driver: local

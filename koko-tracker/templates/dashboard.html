@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Dashboard – Koko Tracker{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-8">
+    <div>
+        <h1 class="text-2xl font-bold text-white">My Cards</h1>
+        <p class="text-slate-400 text-sm mt-1">Polling every 60 seconds automatically</p>
+    </div>
+    <button onclick="document.getElementById('add-card-modal').classList.remove('hidden')"
+        class="btn-primary px-4 py-2 rounded-lg text-sm font-medium text-white flex items-center gap-2">
+        <span>+</span> Add Card
+    </button>
+</div>
+
+{% if cards %}
+<div class="grid gap-4 md:grid-cols-2">
+    {% for card in cards %}
+    <div class="card rounded-2xl p-6 hover:border-indigo-500 transition cursor-pointer"
+         onclick="window.location='/cards/{{ card.id }}'">
+        <div class="flex items-start justify-between mb-4">
+            <div>
+                <div class="text-xs text-indigo-400 font-medium uppercase tracking-wider mb-1">Game Card</div>
+                <h2 class="font-bold text-white text-lg leading-tight">
+                    {{ card.card_label or card.card_number or card.card_token }}
+                </h2>
+                {% if card.card_number and card.card_label %}
+                <p class="text-slate-500 text-xs mt-0.5">{{ card.card_number }}</p>
+                {% endif %}
+            </div>
+            <span class="text-2xl">🎰</span>
+        </div>
+        
+        <div class="grid grid-cols-3 gap-3">
+            <div class="bg-slate-800 rounded-xl p-3 text-center">
+                <div class="text-xs text-slate-400 mb-1">Cash Balance</div>
+                <div class="font-bold text-green-400 text-lg">
+                    ${{ "%.2f"|format(card.cash_balance or 0) }}
+                </div>
+            </div>
+            <div class="bg-slate-800 rounded-xl p-3 text-center">
+                <div class="text-xs text-slate-400 mb-1">Cash Bonus</div>
+                <div class="font-bold text-yellow-400 text-lg">
+                    ${{ "%.2f"|format(card.cash_bonus or 0) }}
+                </div>
+            </div>
+            <div class="bg-slate-800 rounded-xl p-3 text-center">
+                <div class="text-xs text-slate-400 mb-1">Points</div>
+                <div class="font-bold text-purple-400 text-lg">
+                    {{ card.points or 0 }}
+                </div>
+            </div>
+        </div>
+        
+        <div class="flex items-center justify-between mt-4">
+            <span class="text-xs text-slate-500">
+                Updated: {{ card.last_updated or 'Never' }}
+            </span>
+            <div class="flex gap-2">
+                <a href="/cards/{{ card.id }}" 
+                   class="text-xs text-indigo-400 hover:text-indigo-300 px-3 py-1 border border-indigo-800 rounded-lg"
+                   onclick="event.stopPropagation()">
+                    View History →
+                </a>
+                <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
+                    <button type="submit" onclick="return confirm('Remove this card?')"
+                        class="text-xs text-red-400 hover:text-red-300 px-3 py-1 border border-red-900 rounded-lg">
+                        Remove
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% else %}
+<div class="card rounded-2xl p-16 text-center">
+    <div class="text-6xl mb-4">🎮</div>
+    <h2 class="text-xl font-bold text-white mb-2">No cards yet</h2>
+    <p class="text-slate-400 mb-6">Add your Koko card to start tracking your balance history</p>
+    <button onclick="document.getElementById('add-card-modal').classList.remove('hidden')"
+        class="btn-primary px-6 py-2.5 rounded-lg text-sm font-medium text-white">
+        Add Your First Card
+    </button>
+</div>
+{% endif %}
+
+<!-- Add Card Modal -->
+<div id="add-card-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+    <div class="card rounded-2xl p-8 w-full max-w-md">
+        <div class="flex items-center justify-between mb-6">
+            <h2 class="text-lg font-bold text-white">Add Game Card</h2>
+            <button onclick="document.getElementById('add-card-modal').classList.add('hidden')"
+                class="text-slate-400 hover:text-white text-xl">✕</button>
+        </div>
+        
+        <form method="POST" action="/cards/add" class="space-y-4">
+            <div>
+                <label class="block text-sm text-slate-400 mb-1">Card Token <span class="text-red-400">*</span></label>
+                <input name="card_token" type="text" required
+                    class="input-field w-full px-4 py-2.5 rounded-lg text-sm font-mono" 
+                    placeholder="e.g. 1ag9ukYM">
+                <p class="text-xs text-slate-500 mt-1">
+                    Found in the URL: <span class="font-mono text-slate-400">...BalanceMobile.aspx?i=<span class="text-yellow-400">TOKEN</span></span>
+                </p>
+            </div>
+            <div>
+                <label class="block text-sm text-slate-400 mb-1">Nickname (optional)</label>
+                <input name="card_label" type="text"
+                    class="input-field w-full px-4 py-2.5 rounded-lg text-sm" 
+                    placeholder="e.g. My Main Card">
+            </div>
+            
+            <div class="bg-slate-800 rounded-xl p-4 text-xs text-slate-400">
+                <strong class="text-slate-300">How to find your token:</strong><br>
+                Open your Koko balance page in a browser. The URL will look like:<br>
+                <span class="font-mono text-yellow-400 break-all">...BalanceMobile.aspx?i=YOURTOKEN</span><br>
+                Copy the part after <span class="font-mono">?i=</span>
+            </div>
+            
+            <div class="flex gap-3 pt-2">
+                <button type="button" 
+                    onclick="document.getElementById('add-card-modal').classList.add('hidden')"
+                    class="flex-1 py-2.5 rounded-lg text-sm border border-slate-600 text-slate-300 hover:bg-slate-700 transition">
+                    Cancel
+                </button>
+                <button type="submit" class="flex-1 btn-primary py-2.5 rounded-lg text-sm font-medium text-white transition">
+                    Add Card
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
