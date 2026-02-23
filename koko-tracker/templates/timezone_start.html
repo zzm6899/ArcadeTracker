@@ -36,10 +36,12 @@
                 <div class="flex-1">
                     <div class="text-white font-medium mb-2">Once logged in, paste this into the address bar</div>
                     <div class="relative">
-                        <div id="bookmarklet-code"
-                            class="bg-slate-900 border border-slate-600 rounded-lg p-3 text-xs font-mono text-yellow-300 break-all select-all cursor-pointer"
-                            onclick="copyCode(this)">javascript:void(function(){var t=null;for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);var v=localStorage.getItem(k);if(v&&v.startsWith('eyJ')&&v.split('.').length===3){t=v;break;}if(v){try{var p=JSON.parse(v);var vals=Object.values(p||{});for(var j=0;j<vals.length;j++){if(typeof vals[j]==='string'&&vals[j].startsWith('eyJ')&&vals[j].split('.').length===3){t=vals[j];break;}if(vals[j]&&typeof vals[j]==='object'){var vv=Object.values(vals[j]);for(var l=0;l<vv.length;l++){if(typeof vv[l]==='string'&&vv[l].startsWith('eyJ')&&vv[l].split('.').length===3){t=vv[l];break;}}}if(t)break;}}catch(e){}}}if(t){window.location='{{ app_url }}/timezone/landing?token='+encodeURIComponent(t);}else{alert('Not logged in yet — please log in to Timezone first, then try again.');}})();</div>
-                        <button onclick="copyCode(document.getElementById('bookmarklet-code'))"
+                        <div id="bookmarklet-display"
+                            class="bg-slate-900 border border-slate-600 rounded-lg p-3 text-xs font-mono text-yellow-300 break-all cursor-pointer"
+                            onclick="copyCode()">
+                            <!-- Code rendered by JS to avoid HTML encoding issues -->
+                        </div>
+                        <button onclick="copyCode()"
                             class="absolute top-2 right-2 text-xs text-slate-400 hover:text-white bg-slate-700 px-2 py-1 rounded">
                             Copy
                         </button>
@@ -66,9 +68,41 @@
 </div>
 
 <script>
-function copyCode(el) {
-    const text = el.textContent.trim();
-    navigator.clipboard.writeText(text).then(() => {
+// Build bookmarklet as a real JS string - no HTML encoding issues
+const APP_URL = "{{ app_url }}";
+const BOOKMARKLET = "javascript:void(function(){" +
+    "var t=null;" +
+    "for(var i=0;i<localStorage.length;i++){" +
+        "var k=localStorage.key(i);" +
+        "var v=localStorage.getItem(k);" +
+        "if(v&&v.startsWith('eyJ')&&v.split('.').length===3){t=v;break;}" +
+        "if(v){try{" +
+            "var p=JSON.parse(v);" +
+            "var vals=Object.values(p||{});" +
+            "for(var j=0;j<vals.length;j++){" +
+                "if(typeof vals[j]==='string'&&vals[j].startsWith('eyJ')&&vals[j].split('.').length===3){t=vals[j];break;}" +
+                "if(vals[j]&&typeof vals[j]==='object'){" +
+                    "var vv=Object.values(vals[j]);" +
+                    "for(var l=0;l<vv.length;l++){" +
+                        "if(typeof vv[l]==='string'&&vv[l].startsWith('eyJ')&&vv[l].split('.').length===3){t=vv[l];break;}" +
+                    "}" +
+                "}" +
+                "if(t)break;" +
+            "}" +
+        "}catch(e){}}}" +
+    "}" +
+    "if(t){window.location='" + APP_URL + "/timezone/landing?token='+encodeURIComponent(t);}" +
+    "else{alert('Not logged in yet — log in to Timezone first, then try again.');}" +
+"})();";
+
+// Render bookmarklet text into the div (textContent avoids HTML encoding)
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('bookmarklet-display').textContent = BOOKMARKLET;
+});
+
+function copyCode() {
+    const el = document.getElementById('bookmarklet-display');
+    navigator.clipboard.writeText(BOOKMARKLET).then(() => {
         const orig = el.style.borderColor;
         el.style.borderColor = '#16a34a';
         setTimeout(() => el.style.borderColor = orig, 1500);
