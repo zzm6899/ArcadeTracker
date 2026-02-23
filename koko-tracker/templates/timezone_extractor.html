@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connecting Timezone...</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>body { background: #0f172a; color: #e2e8f0; }</style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-6">
+<div class="max-w-sm w-full text-center">
+    <div id="state-loading">
+        <div class="text-5xl mb-4">🔐</div>
+        <h2 class="text-xl font-bold text-white mb-2">Capturing your session...</h2>
+        <p class="text-slate-400 text-sm mb-6">Extracting your Timezone credentials</p>
+        <div class="flex justify-center">
+            <div class="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+        </div>
+    </div>
+    <div id="state-success" class="hidden">
+        <div class="text-5xl mb-4">✅</div>
+        <h2 class="text-xl font-bold text-white mb-2">Session captured!</h2>
+        <p class="text-slate-400 text-sm">Returning to your dashboard...</p>
+    </div>
+    <div id="state-error" class="hidden">
+        <div class="text-5xl mb-4">❌</div>
+        <h2 class="text-xl font-bold text-white mb-2">Could not capture session</h2>
+        <p id="error-msg" class="text-slate-400 text-sm mb-4"></p>
+        <button onclick="window.parent.postMessage({type:'TZ_EXTRACTOR_FAILED'}, '*')"
+            class="px-4 py-2 rounded-lg bg-slate-700 text-sm text-slate-300 hover:bg-slate-600">
+            Go back
+        </button>
+    </div>
+</div>
+
+<script>
+// ── Strategy: scan all available token sources ───────────────────────────────
+// This page runs on our domain (same as the parent), so:
+//   1. It can postMessage to parent freely
+//   2. It can call our own /timezone/extract-token API
+//   3. It scans window.name, localStorage, sessionStorage for JWT tokens
+
+function showState(state, msg) {
+    document.getElementById('state-loading').classList.add('hidden');
+    document.getElementById('state-success').classList.add('hidden');
+    document.getElementById('state-error').classList.add('hidden');
+    document.getElementById(`state-${state}`).classList.remove('hidden');
+    if (msg && state === 'error') document.getElementById('error-msg').textContent = msg;
+}
+
+function isJWT(str) {
+    return typeof str === 'string' && str.startsWith('eyJ') && str.split('.').length === 3;
+}
+
+function scanStorage(storage) {
+    try {
+        for (let i = 0; i < storage.length; i++) {
+            const key = storage.key(i);
+            const val = storage.getItem(key);
+            if (isJWT(val)) return val;
+            // Sometimes stored as JSON with token inside
+            try {
+                const parsed = JSON.parse(val);
+                if (parsed && isJWT(parsed.access_token)) return parsed.access_token;
+                if (parsed && isJWT(parsed.token)) return parsed.token;
+                if (parsed && isJWT(parsed.id_token)) return parsed.id_token;
+                // Azure AD B2C MSAL cache format
+                if (parsed && parsed.secret && isJWT(parsed.secret)) return parsed.secret;
+            } catch(e) {}
+        }
+    } catch(e) {}
+    return null;
+}
+
+function scanWindowName() {
+    try {
+        if (window.name && isJWT(window.name)) return window.name;
+        const parsed = JSON.parse(window.name);
+        if (parsed && isJWT(parsed.token)) return parsed.token;
+    } catch(e) {}
+    return null;
+}
+
+function getAllCookies() {
+    const result = {};
+    document.cookie.split(';').forEach(c => {
+        const [k, ...v] = c.trim().split('=');
+        if (k) result[k.trim()] = v.join('=');
+    });
+    return result;
+}
+
+async function extractAndSend(token, cookies) {
+    try {
+        const resp = await fetch('/timezone/extract-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bearer_token: token, cookies: cookies })
+        });
+        const result = await resp.json();
+        if (result.success) {
+            showState('success');
+            // postMessage to parent with full result
+            window.parent.postMessage({
+                type: 'TZ_TOKEN',
+                token: token,
+                cookies: cookies,
+                cards: result.cards,
+                name: result.name
+            }, '*');
+            setTimeout(() => window.parent.postMessage({ type: 'TZ_DONE' }, '*'), 1500);
+        } else {
+            showState('error', result.error || 'Validation failed. Please try logging in again.');
+            window.parent.postMessage({ type: 'TZ_EXTRACTOR_FAILED', error: result.error }, '*');
+        }
+    } catch(e) {
+        showState('error', 'Network error: ' + e.message);
+        window.parent.postMessage({ type: 'TZ_EXTRACTOR_FAILED', error: e.message }, '*');
+    }
+}
+
+async function run() {
+    const cookies = getAllCookies();
+    let token = null;
+
+    // 1. Check localStorage (MSAL/Azure AD B2C stores tokens here)
+    token = scanStorage(localStorage);
+    if (token) { console.log('[Extractor] Found token in localStorage'); }
+
+    // 2. Check sessionStorage
+    if (!token) {
+        token = scanStorage(sessionStorage);
+        if (token) console.log('[Extractor] Found token in sessionStorage');
+    }
+
+    // 3. Check window.name (some B2C flows store state here)
+    if (!token) {
+        token = scanWindowName();
+        if (token) console.log('[Extractor] Found token in window.name');
+    }
+
+    // 4. Check all localStorage keys more aggressively (MSAL cache)
+    if (!token) {
+        try {
+            for (let i = 0; i < localStorage.length; i++) {
+                const key = localStorage.key(i);
+                // MSAL stores tokens under keys like: "msal.token.keys.CLIENT_ID"
+                if (key && (key.includes('msal') || key.includes('login') || key.includes('token') || key.includes('teeg') || key.includes('b2c'))) {
+                    const raw = localStorage.getItem(key);
+                    try {
+                        const obj = JSON.parse(raw);
+                        // Recurse one level
+                        for (const v of Object.values(obj || {})) {
+                            if (isJWT(v)) { token = v; break; }
+                            if (typeof v === 'object' && v !== null) {
+                                for (const vv of Object.values(v)) {
+                                    if (isJWT(vv)) { token = vv; break; }
+                                }
+                            }
+                            if (token) break;
+                        }
+                    } catch(e) {}
+                }
+                if (token) break;
+            }
+        } catch(e) {}
+    }
+
+    if (token) {
+        console.log('[Extractor] Token found, validating with server...');
+        await extractAndSend(token, cookies);
+    } else {
+        // No token found in storage — notify parent to show manual instructions
+        console.log('[Extractor] No token found in any storage');
+        showState('error', 'Session token not found. Please make sure you completed the login on the previous page.');
+        window.parent.postMessage({ type: 'TZ_EXTRACTOR_FAILED', error: 'No token in storage' }, '*');
+    }
+}
+
+// Small delay to let the page settle before scanning
+setTimeout(run, 800);
+</script>
+</body>
+</html>

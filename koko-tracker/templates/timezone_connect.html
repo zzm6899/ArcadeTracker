@@ -1,0 +1,218 @@
+{% extends "base.html" %}
+{% block title %}Connect Timezone – Koko Tracker{% endblock %}
+{% block content %}
+
+<div class="flex items-center gap-4 mb-6">
+    <a href="/dashboard" class="text-slate-400 hover:text-white transition">← Dashboard</a>
+</div>
+
+<div class="max-w-2xl mx-auto">
+    <div class="card rounded-2xl p-6 mb-4">
+        <div class="flex items-center gap-3 mb-3">
+            <span class="text-3xl">🕹️</span>
+            <div>
+                <h1 class="text-xl font-bold text-white">Connect Timezone Account</h1>
+                <p class="text-slate-400 text-sm">Log in below — your session will be saved for ~30 days</p>
+            </div>
+        </div>
+        <div class="bg-slate-800 rounded-xl p-3 text-xs text-slate-400 flex gap-2 items-start">
+            <span class="text-yellow-400 text-base mt-0.5">💡</span>
+            <span>Log in with your phone number or email. Once the login completes, your cards will be detected automatically — no copying needed.</span>
+        </div>
+    </div>
+
+    <!-- Status -->
+    <div id="status-bar" class="hidden rounded-xl px-4 py-3 mb-4 flex items-center gap-3 border">
+        <div id="status-spinner" class="hidden w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin flex-shrink-0"></div>
+        <span id="status-text" class="text-sm"></span>
+    </div>
+
+    <!-- Step indicator -->
+    <div id="step-indicator" class="flex items-center gap-2 mb-4 text-xs text-slate-500">
+        <span id="step1" class="flex items-center gap-1"><span class="w-5 h-5 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-xs">1</span> Log in to Timezone</span>
+        <div class="flex-1 h-px bg-slate-700"></div>
+        <span id="step2" class="flex items-center gap-1"><span class="w-5 h-5 rounded-full bg-slate-700 text-slate-400 flex items-center justify-center font-bold text-xs">2</span> Session captured</span>
+        <div class="flex-1 h-px bg-slate-700"></div>
+        <span id="step3" class="flex items-center gap-1"><span class="w-5 h-5 rounded-full bg-slate-700 text-slate-400 flex items-center justify-center font-bold text-xs">3</span> Select cards</span>
+    </div>
+
+    <!-- iframe wrapper -->
+    <div id="iframe-wrapper" class="card rounded-2xl overflow-hidden mb-4" style="height:580px;">
+        <iframe
+            id="tz-iframe"
+            src="https://portal.timezonegames.com"
+            style="width:100%;height:100%;border:none;background:#fff;"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-top-navigation allow-modals"
+        ></iframe>
+    </div>
+
+    <!-- Manual fallback button (shows after 12s) -->
+    <div id="manual-btn-wrap" class="hidden text-center mb-4">
+        <p class="text-slate-500 text-xs mb-2">Logged in but nothing happened?</p>
+        <button onclick="triggerExtractor()"
+            class="btn-primary px-5 py-2.5 rounded-xl text-white text-sm font-medium">
+            ✅ I've logged in — capture my session
+        </button>
+    </div>
+
+    <!-- Card selection panel -->
+    <div id="card-panel" class="hidden card rounded-2xl p-6 mt-4">
+        <h2 class="text-lg font-bold text-white mb-1">🎴 Your Powercards</h2>
+        <p class="text-slate-400 text-sm mb-4">Select which cards to track</p>
+        <div id="card-list" class="space-y-3"></div>
+        <div class="mt-4 pt-4 border-t border-slate-700">
+            <a href="/dashboard" class="text-sm text-slate-400 hover:text-white">← Back to dashboard</a>
+        </div>
+    </div>
+</div>
+
+<style>
+.step-done span:first-child { background: #16a34a !important; }
+.step-active span:first-child { background: #6366f1 !important; }
+</style>
+
+<script>
+const iframe = document.getElementById('tz-iframe');
+let tokenCaptured = false;
+let extractorTriggered = false;
+
+function showStatus(msg, type='info', loading=false) {
+    const bar = document.getElementById('status-bar');
+    const text = document.getElementById('status-text');
+    const spin = document.getElementById('status-spinner');
+    bar.classList.remove('hidden');
+    const styles = {
+        info:    'border-indigo-700 bg-indigo-900/30',
+        success: 'border-green-700 bg-green-900/30',
+        error:   'border-red-700 bg-red-900/30',
+        warning: 'border-yellow-700 bg-yellow-900/30',
+    };
+    bar.className = `rounded-xl px-4 py-3 mb-4 flex items-center gap-3 border ${styles[type] || styles.info}`;
+    text.className = `text-sm ${type==='success'?'text-green-300':type==='error'?'text-red-300':type==='warning'?'text-yellow-300':'text-indigo-300'}`;
+    text.textContent = msg;
+    spin.classList.toggle('hidden', !loading);
+}
+
+function setStep(n) {
+    ['step1','step2','step3'].forEach((id, i) => {
+        const el = document.getElementById(id);
+        el.className = 'flex items-center gap-1 ' + (i+1 < n ? 'step-done text-green-400' : i+1 === n ? 'step-active text-white' : 'text-slate-500');
+        const circle = el.querySelector('span');
+        if (i+1 < n) circle.textContent = '✓';
+    });
+}
+
+// ── Listen for postMessage from extractor ─────────────────────────────────
+window.addEventListener('message', async (event) => {
+    // Accept messages from same origin (our extractor page) or Timezone
+    const allowed = [window.location.origin, 'https://portal.timezonegames.com', 'https://identity.teeg.cloud'];
+    if (!allowed.some(o => event.origin.startsWith(o.split('/').slice(0,3).join('/')))) {
+        // Still log for debugging
+        if (event.data && event.data.type) console.log('[msg from]', event.origin, event.data.type);
+        return;
+    }
+
+    const d = event.data;
+    if (!d || !d.type) return;
+
+    console.log('[postMessage]', d.type, d);
+
+    if (d.type === 'TZ_TOKEN' && !tokenCaptured) {
+        tokenCaptured = true;
+        setStep(3);
+        showStatus(`✅ Connected! Loading your cards...`, 'success', true);
+        // Server already saved the session in extract-token endpoint
+        // Show the cards from the message
+        if (d.cards && d.cards.length) {
+            showStatus(`✅ Connected as ${d.name || 'user'}! Found ${d.cards.length} card(s).`, 'success');
+            showCards(d.cards);
+        }
+    }
+
+    if (d.type === 'TZ_EXTRACTOR_FAILED') {
+        tokenCaptured = false;
+        extractorTriggered = false;
+        // Restore iframe to portal
+        iframe.src = 'https://portal.timezonegames.com';
+        showStatus('Could not auto-capture. Please log in and try the button below.', 'warning');
+        document.getElementById('manual-btn-wrap').classList.remove('hidden');
+    }
+
+    if (d.type === 'TZ_DONE') {
+        showStatus('All done! You can now go to your dashboard.', 'success');
+    }
+});
+
+// ── Detect when iframe lands on portal (post-login) ───────────────────────
+iframe.addEventListener('load', () => {
+    try {
+        const url = iframe.contentWindow.location.href;
+        console.log('[iframe load]', url);
+        if (url.includes('portal.timezonegames.com') && url !== 'https://portal.timezonegames.com/' && !tokenCaptured) {
+            // User has landed on a portal page after login
+            setStep(2);
+            showStatus('Login detected! Capturing session...', 'info', true);
+            setTimeout(triggerExtractor, 1500);
+        }
+    } catch(e) {
+        // Cross-origin during login flow — expected
+    }
+
+    // If this load is our own extractor page, it will self-execute
+});
+
+// ── Trigger extractor ─────────────────────────────────────────────────────
+function triggerExtractor() {
+    if (extractorTriggered) return;
+    extractorTriggered = true;
+    setStep(2);
+    showStatus('Capturing session...', 'info', true);
+    // Navigate iframe to our extractor (same domain = can postMessage back)
+    iframe.src = '/timezone/extractor';
+}
+
+// ── Show manual button after 12 seconds ───────────────────────────────────
+setTimeout(() => {
+    if (!tokenCaptured) {
+        document.getElementById('manual-btn-wrap').classList.remove('hidden');
+    }
+}, 12000);
+
+// ── Render card selection ─────────────────────────────────────────────────
+function showCards(cards) {
+    const panel = document.getElementById('card-panel');
+    const list = document.getElementById('card-list');
+    panel.classList.remove('hidden');
+    document.getElementById('iframe-wrapper').style.opacity = '0.3';
+    document.getElementById('iframe-wrapper').style.pointerEvents = 'none';
+    document.getElementById('manual-btn-wrap').classList.add('hidden');
+
+    list.innerHTML = cards.map(card => {
+        const total = (card.cashBalance + card.bonusBalance).toFixed(2);
+        return `
+        <div class="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-4">
+            <div>
+                <div class="font-mono font-bold text-white text-lg">${card.number}</div>
+                <div class="flex gap-3 mt-1 text-sm flex-wrap">
+                    <span class="text-green-400">💳 $${total}</span>
+                    <span class="text-orange-400">🎫 ${card.tickets} tickets</span>
+                    <span class="text-slate-500 text-xs">${card.country}</span>
+                </div>
+            </div>
+            <form method="POST" action="/timezone/add-card">
+                <input type="hidden" name="card_number" value="${card.number}">
+                <input type="hidden" name="cash_balance" value="${card.cashBalance}">
+                <input type="hidden" name="bonus_balance" value="${card.bonusBalance}">
+                <input type="hidden" name="tickets" value="${card.tickets}">
+                <input type="hidden" name="card_label" value="Timezone ${card.number}">
+                <button type="submit" class="btn-primary px-4 py-2 rounded-lg text-sm font-medium text-white whitespace-nowrap">
+                    + Track
+                </button>
+            </form>
+        </div>`;
+    }).join('');
+
+    panel.scrollIntoView({ behavior: 'smooth' });
+}
+</script>
+{% endblock %}

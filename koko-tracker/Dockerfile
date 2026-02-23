@@ -7,13 +7,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 COPY templates/ ./templates/
-COPY static/ ./static/
 
-RUN mkdir -p /data
+RUN mkdir -p /data /koko/static
 
 ENV DB_PATH=/data/koko.db
 ENV POLL_INTERVAL=60
-ENV SECRET_KEY=""
 
 EXPOSE 5000
 
