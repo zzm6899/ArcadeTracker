@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Dashboard – Koko Tracker{% endblock %}
+{% block title %}Dashboard – Balance Tracker{% endblock %}
 {% block content %}
 
 <div class="flex items-center justify-between mb-6 flex-wrap gap-3">
@@ -141,27 +141,214 @@
 
 <!-- Add Koko Modal -->
 <div id="add-koko-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-    <div class="card rounded-2xl p-8 w-full max-w-md">
-        <div class="flex items-center justify-between mb-6">
+    <div class="card rounded-2xl p-6 w-full max-w-md">
+        <div class="flex items-center justify-between mb-5">
             <h2 class="text-lg font-bold text-white">Add Koko Card</h2>
-            <button onclick="document.getElementById('add-koko-modal').classList.add('hidden')" class="text-slate-400 hover:text-white text-xl">✕</button>
+            <button onclick="closeModal()" class="text-slate-400 hover:text-white text-xl">✕</button>
         </div>
-        <form method="POST" action="/cards/add" class="space-y-4">
-            <div>
-                <label class="block text-sm text-slate-400 mb-1">Card Token <span class="text-red-400">*</span></label>
-                <input name="card_token" type="text" required class="input-field w-full px-4 py-2.5 rounded-lg text-sm font-mono" placeholder="e.g. 1ag9ukYM">
-                <p class="text-xs text-slate-500 mt-1">From URL: <span class="font-mono">...BalanceMobile.aspx?i=<span class="text-yellow-400">TOKEN</span></span></p>
+
+        <!-- Tab switcher -->
+        <div class="flex gap-2 mb-5 bg-slate-800 rounded-xl p-1">
+            <button onclick="setTab('scan')" id="tab-scan"
+                class="flex-1 py-2 rounded-lg text-sm font-medium transition tab-active">
+                📷 Scan QR Code
+            </button>
+            <button onclick="setTab('manual')" id="tab-manual"
+                class="flex-1 py-2 rounded-lg text-sm font-medium transition text-slate-400">
+                ✏️ Enter Token
+            </button>
+        </div>
+
+        <!-- Scan tab -->
+        <div id="tab-content-scan">
+            <div id="scanner-container" class="relative bg-black rounded-xl overflow-hidden mb-4" style="height:260px;">
+                <video id="scanner-video" class="w-full h-full object-cover" playsinline muted></video>
+                <canvas id="scanner-canvas" class="hidden"></canvas>
+                <!-- Viewfinder overlay -->
+                <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div class="w-48 h-48 border-2 border-white/60 rounded-xl relative">
+                        <div class="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-indigo-400 rounded-tl-lg"></div>
+                        <div class="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-indigo-400 rounded-tr-lg"></div>
+                        <div class="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-indigo-400 rounded-bl-lg"></div>
+                        <div class="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-indigo-400 rounded-br-lg"></div>
+                    </div>
+                </div>
+                <div id="scanner-status" class="absolute bottom-3 left-0 right-0 text-center text-xs text-white/70">Point camera at QR code on card</div>
             </div>
-            <div>
-                <label class="block text-sm text-slate-400 mb-1">Nickname (optional)</label>
-                <input name="card_label" type="text" class="input-field w-full px-4 py-2.5 rounded-lg text-sm" placeholder="e.g. My Main Card">
+
+            <!-- Scanned result (hidden until found) -->
+            <div id="scan-result" class="hidden bg-slate-800 rounded-xl p-4 mb-4">
+                <div class="text-xs text-green-400 mb-1">✅ Card detected!</div>
+                <div class="font-mono text-white text-sm mb-2" id="scan-token-display"></div>
+                <div class="text-xs text-slate-400" id="scan-balance-display"></div>
+                <input type="hidden" id="scan-token-value">
             </div>
-            <div class="flex gap-3 pt-2">
-                <button type="button" onclick="document.getElementById('add-koko-modal').classList.add('hidden')"
-                    class="flex-1 py-2.5 rounded-lg text-sm border border-slate-600 text-slate-300 hover:bg-slate-700 transition">Cancel</button>
-                <button type="submit" class="flex-1 btn-primary py-2.5 rounded-lg text-sm font-medium text-white">Add Card</button>
+            <div id="scan-error" class="hidden bg-red-900/30 border border-red-700 rounded-xl p-3 mb-4 text-sm text-red-300"></div>
+
+            <div class="space-y-3">
+                <div>
+                    <label class="block text-sm text-slate-400 mb-1">Nickname (optional)</label>
+                    <input id="scan-label" type="text" class="input-field w-full px-4 py-2.5 rounded-lg text-sm" placeholder="e.g. My Main Card">
+                </div>
+                <button onclick="addScannedCard()" id="scan-add-btn" disabled
+                    class="w-full py-2.5 rounded-lg text-sm font-medium text-slate-500 bg-slate-700 cursor-not-allowed transition">
+                    Scan a card first
+                </button>
             </div>
-        </form>
+        </div>
+
+        <!-- Manual tab -->
+        <div id="tab-content-manual" class="hidden">
+            <form method="POST" action="/cards/add" class="space-y-4">
+                <div>
+                    <label class="block text-sm text-slate-400 mb-1">Card Token <span class="text-red-400">*</span></label>
+                    <input name="card_token" type="text" required class="input-field w-full px-4 py-2.5 rounded-lg text-sm font-mono" placeholder="e.g. 1ag9ukYM">
+                    <p class="text-xs text-slate-500 mt-1">From URL: <span class="font-mono">...BalanceMobile.aspx?i=<span class="text-yellow-400">TOKEN</span></span></p>
+                </div>
+                <div>
+                    <label class="block text-sm text-slate-400 mb-1">Nickname (optional)</label>
+                    <input name="card_label" type="text" class="input-field w-full px-4 py-2.5 rounded-lg text-sm" placeholder="e.g. My Main Card">
+                </div>
+                <div class="flex gap-3 pt-2">
+                    <button type="button" onclick="closeModal()"
+                        class="flex-1 py-2.5 rounded-lg text-sm border border-slate-600 text-slate-300 hover:bg-slate-700 transition">Cancel</button>
+                    <button type="submit" class="flex-1 btn-primary py-2.5 rounded-lg text-sm font-medium text-white">Add Card</button>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
+
+<!-- jsQR for QR decoding -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.min.js"></script>
+<script>
+let scannerStream = null;
+let scannerInterval = null;
+let scannedToken = null;
+
+function closeModal() {
+    document.getElementById('add-koko-modal').classList.add('hidden');
+    stopScanner();
+}
+
+function setTab(tab) {
+    document.getElementById('tab-content-scan').classList.toggle('hidden', tab !== 'scan');
+    document.getElementById('tab-content-manual').classList.toggle('hidden', tab !== 'manual');
+    document.getElementById('tab-scan').className = 'flex-1 py-2 rounded-lg text-sm font-medium transition ' + (tab === 'scan' ? 'tab-active' : 'text-slate-400');
+    document.getElementById('tab-manual').className = 'flex-1 py-2 rounded-lg text-sm font-medium transition ' + (tab === 'manual' ? 'tab-active' : 'text-slate-400');
+    if (tab === 'scan') startScanner();
+    else stopScanner();
+}
+
+function startScanner() {
+    if (scannerStream) return;
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+        .then(function(stream) {
+            scannerStream = stream;
+            var video = document.getElementById('scanner-video');
+            video.srcObject = stream;
+            video.play();
+            scannerInterval = setInterval(scanFrame, 200);
+        })
+        .catch(function(e) {
+            document.getElementById('scanner-status').textContent = 'Camera access denied — use manual entry';
+            console.error(e);
+        });
+}
+
+function stopScanner() {
+    clearInterval(scannerInterval);
+    scannerInterval = null;
+    if (scannerStream) {
+        scannerStream.getTracks().forEach(t => t.stop());
+        scannerStream = null;
+    }
+}
+
+function scanFrame() {
+    var video = document.getElementById('scanner-video');
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) return;
+    var canvas = document.getElementById('scanner-canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0);
+    var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    var code = jsQR(imageData.data, imageData.width, imageData.height);
+    if (code && code.data) {
+        var url = code.data;
+        if (url.includes('icardinc.net') || url.includes('kokoamusement') || url.includes('BalanceMobile')) {
+            stopScanner();
+            document.getElementById('scanner-status').textContent = '✅ QR code found! Fetching card details...';
+            resolveQR(url);
+        }
+    }
+}
+
+async function resolveQR(url) {
+    document.getElementById('scan-error').classList.add('hidden');
+    try {
+        const resp = await fetch('/cards/resolve-qr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        });
+        const result = await resp.json();
+        if (result.success) {
+            scannedToken = result.token;
+            document.getElementById('scan-token-display').textContent = 'Token: ' + result.token;
+            var b = result.balance;
+            document.getElementById('scan-balance-display').textContent =
+                'Balance: $' + (b.cash_balance||0).toFixed(2) +
+                '  Bonus: $' + (b.cash_bonus||0).toFixed(2) +
+                '  Points: ' + (b.points||0);
+            document.getElementById('scan-result').classList.remove('hidden');
+            var btn = document.getElementById('scan-add-btn');
+            btn.disabled = false;
+            btn.className = 'w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white transition';
+            btn.textContent = '+ Add This Card';
+        } else {
+            document.getElementById('scan-error').textContent = result.error || 'Could not read card';
+            document.getElementById('scan-error').classList.remove('hidden');
+            // Restart scanner
+            setTimeout(startScanner, 2000);
+        }
+    } catch(e) {
+        document.getElementById('scan-error').textContent = 'Error: ' + e.message;
+        document.getElementById('scan-error').classList.remove('hidden');
+        setTimeout(startScanner, 2000);
+    }
+}
+
+function addScannedCard() {
+    if (!scannedToken) return;
+    var label = document.getElementById('scan-label').value.trim();
+    var form = document.createElement('form');
+    form.method = 'POST';
+    form.action = '/cards/add';
+    [['card_token', scannedToken], ['card_label', label]].forEach(function(pair) {
+        var input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = pair[0];
+        input.value = pair[1];
+        form.appendChild(input);
+    });
+    document.body.appendChild(form);
+    form.submit();
+}
+
+// Auto-start scanner when modal opens
+document.getElementById('add-koko-modal').addEventListener('transitionend', function() {
+    if (!this.classList.contains('hidden')) startScanner();
+});
+
+// Start scanner when button opens modal
+document.querySelectorAll('[onclick*="add-koko-modal"]').forEach(function(btn) {
+    btn.addEventListener('click', function() { setTimeout(startScanner, 100); });
+});
+</script>
+
+<style>
+.tab-active { background: #4f46e5; color: white; }
+</style>
 {% endblock %}

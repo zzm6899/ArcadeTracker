@@ -337,9 +337,17 @@ def timezone_add_card():
     if not card_number: flash('Card number required.', 'error'); return redirect(url_for('dashboard'))
     conn = get_db()
     try:
-        conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number) VALUES (?,'timezone',?,?,?)",
-            (user['id'], f'tz_{card_number}', card_label or f'Timezone {card_number}', card_number))
-        cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        # Check if card exists but was removed (active=0)
+        existing = conn.execute("SELECT id FROM cards WHERE user_id=? AND card_token=?",
+            (user['id'], f'tz_{card_number}')).fetchone()
+        if existing:
+            conn.execute("UPDATE cards SET active=1, card_label=? WHERE id=?",
+                (card_label or f'Timezone {card_number}', existing['id']))
+            cid = existing['id']
+        else:
+            conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number) VALUES (?,'timezone',?,?,?)",
+                (user['id'], f'tz_{card_number}', card_label or f'Timezone {card_number}', card_number))
+            cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name) VALUES (?,?,?,?,?)',
             (cid, cash_balance, bonus_balance, tickets, card_label or f'Timezone {card_number}'))
         conn.commit(); flash(f'Timezone card {card_number} added!', 'success')
@@ -443,6 +451,35 @@ def timezone_landing():
     Page reads token from localStorage and sends it to the server.
     """
     return render_template('timezone_landing.html', user=get_current_user())
+
+
+@app.route('/cards/resolve-qr', methods=['POST'])
+@login_required
+def resolve_qr():
+    """Follow a QR code URL redirect and extract the Koko token."""
+    data = request.get_json()
+    url = data.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'No URL provided'}), 400
+    try:
+        # Follow redirects to get final URL
+        resp = requests.get(url, timeout=10, allow_redirects=True, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        final_url = resp.url
+        print(f"[QR] {url} -> {final_url}")
+        # Extract token from ?i= param
+        m = re.search(r'[?&]i=([^&]+)', final_url)
+        if m:
+            token = m.group(1)
+            # Validate by fetching balance
+            balance = fetch_koko_balance(token)
+            if balance and any(v is not None for v in [balance.get('cash_balance'), balance.get('cash_bonus'), balance.get('points')]):
+                return jsonify({'success': True, 'token': token, 'balance': balance})
+            return jsonify({'error': 'Token found but could not fetch balance'}), 400
+        return jsonify({'error': f'Could not extract token from: {final_url}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/timezone/start')
 @login_required  

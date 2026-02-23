@@ -41,8 +41,8 @@
                             onclick="copyCode()">
                             <!-- Code rendered by JS to avoid HTML encoding issues -->
                         </div>
-                        <button onclick="copyCode()"
-                            class="absolute top-2 right-2 text-xs text-slate-400 hover:text-white bg-slate-700 px-2 py-1 rounded">
+                        <button id="copy-btn" onclick="copyCode()"
+                            class="absolute top-2 right-2 text-xs text-slate-400 hover:text-white bg-slate-700 px-2 py-1 rounded transition">
                             Copy
                         </button>
                     </div>
@@ -78,22 +78,49 @@ document.addEventListener('DOMContentLoaded', function() {
     window._bookmarklet = bookmarklet;
 });
 
+function showToast(msg, success) {
+    var toast = document.createElement('div');
+    toast.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2 rounded-lg text-sm z-50 ' + (success ? 'bg-green-800 text-green-200' : 'bg-slate-700 text-slate-200');
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    setTimeout(function() { toast.remove(); }, 2500);
+}
+
 function copyCode() {
     var el = document.getElementById('bookmarklet-display');
-    navigator.clipboard.writeText(window._bookmarklet).then(function() {
-        el.style.borderColor = '#16a34a';
-        setTimeout(function() { el.style.borderColor = ''; }, 1500);
-        var toast = document.createElement('div');
-        toast.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 bg-green-800 text-green-200 px-4 py-2 rounded-lg text-sm z-50';
-        toast.textContent = '✅ Copied!';
-        document.body.appendChild(toast);
-        setTimeout(function() { toast.remove(); }, 2000);
-    }).catch(function() {
-        var range = document.createRange();
-        range.selectNode(el);
-        window.getSelection().removeAllRanges();
-        window.getSelection().addRange(range);
-    });
+    var btn = document.getElementById('copy-btn');
+    var text = window._bookmarklet;
+    if (!text) { showToast('Code not ready yet', false); return; }
+
+    // Modern clipboard API
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+            btn.textContent = '✅ Copied!';
+            btn.style.background = '#16a34a';
+            setTimeout(function() { btn.textContent = 'Copy'; btn.style.background = ''; }, 2000);
+        }).catch(fallbackCopy);
+    } else {
+        fallbackCopy();
+    }
+}
+
+function fallbackCopy() {
+    var text = window._bookmarklet;
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+        document.execCommand('copy');
+        showToast('✅ Copied!', true);
+        var btn = document.getElementById('copy-btn');
+        if (btn) { btn.textContent = '✅ Copied!'; setTimeout(function(){ btn.textContent = 'Copy'; }, 2000); }
+    } catch(e) {
+        showToast('Long-press the code to select & copy', false);
+    }
+    document.body.removeChild(ta);
 }
 </script>
 
