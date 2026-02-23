@@ -15,7 +15,7 @@ app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
 DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
 POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 60))  # seconds
-BASE_URL = 'https://estore.kokomusement.com.au/BalanceMobile/BalanceMobile.aspx'
+BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
 
 # ─── Database ────────────────────────────────────────────────────────────────
 
@@ -90,44 +90,58 @@ def fetch_balance(token):
     try:
         url = f"{BASE_URL}?i={token}"
         resp = requests.get(url, timeout=15, headers={
-            'User-Agent': 'Mozilla/5.0 (compatible; KokoTracker/1.0)'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         })
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        data = {'card_name': None, 'cash_balance': None, 'cash_bonus': None, 'points': None}
-        
-        # Get card name
-        title = soup.find('title')
-        h_tags = soup.find_all(['h1', 'h2', 'h3', 'h4'])
-        for tag in h_tags:
-            text = tag.get_text(strip=True)
-            if text:
-                data['card_name'] = text
-                break
-        
-        # Parse table rows
-        text = resp.text
-        
-        # Cash Balance
-        m = re.search(r'Cash Balance[^$]*\$\s*([\d,.]+)', text, re.IGNORECASE)
-        if m:
-            data['cash_balance'] = float(m.group(1).replace(',', ''))
-        
-        # Cash Bonus
-        m = re.search(r'Cash Bonus[^$]*\$\s*([\d,.]+)', text, re.IGNORECASE)
-        if m:
-            data['cash_bonus'] = float(m.group(1).replace(',', ''))
-        
-        # Points
-        m = re.search(r'Points[^\d]*([\d,]+)', text, re.IGNORECASE)
-        if m:
-            data['points'] = int(m.group(1).replace(',', ''))
+        print(f"[Scraper] HTTP {resp.status_code} for token {token}, length={len(resp.text)}")
 
-        # Card name from page
-        m = re.search(r'Game Card:\s*(.+?)(?:\n|<)', text)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        data = {'card_name': None, 'cash_balance': None, 'cash_bonus': None, 'points': None}
+        full_text = soup.get_text(separator='\n')
+
+        # ── Card name ──
+        m = re.search(r'Game Card:\s*(.+)', full_text, re.IGNORECASE)
         if m:
             data['card_name'] = m.group(1).strip()
-            
+
+        # ── Table rows: label | value ──
+        for row in soup.find_all('tr'):
+            cells = row.find_all(['td', 'th'])
+            if len(cells) >= 2:
+                label = cells[0].get_text(strip=True).lower()
+                value = cells[1].get_text(strip=True)
+                if 'cash balance' in label:
+                    m = re.search(r'[\d,.]+', value)
+                    if m:
+                        data['cash_balance'] = float(m.group().replace(',', ''))
+                elif 'cash bonus' in label:
+                    m = re.search(r'[\d,.]+', value)
+                    if m:
+                        data['cash_bonus'] = float(m.group().replace(',', ''))
+                elif label == 'points':
+                    m = re.search(r'[\d,]+', value)
+                    if m:
+                        data['points'] = int(m.group().replace(',', ''))
+
+        # ── Fallback: scan plain text line by line ──
+        lines = [l.strip() for l in full_text.splitlines() if l.strip()]
+        for i, line in enumerate(lines):
+            ll = line.lower()
+            # Next non-empty line after label often has the value
+            next_val = lines[i + 1] if i + 1 < len(lines) else ''
+            if data['cash_balance'] is None and 'cash balance' in ll:
+                m = re.search(r'\$?\s*([\d,.]+)', next_val)
+                if m:
+                    data['cash_balance'] = float(m.group(1).replace(',', ''))
+            if data['cash_bonus'] is None and 'cash bonus' in ll:
+                m = re.search(r'\$?\s*([\d,.]+)', next_val)
+                if m:
+                    data['cash_bonus'] = float(m.group(1).replace(',', ''))
+            if data['points'] is None and ll == 'points':
+                m = re.search(r'[\d,]+', next_val)
+                if m:
+                    data['points'] = int(m.group().replace(',', ''))
+
+        print(f"[Scraper] Result: {data}")
         return data
     except Exception as e:
         print(f"[Scraper] Error fetching token {token}: {e}")
