@@ -69,7 +69,7 @@
 
 <script>
 // Build bookmarklet as a real JS string - no HTML encoding issues
-const APP_URL = "{{ app_url }}";
+const APP_URL = {{ app_url | tojson }};
 const BOOKMARKLET = "javascript:void(function(){" +
     "var t=null;" +
     "for(var i=0;i<localStorage.length;i++){" +
@@ -91,7 +91,7 @@ const BOOKMARKLET = "javascript:void(function(){" +
             "}" +
         "}catch(e){}}}" +
     "}" +
-    "if(t){window.location='" + APP_URL + "/timezone/landing?token='+encodeURIComponent(t);}" +
+    "if(t){window.location='"+APP_URL+"/timezone/landing?token='+encodeURIComponent(t);}" +
     "else{alert('Not logged in yet — log in to Timezone first, then try again.');}" +
 "})();";
 
