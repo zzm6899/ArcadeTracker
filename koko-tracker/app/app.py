@@ -36,6 +36,7 @@ def init_db():
             card_token TEXT NOT NULL,
             card_label TEXT,
             card_number TEXT,
+            tier TEXT,
             active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id),
@@ -64,6 +65,13 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_history_card_time ON balance_history(card_id, recorded_at);
     ''')
+    # Migrations for existing databases
+    for sql in [
+        'ALTER TABLE cards ADD COLUMN tier TEXT',
+        'ALTER TABLE balance_history ADD COLUMN tier TEXT',
+    ]:
+        try: conn.execute(sql)
+        except: pass
     conn.commit()
     conn.close()
 
@@ -183,8 +191,9 @@ def poll_cards():
                                     data = {
                                         'cash_balance': c.get('cashBalance', 0),
                                         'cash_bonus': c.get('bonusBalance', 0),
-                                        'points': c.get('tickets', c.get('eTickets', 0)),
+                                        'points': c.get('eTickets', c.get('tickets', 0)),
                                         'card_name': card['card_label'],
+                                        'tier': c.get('tier', ''),
                                     }
                                     break
                 if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
@@ -321,7 +330,10 @@ def timezone_callback():
     conn.execute('UPDATE timezone_sessions SET guest_id=? WHERE user_id=?', (guest.get('id'), user['id']))
     conn.commit(); conn.close()
     cards = [{'number': str(c.get('number','')), 'cashBalance': c.get('cashBalance',0),
-               'bonusBalance': c.get('bonusBalance',0), 'tickets': c.get('tickets', c.get('eTickets',0)),
+               'bonusBalance': c.get('bonusBalance',0), 'tickets': c.get('eTickets', c.get('tickets',0)),
+               'paperTickets': c.get('paperTickets',0), 'cumulativeBalance': c.get('cumulativeBalance',0),
+               'tier': c.get('tier',''), 'status': c.get('status','Active'),
+               'fullCardNumber': c.get('fullCardNumber',''),
                'country': c.get('country','')} for c in guest.get('cards',[])]
     return jsonify({'success': True, 'cards': cards, 'name': guest.get('givenName','')})
 
@@ -334,6 +346,7 @@ def timezone_add_card():
     cash_balance = float(request.form.get('cash_balance', 0))
     bonus_balance = float(request.form.get('bonus_balance', 0))
     tickets = int(float(request.form.get('tickets', 0)))
+    tier = request.form.get('tier', '')
     if not card_number: flash('Card number required.', 'error'); return redirect(url_for('dashboard'))
     conn = get_db()
     try:
@@ -345,8 +358,8 @@ def timezone_add_card():
                 (card_label or f'Timezone {card_number}', existing['id']))
             cid = existing['id']
         else:
-            conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number) VALUES (?,'timezone',?,?,?)",
-                (user['id'], f'tz_{card_number}', card_label or f'Timezone {card_number}', card_number))
+            conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,tier) VALUES (?,'timezone',?,?,?,?)",
+                (user['id'], f'tz_{card_number}', card_label or f'Timezone {card_number}', card_number, tier))
             cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name) VALUES (?,?,?,?,?)',
             (cid, cash_balance, bonus_balance, tickets, card_label or f'Timezone {card_number}'))

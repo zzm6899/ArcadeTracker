@@ -56,10 +56,18 @@ function renderCards(cards, name) {
     list.innerHTML = cards.map(card => `
         <div class="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-3">
             <div>
-                <div class="font-mono font-bold text-white">${card.number}</div>
-                <div class="text-sm mt-1 flex gap-2 flex-wrap">
-                    <span class="text-green-400">$${(card.cashBalance + card.bonusBalance).toFixed(2)}</span>
-                    <span class="text-orange-400">🎫 ${card.tickets}</span>
+                <div class="flex items-center gap-2 mb-1">
+                    <div class="font-mono font-bold text-white">${card.number}</div>
+                    ${card.tier ? `<span class="text-xs px-2 py-0.5 rounded-full font-medium ${
+                        card.tier === 'Platinum' ? 'bg-purple-900/60 text-purple-300 border border-purple-700' :
+                        card.tier === 'Gold' ? 'bg-yellow-900/60 text-yellow-300 border border-yellow-700' :
+                        card.tier === 'Silver' ? 'bg-slate-600 text-slate-300 border border-slate-500' :
+                        'bg-orange-900/60 text-orange-300 border border-orange-700'
+                    }">${card.tier}</span>` : ''}
+                </div>
+                <div class="text-sm flex gap-3 flex-wrap">
+                    <span class="text-green-400">💳 $${(card.cashBalance + card.bonusBalance).toFixed(2)}</span>
+                    <span class="text-orange-400">🎫 ${card.tickets} tickets</span>
                     <span class="text-slate-500 text-xs">${card.country}</span>
                 </div>
             </div>
@@ -68,6 +76,7 @@ function renderCards(cards, name) {
                 <input type="hidden" name="cash_balance" value="${card.cashBalance}">
                 <input type="hidden" name="bonus_balance" value="${card.bonusBalance}">
                 <input type="hidden" name="tickets" value="${card.tickets}">
+                <input type="hidden" name="tier" value="${card.tier || ''}">
                 <input type="hidden" name="card_label" value="Timezone ${card.number}">
                 <button type="submit" class="btn-primary px-4 py-2 rounded-lg text-sm font-medium text-white">+ Track</button>
             </form>

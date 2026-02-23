@@ -90,7 +90,18 @@
             <div class="card rounded-2xl p-5 hover:border-yellow-500 transition cursor-pointer" onclick="window.location='/cards/{{ card.id }}'">
                 <div class="flex items-start justify-between mb-4">
                     <div>
-                        <div class="text-xs text-yellow-400 font-medium uppercase tracking-wider mb-1">Timezone Powercard</div>
+                        <div class="flex items-center gap-2 mb-1">
+                            <div class="text-xs text-yellow-400 font-medium uppercase tracking-wider">Timezone Powercard</div>
+                            {% if card.tier %}
+                            <span class="text-xs px-2 py-0.5 rounded-full font-medium
+                                {% if card.tier == 'Platinum' %}bg-purple-900/60 text-purple-300 border border-purple-700
+                                {% elif card.tier == 'Gold' %}bg-yellow-900/60 text-yellow-300 border border-yellow-700
+                                {% elif card.tier == 'Silver' %}bg-slate-600/60 text-slate-300 border border-slate-500
+                                {% else %}bg-orange-900/60 text-orange-300 border border-orange-700{% endif %}">
+                                {{ card.tier }}
+                            </span>
+                            {% endif %}
+                        </div>
                         <h2 class="font-bold text-white text-lg">{{ card.card_label or card.card_number }}</h2>
                         <p class="text-slate-500 text-xs font-mono">{{ card.card_number }}</p>
                     </div>
