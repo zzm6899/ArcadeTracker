@@ -68,53 +68,37 @@
 </div>
 
 <script>
-// Build bookmarklet as a real JS string - no HTML encoding issues
-const APP_URL = {{ app_url | tojson }};
-const BOOKMARKLET = "javascript:void(function(){" +
-    "var t=null;" +
-    "for(var i=0;i<localStorage.length;i++){" +
-        "var k=localStorage.key(i);" +
-        "var v=localStorage.getItem(k);" +
-        "if(v&&v.startsWith('eyJ')&&v.split('.').length===3){t=v;break;}" +
-        "if(v){try{" +
-            "var p=JSON.parse(v);" +
-            "var vals=Object.values(p||{});" +
-            "for(var j=0;j<vals.length;j++){" +
-                "if(typeof vals[j]==='string'&&vals[j].startsWith('eyJ')&&vals[j].split('.').length===3){t=vals[j];break;}" +
-                "if(vals[j]&&typeof vals[j]==='object'){" +
-                    "var vv=Object.values(vals[j]);" +
-                    "for(var l=0;l<vv.length;l++){" +
-                        "if(typeof vv[l]==='string'&&vv[l].startsWith('eyJ')&&vv[l].split('.').length===3){t=vv[l];break;}" +
-                    "}" +
-                "}" +
-                "if(t)break;" +
-            "}" +
-        "}catch(e){}}}" +
-    "}" +
-    "if(t){window.location='"+APP_URL+"/timezone/landing?token='+encodeURIComponent(t);}" +
-    "else{alert('Not logged in yet — log in to Timezone first, then try again.');}" +
-"})();";
+document.addEventListener('DOMContentLoaded', function() {
+    var appUrl = {{ app_url | tojson }};
 
-// Render bookmarklet text into the div (textContent avoids HTML encoding)
-document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('bookmarklet-display').textContent = BOOKMARKLET;
+    var bookmarklet = 'javascript:void(function(){' +
+        'var t=null;' +
+        'for(var i=0;i<localStorage.length;i++){' +
+            'var k=localStorage.key(i);' +
+            'var v=localStorage.getItem(k);' +
+            'if(v){try{var p=JSON.parse(v);if(p.secret&&p.secret.startsWith("eyJ")){t=p.secret;break;}}catch(e){}}' +
+        '}' +
+        'if(t){window.location="' + '" + appUrl + "' + '/timezone/landing?token="+encodeURIComponent(t);}' +
+        'else{alert("Not logged in to Timezone yet - please log in first.");}' +
+    '})();';
+
+    var display = document.getElementById('bookmarklet-display');
+    if (display) display.textContent = bookmarklet;
+    window._bookmarklet = bookmarklet;
 });
 
 function copyCode() {
-    const el = document.getElementById('bookmarklet-display');
-    navigator.clipboard.writeText(BOOKMARKLET).then(() => {
-        const orig = el.style.borderColor;
+    var el = document.getElementById('bookmarklet-display');
+    navigator.clipboard.writeText(window._bookmarklet).then(function() {
         el.style.borderColor = '#16a34a';
-        setTimeout(() => el.style.borderColor = orig, 1500);
-        // Show toast
-        const toast = document.createElement('div');
+        setTimeout(function() { el.style.borderColor = ''; }, 1500);
+        var toast = document.createElement('div');
         toast.className = 'fixed bottom-6 left-1/2 -translate-x-1/2 bg-green-800 text-green-200 px-4 py-2 rounded-lg text-sm z-50';
-        toast.textContent = '✅ Copied to clipboard!';
+        toast.textContent = '✅ Copied!';
         document.body.appendChild(toast);
-        setTimeout(() => toast.remove(), 2000);
-    }).catch(() => {
-        // Fallback: select text
-        const range = document.createRange();
+        setTimeout(function() { toast.remove(); }, 2000);
+    }).catch(function() {
+        var range = document.createRange();
         range.selectNode(el);
         window.getSelection().removeAllRanges();
         window.getSelection().addRange(range);
