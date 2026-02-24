@@ -16,8 +16,10 @@
         {% endfor %}{% endif %}{% endwith %}
 
         <form method="POST" action="/settings" class="space-y-5">
+
+            <!-- Timezone -->
             <div>
-                <label class="block text-sm text-slate-300 font-medium mb-1.5">Timezone</label>
+                <label class="block text-sm text-slate-300 font-medium mb-1.5">Display Timezone</label>
                 <select name="timezone_name" class="input-field w-full px-3 py-2 rounded-lg text-sm">
                     {% for tz_val, tz_label in [
                         ('Australia/Sydney', 'Sydney / Melbourne (AEDT)'),
@@ -38,20 +40,52 @@
                 <p class="text-xs text-slate-600 mt-1">Used for "last updated" timestamps</p>
             </div>
 
-            <div class="flex items-center justify-between py-3 border-t border-slate-700">
+            <!-- Balance Overview toggle -->
+            <div class="flex items-center justify-between py-3 border-t border-slate-800">
                 <div>
                     <p class="text-sm text-slate-300 font-medium">Balance Overview Graph</p>
-                    <p class="text-xs text-slate-600 mt-0.5">Show combined graph on dashboard</p>
+                    <p class="text-xs text-slate-600 mt-0.5">Combined graph on dashboard</p>
                 </div>
                 <label class="relative inline-flex items-center cursor-pointer">
                     <input type="checkbox" name="show_overview" value="1" class="sr-only peer"
                         {% if user.show_overview != 0 %}checked{% endif %}>
-                    <div class="w-10 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-5 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+                    <div class="w-10 h-5 bg-slate-700 rounded-full peer peer-checked:after:translate-x-5 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
                 </label>
             </div>
 
-            <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">Save</button>
+            <!-- Discord Webhook -->
+            <div class="border-t border-slate-800 pt-5">
+                <label class="block text-sm text-slate-300 font-medium mb-1.5">
+                    <span class="flex items-center gap-2">
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="#7289da"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057.102 18.1.127 18.14.163 18.163a19.944 19.944 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.175 13.175 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>
+                        Discord Webhook
+                    </span>
+                </label>
+                <input name="discord_webhook" type="url"
+                    class="input-field w-full px-3 py-2 rounded-lg text-sm"
+                    placeholder="https://discord.com/api/webhooks/..."
+                    value="{{ user.discord_webhook or '' }}">
+                <p class="text-xs text-slate-600 mt-1">Sends a message when any card balance changes</p>
+                {% if user.discord_webhook %}
+                <button type="button" onclick="testWebhook()" class="mt-2 text-xs text-indigo-400 hover:text-indigo-300 transition">Send test message</button>
+                {% endif %}
+            </div>
+
+            <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">Save Settings</button>
         </form>
     </div>
 </div>
+
+<script>
+async function testWebhook() {
+    const url = document.querySelector('[name=discord_webhook]').value;
+    if (!url) return;
+    try {
+        await fetch('/settings/test-webhook', { method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({url}) });
+        alert('Test message sent! Check your Discord channel.');
+    } catch(e) { alert('Error: ' + e.message); }
+}
+</script>
 {% endblock %}

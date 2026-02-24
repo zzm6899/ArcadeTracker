@@ -33,6 +33,7 @@ def init_db():
             is_admin INTEGER DEFAULT 0,
             timezone_name TEXT DEFAULT 'Australia/Sydney',
             show_overview INTEGER DEFAULT 1,
+            discord_webhook TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS cards (
@@ -43,7 +44,7 @@ def init_db():
             card_label TEXT,
             card_number TEXT,
             tier TEXT,
-            poll_interval INTEGER DEFAULT 60,
+            poll_interval INTEGER DEFAULT 60,  -- koko default; timezone cards use 900
             active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id),
@@ -92,9 +93,15 @@ def init_db():
         'ALTER TABLE timezone_sessions ADD COLUMN last_poll_at TEXT',
         'ALTER TABLE timezone_sessions ADD COLUMN last_poll_status TEXT',
         'ALTER TABLE users ADD COLUMN show_overview INTEGER DEFAULT 1',
+        'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
     ]:
         try: conn.execute(sql)
         except: pass
+    # Fix timezone cards that have the wrong default poll interval (60 instead of 900)
+    try:
+        conn.execute("UPDATE cards SET poll_interval=900 WHERE card_type='timezone' AND poll_interval=60")
+    except: pass
+    conn.commit()
     # Sync env-defined admin
     if ADMIN_USERNAME:
         try:
@@ -217,6 +224,34 @@ def tz_session_status(tzs):
             return 'stale'
     return 'connected'
 
+
+# ─── Discord Webhook ──────────────────────────────────────────────────────────
+def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
+    try:
+        diff = new_total - prev_total
+        sign = '+' if diff > 0 else ''
+        color = 0x22c55e if diff > 0 else 0xef4444  # green if gained, red if spent
+        label = card['card_label'] or card['card_number'] or 'Card'
+        ctype = card['card_type'] or 'koko'
+        emoji = '🕹️' if ctype == 'timezone' else '🎮'
+        payload = {
+            'embeds': [{
+                'title': f'{emoji} {label}',
+                'description': f'Balance updated',
+                'color': color,
+                'fields': [
+                    {'name': 'Credits', 'value': f"${data.get('cash_balance', 0):.2f}", 'inline': True},
+                    {'name': 'Bonus', 'value': f"${data.get('cash_bonus', 0):.2f}", 'inline': True},
+                    {'name': 'Change', 'value': f"{sign}${diff:.2f}", 'inline': True},
+                ],
+                'footer': {'text': f'Total: ${new_total:.2f}'},
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            }]
+        }
+        requests.post(webhook_url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"[Discord] Webhook error: {e}")
+
 # ─── Poller ───────────────────────────────────────────────────────────────────
 def log_poll(card_id, success, message=''):
     try:
@@ -243,7 +278,8 @@ def poll_cards():
             now = time.time()
             for card in cards:
                 ctype = card['card_type'] or 'koko'
-                interval = card['poll_interval'] or (TIMEZONE_POLL_INTERVAL if ctype == 'timezone' else DEFAULT_POLL_INTERVAL)
+                default_interval = TIMEZONE_POLL_INTERVAL if ctype == 'timezone' else DEFAULT_POLL_INTERVAL
+                interval = card['poll_interval'] if card['poll_interval'] and card['poll_interval'] > 0 else default_interval
 
                 if now - last_poll.get(card['id'], 0) < interval:
                     continue
@@ -294,11 +330,21 @@ def poll_cards():
 
                 if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
                     conn = get_db()
+                    # Check previous balance to detect changes
+                    prev = conn.execute('SELECT cash_balance,cash_bonus,points FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1', (card['id'],)).fetchone()
                     conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name,tier) VALUES (?,?,?,?,?,?)',
                         (card['id'], data.get('cash_balance'), data.get('cash_bonus'), data.get('points'), data.get('card_name'), data.get('tier','')))
                     if data.get('tier'):
                         conn.execute('UPDATE cards SET tier=? WHERE id=?', (data['tier'], card['id']))
-                    conn.commit(); conn.close()
+                    conn.commit()
+                    # Send discord webhook if balance changed
+                    user_row = conn.execute('SELECT discord_webhook FROM users WHERE id=?', (card['user_id'],)).fetchone()
+                    conn.close()
+                    if user_row and user_row['discord_webhook'] and prev:
+                        prev_total = (prev['cash_balance'] or 0) + (prev['cash_bonus'] or 0)
+                        new_total = (data.get('cash_balance') or 0) + (data.get('cash_bonus') or 0)
+                        if abs(new_total - prev_total) >= 0.01:
+                            send_discord_webhook(user_row['discord_webhook'], card, data, prev_total, new_total)
                     print(f"[Poller] Card {card['id']} ({ctype}): {data.get('cash_balance')}/{data.get('cash_bonus')}/{data.get('points')}")
 
         except Exception as e:
@@ -353,8 +399,9 @@ def settings():
     if request.method == 'POST':
         tz = request.form.get('timezone_name', 'Australia/Sydney')
         show_overview = 1 if request.form.get('show_overview') else 0
+        discord_webhook = request.form.get('discord_webhook', '').strip()
         conn = get_db()
-        conn.execute('UPDATE users SET timezone_name=?, show_overview=? WHERE id=?', (tz, show_overview, user['id']))
+        conn.execute('UPDATE users SET timezone_name=?, show_overview=?, discord_webhook=? WHERE id=?', (tz, show_overview, discord_webhook, user['id']))
         conn.commit(); conn.close()
         flash('Settings saved.', 'success')
         return redirect(url_for('settings'))
@@ -556,8 +603,8 @@ def timezone_add_card():
         existing = conn.execute("SELECT id FROM cards WHERE user_id=? AND card_token=?",
             (user['id'], f'tz_{card_number}')).fetchone()
         if existing:
-            conn.execute("UPDATE cards SET active=1, card_label=?, tier=? WHERE id=?",
-                (card_label or f'Timezone {card_number}', tier, existing['id']))
+            conn.execute("UPDATE cards SET active=1, card_label=?, tier=?, poll_interval=? WHERE id=?",
+                (card_label or f'Timezone {card_number}', tier, interval, existing['id']))
             cid = existing['id']
         else:
             conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,tier,poll_interval) VALUES (?,'timezone',?,?,?,?,?)",
@@ -585,6 +632,32 @@ def timezone_disconnect():
 def timezone_extractor():
     return render_template('timezone_extractor.html')
 
+
+@app.route('/settings/test-webhook', methods=['POST'])
+@login_required
+def test_webhook():
+    user = get_current_user()
+    data = request.get_json()
+    url = data.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'No URL'}), 400
+    try:
+        payload = {
+            'embeds': [{
+                'title': '🎮 Balance Tracker — Test',
+                'description': 'Webhook connected successfully!',
+                'color': 0x6366f1,
+                'footer': {'text': f'From: {user["username"]}'},
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            }]
+        }
+        resp = requests.post(url, json=payload, timeout=5)
+        if resp.status_code in (200, 204):
+            return jsonify({'success': True})
+        return jsonify({'error': f'Discord returned {resp.status_code}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
 @admin_required
@@ -607,7 +680,7 @@ def admin():
     tz_statuses = {ts['user_id']: tz_session_status(ts) for ts in tz_sessions}
     return render_template('admin.html', users=users, cards=cards,
                           tz_sessions=tz_sessions, tz_statuses=tz_statuses,
-                          user=get_current_user())
+                          user=get_current_user(), now=datetime.utcnow())
 
 @app.route('/admin/make-admin/<int:user_id>', methods=['POST'])
 @admin_required
