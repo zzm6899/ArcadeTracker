@@ -531,9 +531,8 @@ def log_poll(card_id, success, message=''):
         conn.commit(); conn.close()
     except: pass
 
-def startup_refresh_tz_tokens():
-    """On startup, immediately refresh any expired Timezone bearer tokens using refresh tokens."""
-    print("[Startup] Checking for expired Timezone tokens...")
+def _refresh_tz_tokens(label):
+    """Refresh any Timezone tokens that are expired or expiring within 5 minutes."""
     try:
         conn = get_db()
         sessions = conn.execute('SELECT * FROM timezone_sessions WHERE refresh_token IS NOT NULL').fetchall()
@@ -546,13 +545,12 @@ def startup_refresh_tz_tokens():
             else:
                 try:
                     exp = datetime.strptime(tzs['token_expires_at'], '%Y-%m-%d %H:%M:%S')
-                    if (exp - now).total_seconds() < 300:  # expired or expiring within 5 min
+                    if (exp - now).total_seconds() < 300:
                         needs_refresh = True
                 except:
                     needs_refresh = True
-
             if needs_refresh:
-                print(f"[Startup] Refreshing token for user {tzs['user_id']}...")
+                print(f"[{label}] Refreshing token for user {tzs['user_id']}...")
                 new_tok, new_rt, expires_in = tz_refresh_ms_token(tzs['refresh_token'], tzs['ms_client_id'])
                 if new_tok:
                     tok_exp = (now + timedelta(seconds=expires_in or 840)).strftime('%Y-%m-%d %H:%M:%S')
@@ -565,11 +563,26 @@ def startup_refresh_tz_tokens():
                     params.append(tzs['user_id'])
                     conn.execute(f'UPDATE timezone_sessions SET {upd} WHERE user_id=?', params)
                     conn.commit(); conn.close()
-                    print(f"[Startup] Token refreshed for user {tzs['user_id']}, expires {tok_exp}")
+                    print(f"[{label}] Token refreshed for user {tzs['user_id']}, expires {tok_exp}")
                 else:
-                    print(f"[Startup] Could not refresh token for user {tzs['user_id']} - MS refresh failed")
+                    print(f"[{label}] Could not refresh token for user {tzs['user_id']} - MS refresh failed")
+                    try:
+                        conn = get_db()
+                        conn.execute("UPDATE timezone_sessions SET last_poll_status='error' WHERE user_id=?", (tzs['user_id'],))
+                        conn.commit(); conn.close()
+                    except: pass
     except Exception as e:
-        print(f"[Startup] Token refresh error: {e}")
+        print(f"[{label}] Error: {e}")
+
+def startup_refresh_tz_tokens():
+    _refresh_tz_tokens("Startup")
+
+def token_watcher():
+    """Background thread: check and refresh Timezone tokens every 5 minutes."""
+    time.sleep(30)  # let app fully start first
+    while True:
+        _refresh_tz_tokens("Token watcher")
+        time.sleep(300)
 
 def poll_cards():
     startup_refresh_tz_tokens()
