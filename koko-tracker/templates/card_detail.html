@@ -45,14 +45,13 @@
 
             {% if card.card_number %}<p class="text-slate-600 text-xs font-mono mt-1">{{ card.card_number }}</p>{% endif %}
         </div>
+
         <div class="flex items-center gap-2 shrink-0">
             {% if card.card_type == 'timezone' %}
             <button onclick="importHistory()" id="import-btn"
                 class="text-xs text-indigo-400 hover:text-white px-3 py-1.5 border border-indigo-900 rounded-lg transition">
                 ⬇ Import History
             </button>
-            {% endif %}
-            {% if card.card_type == 'timezone' %}
             <button onclick="tzReauth(this)" id="reauth-btn"
                 class="text-xs text-yellow-500 hover:text-yellow-300 px-3 py-1.5 border border-yellow-800/50 hover:border-yellow-600 rounded-lg transition">
                 🔑 Re-auth
@@ -133,8 +132,18 @@
         <h2 class="text-base font-bold text-white">🎮 Game History</h2>
         <span class="text-xs text-slate-600" id="tx-log-count"></span>
     </div>
-    <div id="tx-log-container">
-        <p class="text-slate-600 text-sm">Click <strong>⬇ Import History</strong> to load game transactions.</p>
+
+    <div class="overflow-y-auto rounded-lg border border-slate-700/50" style="max-height: 320px; background-color: #0f172a;">
+        <table class="w-full">
+            <thead class="sticky top-0 bg-slate-900 border-b border-slate-700">
+                <tr>
+                    <th class="py-3 px-4 text-left text-slate-400 text-xs font-semibold tracking-wide">Date</th>
+                    <th class="py-3 px-4 text-left text-slate-400 text-xs font-semibold tracking-wide">Description</th>
+                    <th class="py-3 px-4 text-right text-slate-400 text-xs font-semibold tracking-wide">Change</th>
+                </tr>
+            </thead>
+            <tbody id="tap-history-body"></tbody>
+        </table>
     </div>
 </div>
 {% endif %}
@@ -163,7 +172,17 @@
 .period-btn { color: #64748b; }
 .period-btn.active { background: #4f46e5; color: white; }
 .period-btn:hover:not(.active) { color: #e2e8f0; }
+
+/* Table styling */
+table { width: 100%; border-collapse: collapse; }
+
+/* Scrollbar styling */
+.overflow-y-auto::-webkit-scrollbar { width: 6px; }
+.overflow-y-auto::-webkit-scrollbar-track { background: #0f172a; }
+.overflow-y-auto::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+.overflow-y-auto::-webkit-scrollbar-thumb:hover { background: #475569; }
 </style>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script>
 const CARD_ID = {{ card.id }};
@@ -186,20 +205,63 @@ function formatLabel(ts) {
     return d.toLocaleString('en-AU', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 
+function formatDateForHistory(ts) {
+    if (!ts) return '–';
+    try {
+        const d = new Date(ts);
+        if (isNaN(d.getTime())) return '–';
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const monthName = months[d.getUTCMonth()];
+        const day = d.getUTCDate();
+        const hour = String(d.getUTCHours()).padStart(2, '0');
+        const min  = String(d.getUTCMinutes()).padStart(2, '0');
+        return `${monthName} ${day} ${hour}:${min}`;
+    } catch(e) {
+        console.error('Date format error:', ts, e);
+        return '–';
+    }
+}
+
 async function loadStats() {
     try {
         const r = await fetch(`/api/cards/${CARD_ID}/stats`);
         const d = await r.json();
+
         if (d.latest) {
             document.getElementById('stat-balance').textContent = '$' + (d.latest.cash_balance || 0).toFixed(2);
             document.getElementById('stat-bonus').textContent   = '$' + (d.latest.cash_bonus || 0).toFixed(2);
             document.getElementById('stat-points').textContent  = (d.latest.points || 0).toLocaleString();
         }
+
         if (d.spent_24h !== null && d.spent_24h !== undefined) {
             const spent = d.spent_24h;
             const el = document.getElementById('stat-spent');
             el.textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
             el.className = 'font-bold text-xl ' + (spent > 0 ? 'text-red-400' : 'text-green-400');
+        }
+
+        // Timezone: render imported transaction history table
+        const tbody = document.getElementById('tap-history-body');
+        const countEl = document.getElementById('tx-log-count');
+        if (tbody) {
+            if (d.history && d.history.length) {
+                if (countEl) countEl.textContent = d.history.length + ' transactions';
+                tbody.innerHTML = d.history.map(h => {
+                    const delta = (h.bonusBalance || 0) + (h.cashBalance || 0);
+                    const cls = delta < 0 ? 'text-red-400' : 'text-green-400';
+                    const sign = delta > 0 ? '+' : '';
+                    return `
+                        <tr class="border-b border-slate-800/50 hover:bg-slate-900/50 transition">
+                            <td class="py-3 px-4 text-slate-300 text-xs font-mono">${formatDateForHistory(h.modified)}</td>
+                            <td class="py-3 px-4 text-slate-300 text-xs">${h.description || 'Recharge'}</td>
+                            <td class="py-3 px-4 text-right text-xs ${cls} font-semibold">${sign}${delta.toFixed(2)}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                if (countEl) countEl.textContent = '';
+                tbody.innerHTML = '<tr><td colspan="3" class="py-4 px-4 text-center text-slate-600 text-sm">No activity yet.</td></tr>';
+            }
         }
     } catch(e) { console.error('Stats error:', e); }
 }
@@ -211,19 +273,24 @@ async function loadChart(period = 'day') {
     document.getElementById('chart-empty').classList.add('hidden');
     document.getElementById('points-loading').classList.remove('hidden');
     document.getElementById('points-empty').classList.add('hidden');
+
     try {
         const r = await fetch(`/api/cards/${CARD_ID}/history?period=${period}`);
         const d = await r.json();
+
         document.getElementById('chart-loading').classList.add('hidden');
         document.getElementById('points-loading').classList.add('hidden');
+
         if (!d.labels || d.labels.length < 2) {
             document.getElementById('chart-empty').classList.remove('hidden');
             document.getElementById('points-empty').classList.remove('hidden');
             return;
         }
+
         const labels = d.labels.map(formatLabel);
         const pts = d.labels.length > 100 ? 0 : d.labels.length > 50 ? 1 : 3;
         const descriptions = d.descriptions || [];
+
         const tooltipPlugin = {
             ...chartOpts.plugins.tooltip,
             callbacks: {
@@ -234,37 +301,31 @@ async function loadChart(period = 'day') {
                 }
             }
         };
+
         if (balanceChart) balanceChart.destroy();
         balanceChart = new Chart(document.getElementById('balanceChart').getContext('2d'), {
-            type: 'line', data: { labels, datasets: [
+            type: 'line',
+            data: { labels, datasets: [
                 { label: 'Balance', data: d.cash_balance, borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 },
                 { label: 'Bonus',   data: d.cash_bonus,   borderColor: '#facc15', backgroundColor: 'rgba(250,204,21,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 }
             ]},
             options: { ...chartOpts, plugins: { ...chartOpts.plugins, tooltip: tooltipPlugin },
-                       scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, callback: v => '$'+(v||0).toFixed(2) } } } }
+                scales: { ...chartOpts.scales,
+                    y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, callback: v => '$'+(v||0).toFixed(2) } }
+                }
+            }
         });
 
-        // Populate game transaction log
-        const txContainer = document.getElementById('tx-log-container');
-        if (txContainer && descriptions.some(d => d)) {
-            const txEntries = d.labels.map((lbl, i) => ({ lbl, desc: descriptions[i], bal: d.cash_balance[i], bonus: d.cash_bonus[i] }))
-                .filter(e => e.desc)
-                .reverse(); // newest first
-            document.getElementById('tx-log-count').textContent = txEntries.length + ' transactions';
-            txContainer.innerHTML = txEntries.map(e =>
-                `<div class="flex items-center gap-3 py-2 border-b border-slate-800/50 text-xs">
-                    <span class="text-slate-600 font-mono shrink-0 w-32">${formatLabel(e.lbl)}</span>
-                    <span class="text-slate-300 flex-1">${e.desc}</span>
-                    <span class="text-green-400 shrink-0 font-medium">$${(e.bal||0).toFixed(2)}</span>
-                </div>`
-            ).join('') || '<p class="text-slate-600 text-sm">No named transactions in this period.</p>';
-        }
         if (pointsChart) pointsChart.destroy();
         pointsChart = new Chart(document.getElementById('pointsChart').getContext('2d'), {
-            type: 'line', data: { labels, datasets: [
+            type: 'line',
+            data: { labels, datasets: [
                 { label: '{{ "e-Tickets" if card.card_type == "timezone" else "Points" }}',
-                  data: d.points, borderColor: '#{{ "fb923c" if card.card_type == "timezone" else "c084fc" }}',
-                  backgroundColor: 'rgba(192,132,252,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 }
+                  data: d.points,
+                  borderColor: '#{{ "fb923c" if card.card_type == "timezone" else "c084fc" }}',
+                  backgroundColor: 'rgba(192,132,252,0.06)',
+                  fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2
+                }
             ]},
             options: chartOpts
         });
@@ -284,11 +345,12 @@ async function tzReauth(btn) {
         const d = await r.json();
         if (d.success) {
             btn.textContent = '✅ Refreshed!';
-            btn.className = btn.className.replace('text-yellow-500', 'text-green-400').replace('border-yellow-800/50', 'border-green-800/50');
+            btn.className = btn.className
+                .replace('text-yellow-500', 'text-green-400')
+                .replace('border-yellow-800/50', 'border-green-800/50');
             setTimeout(() => location.reload(), 1200);
         } else {
             btn.textContent = '❌ Failed';
-            // Show error in poll log area
             const container = document.getElementById('poll-log-container');
             if (container) {
                 const errDiv = document.createElement('div');
@@ -306,29 +368,32 @@ async function tzReauth(btn) {
 async function forcePoll() {
     const btn = document.getElementById('poll-btn');
     btn.textContent = '⟳ Polling…'; btn.disabled = true;
+
     try {
         const r = await fetch(`/cards/${CARD_ID}/force-poll`, { method: 'POST' });
         const result = await r.json();
+
         if (result.success) {
             btn.textContent = '✓ Updated';
-            // Update stats
+
             if (result.data) {
                 const d = result.data;
                 document.getElementById('stat-balance').textContent = '$' + (d.cash_balance || 0).toFixed(2);
                 document.getElementById('stat-bonus').textContent   = '$' + (d.cash_bonus || 0).toFixed(2);
                 document.getElementById('stat-points').textContent  = (d.points || 0).toLocaleString();
             }
-            // Update last updated timestamp
+
             if (result.last_updated) {
                 document.getElementById('last-updated-line').textContent = 'Last updated: ' + result.last_updated;
             }
-            // Update poll log
+
             if (result.logs && result.logs.length) {
                 const list = document.getElementById('poll-log-list') || (() => {
                     const container = document.getElementById('poll-log-container');
                     container.innerHTML = '<div class="space-y-0" id="poll-log-list"></div>';
                     return document.getElementById('poll-log-list');
                 })();
+
                 list.innerHTML = result.logs.map(l =>
                     `<div class="flex items-center gap-3 text-xs py-1.5 border-b border-slate-800/50">
                         <span class="${l.success ? 'text-green-400' : 'text-red-400'}">${l.success ? '✓' : '✗'}</span>
@@ -337,16 +402,15 @@ async function forcePoll() {
                     </div>`
                 ).join('');
             }
-            // Refresh chart
+
             setTimeout(() => {
                 const active = document.querySelector('.period-btn.active');
                 loadChart(active ? active.id.replace('btn-','') : 'day');
                 loadStats();
             }, 400);
+
         } else {
             btn.textContent = '✗ Failed';
-            console.error('Poll failed:', result.error);
-            // Show error in poll log area briefly
             const container = document.getElementById('poll-log-container');
             const errDiv = document.createElement('div');
             errDiv.className = 'text-xs text-red-400 mt-2 p-2 bg-red-900/20 border border-red-900 rounded-lg';
@@ -358,6 +422,7 @@ async function forcePoll() {
         btn.textContent = '✗ Error';
         console.error(e);
     }
+
     setTimeout(() => { btn.textContent = '↻ Refresh'; btn.disabled = false; }, 2500);
 }
 
@@ -395,13 +460,18 @@ async function importHistory() {
     const btn = document.getElementById('import-btn');
     if (!btn) return;
     btn.textContent = '⟳ Importing…'; btn.disabled = true;
+
     try {
         const r = await fetch(`/api/cards/${CARD_ID}/import-transactions`, { method: 'POST' });
         const result = await r.json();
+
         if (result.success) {
             btn.textContent = `✓ ${result.imported} imported`;
             if (result.imported > 0) {
-                setTimeout(() => { loadChart(document.querySelector('.period-btn.active')?.id.replace('btn-','') || 'day'); loadStats(); }, 500);
+                setTimeout(() => {
+                    loadChart(document.querySelector('.period-btn.active')?.id.replace('btn-','') || 'day');
+                    loadStats();
+                }, 500);
             }
         } else {
             btn.textContent = '✗ ' + (result.error || 'Failed');
@@ -409,11 +479,17 @@ async function importHistory() {
     } catch(e) {
         btn.textContent = '✗ Error';
     }
+
     setTimeout(() => { btn.textContent = '⬇ Import History'; btn.disabled = false; }, 3000);
 }
 
 loadStats();
 loadChart('day');
-setInterval(() => { loadStats(); const a = document.querySelector('.period-btn.active'); if(a) loadChart(a.id.replace('btn-','')); }, 60000);
+setInterval(() => {
+    loadStats();
+    const a = document.querySelector('.period-btn.active');
+    if (a) loadChart(a.id.replace('btn-',''));
+}, 60000);
 </script>
+
 {% endblock %}
