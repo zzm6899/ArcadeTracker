@@ -252,10 +252,10 @@ TZ_HEADERS = {
     'x-app-version': '20210722',
 }
 
-# Timezone MS B2C constants (extracted from localStorage key structure)
-TZ_TENANT_ID  = 'ff9115a9-091c-4a41-8248-bebd73fbe7eb'  # from localStorage key prefix
-TZ_CLIENT_ID  = 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # clientId field in localStorage
-TZ_B2C_POLICY = 'B2C_1A_signupsignin'
+# Timezone Azure AD constants (decoded from bearer token claims)
+TZ_TENANT_ID  = 'af21e056-0a21-4d83-b5dd-44c439fa8f30'  # iss claim in bearer token
+TZ_CLIENT_ID  = '6f72c275-51b9-463b-8411-3b04936ce189'  # aud claim in bearer token
+TZ_B2C_POLICY = ''  # no B2C policy — standard Azure AD v2
 
 def tz_refresh_ms_token(refresh_token, ms_client_id=None):
     """Use Microsoft B2C refresh token to get a new access token for teeg.cloud."""
@@ -281,11 +281,11 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
         (f'https://login.microsoftonline.com/common/oauth2/v2.0/token',
          f'openid offline_access {cid}/.default'),
     ]
-    for endpoint, scope in attempts:
+    for endpoint, client_id, scope in attempts:
         try:
             resp = requests.post(endpoint, data={
                 'grant_type': 'refresh_token',
-                'client_id': cid,
+                'client_id': client_id,
                 'refresh_token': refresh_token,
                 'scope': scope,
             }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
