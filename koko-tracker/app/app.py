@@ -20,8 +20,20 @@ KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile
 TEEG_API = 'https://api.teeg.cloud'
 ADMIN_USERNAME    = os.environ.get('ADMIN_USERNAME', '')
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', '')
-DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
-DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
+DISCORD_CLIENT_ID     = os.environ.get('DISCORD_CLIENT_ID', '')
+DISCORD_CLIENT_SECRET = os.environ.get('DISCORD_CLIENT_SECRET', '')
+MAIL_SERVER           = os.environ.get('MAIL_SERVER', '')
+MAIL_PORT             = int(os.environ.get('MAIL_PORT', '587'))
+MAIL_USERNAME         = os.environ.get('MAIL_USERNAME', '')
+MAIL_PASSWORD         = os.environ.get('MAIL_PASSWORD', '')
+MAIL_FROM             = os.environ.get('MAIL_FROM', MAIL_USERNAME)
+DISCORD_CLIENT_ID     = os.environ.get('DISCORD_CLIENT_ID', '')
+DISCORD_CLIENT_SECRET = os.environ.get('DISCORD_CLIENT_SECRET', '')
+MAIL_SERVER           = os.environ.get('MAIL_SERVER', '')
+MAIL_PORT             = int(os.environ.get('MAIL_PORT', '587'))
+MAIL_USERNAME         = os.environ.get('MAIL_USERNAME', '')
+MAIL_PASSWORD         = os.environ.get('MAIL_PASSWORD', '')
+MAIL_FROM             = os.environ.get('MAIL_FROM', MAIL_USERNAME)
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():
@@ -112,6 +124,9 @@ def init_db():
         'ALTER TABLE cards ADD COLUMN leaderboard_public INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN discord_cmd_privacy TEXT',
         'ALTER TABLE balance_history ADD COLUMN description TEXT',
+        'ALTER TABLE users ADD COLUMN email TEXT',
+        'ALTER TABLE users ADD COLUMN reset_token TEXT',
+        'ALTER TABLE users ADD COLUMN reset_expires TEXT',
         'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
     ]:
         try: conn.execute(sql)
@@ -517,6 +532,160 @@ def login():
         flash('Invalid credentials.', 'error')
     return render_template('login.html')
 
+
+@app.route('/auth/discord')
+def discord_oauth_start():
+    """Redirect to Discord OAuth2 login."""
+    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
+        flash('Discord login not configured.', 'error')
+        return redirect(url_for('login'))
+    import secrets as _sec
+    state = _sec.token_hex(16)
+    session['discord_oauth_state'] = state
+    redirect_uri = url_for('discord_oauth_callback', _external=True)
+    params = {
+        'client_id': DISCORD_CLIENT_ID,
+        'redirect_uri': redirect_uri,
+        'response_type': 'code',
+        'scope': 'identify email',
+        'state': state
+    }
+    from urllib.parse import urlencode
+    return redirect('https://discord.com/oauth2/authorize?' + urlencode(params))
+
+@app.route('/auth/discord/callback')
+def discord_oauth_callback():
+    error = request.args.get('error')
+    if error:
+        flash(f'Discord login cancelled.', 'error')
+        return redirect(url_for('login'))
+    code  = request.args.get('code')
+    state = request.args.get('state')
+    if not code or state != session.pop('discord_oauth_state', None):
+        flash('Invalid OAuth state.', 'error')
+        return redirect(url_for('login'))
+
+    redirect_uri = url_for('discord_oauth_callback', _external=True)
+    # Exchange code for token
+    token_resp = requests.post('https://discord.com/api/oauth2/token', data={
+        'client_id': DISCORD_CLIENT_ID,
+        'client_secret': DISCORD_CLIENT_SECRET,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+    }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=10)
+    if token_resp.status_code != 200:
+        flash('Discord auth failed.', 'error'); return redirect(url_for('login'))
+
+    access_token = token_resp.json().get('access_token')
+    # Fetch Discord user info
+    user_resp = requests.get('https://discord.com/api/users/@me',
+        headers={'Authorization': f'Bearer {access_token}'}, timeout=10)
+    if user_resp.status_code != 200:
+        flash('Could not fetch Discord profile.', 'error'); return redirect(url_for('login'))
+
+    duser = user_resp.json()
+    discord_id = str(duser['id'])
+    discord_username = duser.get('username', '')
+    discord_email = duser.get('email', '')
+
+    conn = get_db()
+    # Check if discord_id already linked to an account
+    user = conn.execute('SELECT * FROM users WHERE discord_id=?', (discord_id,)).fetchone()
+    if user:
+        session['user_id'] = user['id']
+        conn.close()
+        return redirect(url_for('dashboard'))
+
+    # Check if email matches an existing account
+    if discord_email:
+        user = conn.execute('SELECT * FROM users WHERE email=?', (discord_email,)).fetchone()
+        if user:
+            conn.execute('UPDATE users SET discord_id=? WHERE id=?', (discord_id, user['id']))
+            conn.commit()
+            session['user_id'] = user['id']
+            conn.close()
+            flash(f'Discord linked to your account {user["username"]}.', 'success')
+            return redirect(url_for('dashboard'))
+
+    # Create new account from Discord profile
+    count = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    is_admin = 1 if count == 0 else 0
+    username = discord_username
+    # Ensure unique username
+    base = username
+    i = 1
+    while conn.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone():
+        username = f'{base}{i}'; i += 1
+    conn.execute('INSERT INTO users (username, password_hash, email, discord_id, is_admin) VALUES (?,?,?,?,?)',
+        (username, '', discord_email, discord_id, is_admin))
+    conn.commit()
+    user = conn.execute('SELECT * FROM users WHERE discord_id=?', (discord_id,)).fetchone()
+    conn.close()
+    session['user_id'] = user['id']
+    flash(f'Welcome {username}! Account created via Discord.', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/forgot-password', methods=['GET','POST'])
+def forgot_password():
+    if request.method == 'POST':
+        identifier = request.form.get('identifier','').strip()
+        conn = get_db()
+        user = conn.execute('SELECT * FROM users WHERE email=? OR username=?', (identifier, identifier)).fetchone()
+        if user and user['email']:
+            import secrets as _sec
+            token = _sec.token_urlsafe(32)
+            expires = (datetime.utcnow() + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute('UPDATE users SET reset_token=?, reset_expires=? WHERE id=?', (token, expires, user['id']))
+            conn.commit()
+            reset_url = url_for('reset_password', token=token, _external=True)
+            # Send email
+            if MAIL_SERVER:
+                try:
+                    import smtplib
+                    from email.mime.text import MIMEText
+                    msg = MIMEText(f'Reset your Balance Tracker password:\n\n{reset_url}\n\nExpires in 2 hours.')
+                    msg['Subject'] = 'Balance Tracker — Password Reset'
+                    msg['From'] = MAIL_FROM
+                    msg['To'] = user['email']
+                    with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as s:
+                        s.starttls()
+                        if MAIL_USERNAME: s.login(MAIL_USERNAME, MAIL_PASSWORD)
+                        s.send_message(msg)
+                    flash('Password reset email sent. Check your inbox.', 'success')
+                except Exception as e:
+                    print(f'[Mail] Error: {e}')
+                    flash(f'Reset link: {reset_url}', 'success')  # fallback — show link
+            else:
+                # No mail configured — show link directly (admin use case)
+                flash(f'No email server configured. Reset link (share securely): {reset_url}', 'success')
+        else:
+            flash('If that account exists and has an email, a reset link was sent.', 'success')
+        conn.close()
+        return redirect(url_for('forgot_password'))
+    return render_template('forgot_password.html')
+
+@app.route('/reset-password/<token>', methods=['GET','POST'])
+def reset_password(token):
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE reset_token=?', (token,)).fetchone()
+    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    if not user or not user['reset_expires'] or user['reset_expires'] < now:
+        conn.close()
+        flash('Reset link is invalid or expired.', 'error')
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        pw = request.form.get('password','')
+        if len(pw) < 6:
+            return render_template('reset_password.html', token=token, error='Password must be at least 6 characters.')
+        conn.execute('UPDATE users SET password_hash=?, reset_token=NULL, reset_expires=NULL WHERE id=?',
+                    (hash_password(pw), user['id']))
+        conn.commit(); conn.close()
+        flash('Password updated. Please log in.', 'success')
+        return redirect(url_for('login'))
+    conn.close()
+    return render_template('reset_password.html', token=token)
+
 @app.route('/logout')
 def logout():
     session.clear(); return redirect(url_for('login'))
@@ -531,8 +700,9 @@ def settings():
         discord_webhook = request.form.get('discord_webhook', '').strip()
         conn = get_db()
         leaderboard_opt = 1 if request.form.get('leaderboard_opt_in') else 0
-        conn.execute('UPDATE users SET timezone_name=?, show_overview=?, discord_webhook=?, leaderboard_opt_in=? WHERE id=?', 
-                    (tz, show_overview, discord_webhook, leaderboard_opt, user['id']))
+        email = request.form.get('email', '').strip() or None
+        conn.execute('UPDATE users SET timezone_name=?, show_overview=?, discord_webhook=?, leaderboard_opt_in=?, email=? WHERE id=?', 
+                    (tz, show_overview, discord_webhook, leaderboard_opt, email, user['id']))
         conn.commit(); conn.close()
         flash('Settings saved.', 'success')
         return redirect(url_for('settings'))
@@ -929,12 +1099,12 @@ def import_transactions(card_id):
 
     conn = get_db()
     imported = 0
+    skipped = 0
     for tx in transactions:
         tx_time = tx.get('modified')
         if not tx_time:
             continue
 
-        # runningCumulativeBalance = true running cash total after this transaction
         running_total = tx.get('runningCumulativeBalance')
         cash_delta    = float(tx.get('cashBalance') or 0)
         bonus_delta   = float(tx.get('bonusBalance') or 0)
@@ -943,17 +1113,31 @@ def import_transactions(card_id):
         tickets       = int(tx.get('eTickets') or 0)
         description   = tx.get('description') or tx.get('reason') or None
 
-        # Use runningCumulativeBalance as the cash snapshot
-        # bonusBalance delta tells us bonus component
-        if running_total is not None:
-            running_total = float(running_total)
-            # running total includes both cash and bonus — split them
-            # bonus_delta < 0 means bonus was spent, > 0 means bonus added
-            cash_balance = round(running_total - max(bonus_delta, 0), 2)
-            cash_bonus   = round(max(bonus_delta, 0), 2)
-        else:
+        # runningCumulativeBalance = 0 means this field isn't set for this tx — skip it
+        # to avoid false 0-balance data points corrupting the chart
+        if running_total is None or float(running_total) == 0:
+            # Only use delta-based calculation if it's a top-up (positive cash)
+            if cash_delta <= 0 and e_cash <= 0 and p_cash <= 0:
+                skipped += 1
+                continue
             cash_balance = round(cash_delta + e_cash + p_cash, 2)
-            cash_bonus   = round(max(bonus_delta, 0), 2)
+            cash_bonus   = 0.0
+        else:
+            running_total = float(running_total)
+            # running total is cash+bonus combined
+            # Use bonus_delta to separate: if bonus was spent (negative), that's bonus component
+            if bonus_delta < 0:
+                # bonus was spent this tx — running total already reflects spend
+                cash_bonus = 0.0
+                cash_balance = round(running_total, 2)
+            elif bonus_delta > 0:
+                # bonus was added — split it out
+                cash_bonus = round(bonus_delta, 2)
+                cash_balance = round(running_total - bonus_delta, 2)
+            else:
+                # Pure cash transaction
+                cash_bonus = 0.0
+                cash_balance = round(running_total, 2)
 
         # Normalise timestamp — "2026-02-23T05:04:27.0000000+00:00"
         try:
@@ -972,7 +1156,8 @@ def import_transactions(card_id):
             )
             imported += 1
     conn.commit(); conn.close()
-    return jsonify({'success': True, 'imported': imported, 'total': len(transactions)})
+    print(f"[ImportTx] Imported {imported}, skipped {skipped} zero-balance rows")
+    return jsonify({'success': True, 'imported': imported, 'skipped': skipped, 'total': len(transactions)})
 
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
@@ -1093,12 +1278,12 @@ def api_history(card_id):
     conn = get_db()
     if not conn.execute('SELECT id FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone():
         conn.close(); return jsonify({'error': 'Not found'}), 404
-    rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC',
+    rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at>=? AND cash_balance IS NOT NULL AND cash_balance != 0 ORDER BY recorded_at ASC',
         (card_id, since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
     conn.close()
     return jsonify({'labels':[r['recorded_at'] for r in rows], 'cash_balance':[r['cash_balance'] for r in rows],
                     'cash_bonus':[r['cash_bonus'] for r in rows], 'points':[r['points'] for r in rows],
-                    'descriptions':[r['description'] if 'description' in r.keys() else None for r in rows]})
+                    'descriptions':[r['description'] for r in rows]})
 
 @app.route('/api/cards/<int:card_id>/stats')
 @login_required
