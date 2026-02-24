@@ -267,18 +267,17 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
     # Need to try different scope formats for B2C
     attempts = [
         # (endpoint, scope)
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
-         f'openid offline_access https://identity.teeg.cloud/{cid}/guest.read'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
          f'openid offline_access {cid}/.default'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
-         f'{cid}/.default offline_access'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
-         'offline_access'),
-        # B2C-specific endpoint with policy
-        (f'https://login.microsoftonline.com/{tenant}/B2C_1A_signupsignin/oauth2/v2.0/token',
-         f'openid offline_access https://identity.teeg.cloud/{cid}/guest.read'),
-        (f'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
+         'openid offline_access'),
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
+         f'{cid}/.default'),
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
+         f'openid offline_access https://identity.teeg.cloud/{cid}/user_impersonation'),
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', stored_cid,
+         f'openid offline_access {stored_cid}/.default'),
+        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
          f'openid offline_access {cid}/.default'),
     ]
     for endpoint, client_id, scope in attempts:
