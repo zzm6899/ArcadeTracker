@@ -205,40 +205,52 @@ class BalanceBot(discord.Client):
             await self.tree.sync(guild=guild)
         else:
             await self.tree.sync()
-        self.cycle_status.start()
-        print(f"[Bot] Ready. Guild: {GUILD_ID or 'global'}")
+        print(f"[Bot] Commands synced. Guild: {GUILD_ID or 'global'}")
 
     async def on_ready(self):
         print(f"[Bot] Logged in as {self.user}")
+        if not self.status_task.is_running():
+            self.status_task.start()
+
+    @tasks.loop(seconds=45)
+    async def status_task(self):
+        STATUS_TEMPLATES = [
+            lambda s: (discord.ActivityType.watching,  f"💰 ${s['public_total']:.0f} in public balances"),
+            lambda s: (discord.ActivityType.watching,  f"🎮 {s['cards']} cards tracked"),
+            lambda s: (discord.ActivityType.watching,  f"👥 {s['users']} players"),
+            lambda s: (discord.ActivityType.playing,   "Balance Tracker"),
+            lambda s: (discord.ActivityType.watching,  f"💎 {s['top_tier']} members active") if s['top_tier'] else (discord.ActivityType.watching, f"🎮 {s['cards']} cards tracked"),
+        ]
+        try:
+            stats = await asyncio.get_event_loop().run_in_executor(None, db_get_stats_for_status)
+            tmpl = STATUS_TEMPLATES[self._status_idx % len(STATUS_TEMPLATES)]
+            atype, name = tmpl(stats)
+            await self.change_presence(activity=discord.Activity(type=atype, name=name))
+            self._status_idx += 1
+            print(f"[Bot] Status: {name}")
+        except Exception as e:
+            print(f"[Bot] Status error: {e}")
 
 bot = BalanceBot()
-
-# ─── Status cycling — privacy-safe aggregate facts ───────────────────────────
-STATUS_TEMPLATES = [
-    lambda s: (discord.ActivityType.watching,  f"💰 ${s['public_total']:.0f} in public balances"),
-    lambda s: (discord.ActivityType.watching,  f"🎮 {s['cards']} cards tracked"),
-    lambda s: (discord.ActivityType.watching,  f"👥 {s['users']} players"),
-    lambda s: (discord.ActivityType.playing,   f"Balance Tracker"),
-    lambda s: (discord.ActivityType.watching,  f"💎 {s['top_tier']} members active") if s['top_tier'] else (discord.ActivityType.watching, f"🎮 {s['cards']} cards tracked"),
-]
-
-@tasks.loop(seconds=45)
-async def cycle_status():
-    try:
-        stats = await asyncio.get_event_loop().run_in_executor(None, db_get_stats_for_status)
-        tmpl = STATUS_TEMPLATES[bot._status_idx % len(STATUS_TEMPLATES)]
-        atype, name = tmpl(stats)
-        await bot.change_presence(activity=discord.Activity(type=atype, name=name))
-        bot._status_idx += 1
-    except Exception as e:
-        print(f"[Bot] Status error: {e}")
-
-BalanceBot.cycle_status = cycle_status
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 @bot.tree.command(name="link", description="Link your Discord account to Balance Tracker")
 async def cmd_link(interaction: discord.Interaction):
+    # Check if already linked
+    user = await run_sync(db_get_user, interaction.user.id)
+    if user:
+        embed = discord.Embed(
+            title="✅ Already Linked",
+            description=f"Your Discord is linked to **{user['username']}** on Balance Tracker.",
+            color=0x22c55e
+        )
+        embed.set_footer(text="To unlink, go to Settings on the website.")
+        # Unlink button points to website settings
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="🌐 Manage on Website", url=f"{APP_URL}/settings", style=discord.ButtonStyle.link))
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        return
     code = await run_sync(db_create_link_code, interaction.user.id, str(interaction.user))
     embed = discord.Embed(title="🔗 Link Your Account", color=0x6366f1,
         description="Enter this code in Balance Tracker Settings → Discord Link")
