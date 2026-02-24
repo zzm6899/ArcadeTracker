@@ -117,7 +117,19 @@
 <div class="card rounded-2xl p-5 mb-4">
     <h2 class="text-base font-bold text-white mb-3">Recent Activity</h2>
     <p class="text-slate-600 text-sm">This section will show recent transactions and activities related to this card. Check back after more polls.</p>
-
+    <table>
+        <thead class="text-slate-500 text-l border-b border-slate-800/50">
+            <tr>
+                <th class="py-2 w-32 text-left">Date</th>
+                <th class="py-2 w-48 text-left">Description</th>
+                <th class="py-2 w-32 text-right">Amount</th>
+            </tr>
+        </thead>
+        <tbody id="tap-history-body" class="text-sm text-slate-400">
+            <!-- Recent taps will be loaded here -->
+            <tr><td colspan="3" class="py-4 text-center text-slate-600">No activity yet.</td></tr>
+        </tbody>
+    </table>
 </div>
 
 <!-- Poll Log -->
@@ -182,6 +194,20 @@ async function loadStats() {
             el.textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
             el.className = 'font-bold text-xl ' + (spent > 0 ? 'text-red-400' : 'text-green-400');
         }
+        const tbody = document.getElementById('tap-history-body');
+            if(d.history && d.history.length){
+                tbody.innerHTML = d.history.map(h => `
+                    <tr>
+                        <td class="py-2 w-32 text-center">${new Date(h.modified)}</td>
+                        <td class="py-2 w-48 text-center">${h.description || '–'}</td>
+                        <td class="py-2 w-32 text-center text-green-400">
+                            ${h.bonusBalance > 0 ? `+${h.bonusBalance.toFixed(2)} Bonus` : (h.cashBalance > 0 ? `+$${h.cashBalance.toFixed(2)}` : "Error")}
+                        </td>
+                    </tr>
+                `).join('');
+            } else {
+                tbody.innerHTML = '<tr><td colspan="3" class="py-4 text-center text-slate-600">No activity yet.</td></tr>';
+            }
     } catch(e) { console.error('Stats error:', e); }
 }
 
@@ -264,6 +290,7 @@ async function forcePoll() {
                 const active = document.querySelector('.period-btn.active');
                 loadChart(active ? active.id.replace('btn-','') : 'day');
                 loadStats();
+                loadHistory();
             }, 400);
         } else {
             btn.textContent = '✗ Failed';
