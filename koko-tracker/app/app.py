@@ -514,29 +514,77 @@ def force_poll(card_id):
     if not card: return jsonify({'error': 'Not found'}), 404
 
     data = None
+    error_msg = None
     if card['card_type'] == 'koko':
-        data = fetch_koko_balance(card['card_token'])
+        try:
+            data = fetch_koko_balance(card['card_token'])
+        except Exception as e:
+            error_msg = str(e)
     elif card['card_type'] == 'timezone':
         conn = get_db()
         tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
         conn.close()
-        if tzs:
+        if not tzs:
+            return jsonify({'success': False, 'error': 'No Timezone session — reconnect first'}), 400
+        try:
             guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
-            if guest:
+            if guest and guest.get('cards'):
+                card_num = str(card['card_number']).strip() if card['card_number'] else ''
                 for c in guest.get('cards', []):
-                    if str(c.get('number')) == str(card['card_number']):
-                        data = {'cash_balance': c.get('cashBalance',0), 'cash_bonus': c.get('bonusBalance',0),
-                                'points': c.get('eTickets',0), 'card_name': card['card_label'], 'tier': c.get('tier','')}
+                    api_num = str(c.get('number', '')).strip()
+                    if api_num == card_num or (card_num and card_num in api_num) or (api_num and api_num in card_num):
+                        data = {
+                            'cash_balance': float(c.get('cashBalance') or 0),
+                            'cash_bonus':   float(c.get('bonusBalance') or 0),
+                            'points':       int(c.get('eTickets') or c.get('tickets') or 0),
+                            'card_name':    card['card_label'],
+                            'tier':         c.get('tier', '')
+                        }
                         break
+                if not data:
+                    error_msg = f"Card number {card_num!r} not found in Timezone session (found: {[str(c.get('number')) for c in guest.get('cards',[])]})"
+            else:
+                error_msg = 'Timezone session returned no cards — token may be expired'
+        except Exception as e:
+            error_msg = str(e)
 
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
         conn = get_db()
         conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name,tier) VALUES (?,?,?,?,?,?)',
             (card_id, data.get('cash_balance'), data.get('cash_bonus'), data.get('points'), data.get('card_name'), data.get('tier','')))
-        conn.commit(); conn.close()
+        conn.execute('UPDATE cards SET last_updated=? WHERE id=?', (now_str, card_id))
+        if data.get('tier'):
+            conn.execute('UPDATE cards SET tier=? WHERE id=?', (data['tier'], card_id))
+        conn.commit()
+        # Fetch updated poll logs
+        logs = conn.execute(
+            'SELECT * FROM poll_log WHERE card_id=? ORDER BY logged_at DESC LIMIT 20', (card_id,)
+        ).fetchall()
+        conn.close()
         log_poll(card_id, True, 'Manual poll')
-        return jsonify({'success': True, 'data': data})
-    return jsonify({'error': 'Could not fetch data'}), 400
+        return jsonify({
+            'success': True,
+            'data': data,
+            'last_updated': now_str[:16],
+            'logs': [{'success': l['success'], 'message': l['message'] or 'OK', 'logged_at': l['logged_at'][:16]} for l in logs]
+        })
+    
+    log_poll(card_id, False, error_msg or 'No data returned')
+    print(f"[ForcePoll] Card {card_id} failed: {error_msg}")
+    return jsonify({'success': False, 'error': error_msg or 'Could not fetch data'}), 400
+
+@app.route('/cards/<int:card_id>/rename', methods=['POST'])
+@login_required
+def rename_card(card_id):
+    user = get_current_user()
+    new_label = request.form.get('card_label', '').strip()
+    if not new_label:
+        return jsonify({'error': 'Label cannot be empty'}), 400
+    conn = get_db()
+    conn.execute('UPDATE cards SET card_label=? WHERE id=? AND user_id=?', (new_label, card_id, user['id']))
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'label': new_label})
 
 @app.route('/cards/<int:card_id>')
 @login_required

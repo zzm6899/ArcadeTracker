@@ -5,13 +5,13 @@
 <div class="flex items-center gap-3 mb-5">
     <a href="/dashboard" class="text-slate-500 hover:text-white transition text-sm">← Dashboard</a>
     <span class="text-slate-700">/</span>
-    <span class="text-slate-400 text-sm">{{ card.card_label or card.card_number }}</span>
+    <span class="text-slate-400 text-sm" id="breadcrumb-label">{{ card.card_label or card.card_number }}</span>
 </div>
 
 <!-- Card Header -->
 <div class="card rounded-2xl p-5 mb-4">
-    <div class="flex items-start justify-between">
-        <div class="flex-1">
+    <div class="flex items-start justify-between gap-3">
+        <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2 mb-1 flex-wrap">
                 {% if card.card_type == 'timezone' %}
                 <span class="text-xs text-yellow-500 font-medium uppercase tracking-wider">🕹️ Timezone</span>
@@ -28,17 +28,36 @@
                 </span>
                 {% endif %}
             </div>
-            <h1 class="text-xl font-bold text-white">{{ card.card_label or card.card_number or card.card_token }}</h1>
-            {% if card.card_number %}<p class="text-slate-600 text-xs font-mono mt-0.5">{{ card.card_number }}</p>{% endif %}
+
+            <!-- Editable card name -->
+            <div class="flex items-center gap-2 group">
+                <h1 class="text-xl font-bold text-white" id="card-title">{{ card.card_label or card.card_number or card.card_token }}</h1>
+                <button onclick="startRename()" id="rename-btn"
+                    class="opacity-0 group-hover:opacity-100 text-slate-600 hover:text-slate-300 transition text-sm px-1.5">✏️</button>
+            </div>
+            <input id="rename-input" type="text" value="{{ card.card_label or card.card_number or '' }}"
+                class="hidden input-field text-xl font-bold px-2 py-0.5 rounded-lg w-full max-w-xs mt-0.5"
+                onkeydown="if(event.key==='Enter')saveRename(); if(event.key==='Escape')cancelRename()">
+            <div id="rename-actions" class="hidden flex items-center gap-2 mt-1">
+                <button onclick="saveRename()" class="text-xs text-green-400 hover:text-green-300 px-2 py-1 border border-green-900 rounded-lg transition">Save</button>
+                <button onclick="cancelRename()" class="text-xs text-slate-500 hover:text-slate-300 px-2 py-1 border border-slate-700 rounded-lg transition">Cancel</button>
+            </div>
+
+            {% if card.card_number %}<p class="text-slate-600 text-xs font-mono mt-1">{{ card.card_number }}</p>{% endif %}
         </div>
         <button onclick="forcePoll()" id="poll-btn"
-            class="text-xs text-slate-500 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition">
+            class="text-xs text-slate-500 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition shrink-0">
             ↻ Refresh
         </button>
     </div>
 
+    <!-- Last updated -->
+    <p class="text-xs text-slate-600 mt-3" id="last-updated-line">
+        Last updated: {{ card.last_updated[:16] if card.last_updated else 'Pending first poll…' }}
+    </p>
+
     <!-- Stats -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5" id="stats-container">
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3" id="stats-container">
         <div class="bg-slate-800 rounded-xl p-3">
             <p class="text-xs text-slate-500 mb-1">{{ 'Credits' if card.card_type == 'timezone' else 'Cash Balance' }}</p>
             <p class="font-bold text-green-400 text-xl" id="stat-balance">–</p>
@@ -94,10 +113,11 @@
 </div>
 
 <!-- Poll Log -->
-{% if poll_logs %}
 <div class="card rounded-2xl p-5">
     <h2 class="text-base font-bold text-white mb-3">📋 Recent Polls</h2>
-    <div class="space-y-1">
+    <div id="poll-log-container">
+    {% if poll_logs %}
+    <div class="space-y-0" id="poll-log-list">
     {% for log in poll_logs %}
     <div class="flex items-center gap-3 text-xs py-1.5 border-b border-slate-800/50">
         <span class="{{ 'text-green-400' if log.success else 'text-red-400' }}">{{ '✓' if log.success else '✗' }}</span>
@@ -106,8 +126,11 @@
     </div>
     {% endfor %}
     </div>
+    {% else %}
+    <p class="text-slate-600 text-sm" id="poll-log-empty">No polls yet.</p>
+    {% endif %}
+    </div>
 </div>
-{% endif %}
 
 <style>
 .period-btn { color: #64748b; }
@@ -120,15 +143,10 @@ const CARD_ID = {{ card.id }};
 let balanceChart, pointsChart;
 
 const chartOpts = {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: { duration: 300 },
+    responsive: true, maintainAspectRatio: false, animation: { duration: 300 },
     plugins: {
         legend: { labels: { color: '#64748b', boxWidth: 10, font: { size: 11 } } },
-        tooltip: {
-            backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
-            titleColor: '#e2e8f0', bodyColor: '#94a3b8',
-        }
+        tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1, titleColor: '#e2e8f0', bodyColor: '#94a3b8' }
     },
     scales: {
         x: { ticks: { color: '#475569', maxTicksLimit: 8, font: { size: 10 } }, grid: { color: '#1e293b' } },
@@ -137,9 +155,8 @@ const chartOpts = {
 };
 
 function formatLabel(ts) {
-    // ts comes as "2026-02-24 01:45:00" — treat as UTC
-    const d = new Date(ts.replace(' ', 'T') + 'Z');
-    return d.toLocaleString('en-AU', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const d = new Date(ts.replace(' ','T') + 'Z');
+    return d.toLocaleString('en-AU', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 
 async function loadStats() {
@@ -148,8 +165,8 @@ async function loadStats() {
         const d = await r.json();
         if (d.latest) {
             document.getElementById('stat-balance').textContent = '$' + (d.latest.cash_balance || 0).toFixed(2);
-            document.getElementById('stat-bonus').textContent = '$' + (d.latest.cash_bonus || 0).toFixed(2);
-            document.getElementById('stat-points').textContent = (d.latest.points || 0).toLocaleString();
+            document.getElementById('stat-bonus').textContent   = '$' + (d.latest.cash_bonus || 0).toFixed(2);
+            document.getElementById('stat-points').textContent  = (d.latest.points || 0).toLocaleString();
         }
         if (d.spent_24h !== null && d.spent_24h !== undefined) {
             const spent = d.spent_24h;
@@ -163,83 +180,133 @@ async function loadStats() {
 async function loadChart(period = 'day') {
     document.querySelectorAll('.period-btn').forEach(b => b.classList.remove('active'));
     document.getElementById(`btn-${period}`).classList.add('active');
-
     document.getElementById('chart-loading').classList.remove('hidden');
     document.getElementById('chart-empty').classList.add('hidden');
     document.getElementById('points-loading').classList.remove('hidden');
     document.getElementById('points-empty').classList.add('hidden');
-
     try {
         const r = await fetch(`/api/cards/${CARD_ID}/history?period=${period}`);
         const d = await r.json();
-
         document.getElementById('chart-loading').classList.add('hidden');
         document.getElementById('points-loading').classList.add('hidden');
-
         if (!d.labels || d.labels.length < 2) {
             document.getElementById('chart-empty').classList.remove('hidden');
             document.getElementById('points-empty').classList.remove('hidden');
             return;
         }
-
         const labels = d.labels.map(formatLabel);
-        const pts = d.labels.length > 100 ? 0 : (d.labels.length > 50 ? 1 : 3);
-
-        // Balance chart
+        const pts = d.labels.length > 100 ? 0 : d.labels.length > 50 ? 1 : 3;
         if (balanceChart) balanceChart.destroy();
         balanceChart = new Chart(document.getElementById('balanceChart').getContext('2d'), {
-            type: 'line',
-            data: {
-                labels,
-                datasets: [
-                    { label: 'Balance', data: d.cash_balance, borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 },
-                    { label: 'Bonus', data: d.cash_bonus, borderColor: '#facc15', backgroundColor: 'rgba(250,204,21,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 }
-                ]
-            },
-            options: { ...chartOpts, scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, callback: v => '$' + (v||0).toFixed(2) } } } }
+            type: 'line', data: { labels, datasets: [
+                { label: 'Balance', data: d.cash_balance, borderColor: '#4ade80', backgroundColor: 'rgba(74,222,128,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 },
+                { label: 'Bonus',   data: d.cash_bonus,   borderColor: '#facc15', backgroundColor: 'rgba(250,204,21,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 }
+            ]},
+            options: { ...chartOpts, scales: { ...chartOpts.scales, y: { ...chartOpts.scales.y, ticks: { ...chartOpts.scales.y.ticks, callback: v => '$'+(v||0).toFixed(2) } } } }
         });
-
-        // Points chart
         if (pointsChart) pointsChart.destroy();
         pointsChart = new Chart(document.getElementById('pointsChart').getContext('2d'), {
-            type: 'line',
-            data: {
-                labels,
-                datasets: [{ label: '{{ "e-Tickets" if card.card_type == "timezone" else "Points" }}', data: d.points, borderColor: '#{{ "fb923c" if card.card_type == "timezone" else "c084fc" }}', backgroundColor: 'rgba(192,132,252,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 }]
-            },
+            type: 'line', data: { labels, datasets: [
+                { label: '{{ "e-Tickets" if card.card_type == "timezone" else "Points" }}',
+                  data: d.points, borderColor: '#{{ "fb923c" if card.card_type == "timezone" else "c084fc" }}',
+                  backgroundColor: 'rgba(192,132,252,0.06)', fill: true, tension: 0.3, pointRadius: pts, borderWidth: 2 }
+            ]},
             options: chartOpts
         });
-
-    } catch(e) {
-        console.error('Chart error:', e);
-        document.getElementById('chart-loading').textContent = 'Error loading chart';
-        document.getElementById('points-loading').textContent = 'Error loading chart';
-    }
+    } catch(e) { console.error('Chart error:', e); }
 }
 
+// ── Force poll — updates stats, chart, poll log and timestamp ─────────────────
 async function forcePoll() {
     const btn = document.getElementById('poll-btn');
-    btn.textContent = '⟳ Polling...'; btn.disabled = true;
+    btn.textContent = '⟳ Polling…'; btn.disabled = true;
     try {
         const r = await fetch(`/cards/${CARD_ID}/force-poll`, { method: 'POST' });
         const result = await r.json();
         if (result.success) {
             btn.textContent = '✓ Updated';
-            setTimeout(() => { loadStats(); loadChart(document.querySelector('.period-btn.active').id.replace('btn-','') || 'day'); }, 500);
+            // Update stats
+            if (result.data) {
+                const d = result.data;
+                document.getElementById('stat-balance').textContent = '$' + (d.cash_balance || 0).toFixed(2);
+                document.getElementById('stat-bonus').textContent   = '$' + (d.cash_bonus || 0).toFixed(2);
+                document.getElementById('stat-points').textContent  = (d.points || 0).toLocaleString();
+            }
+            // Update last updated timestamp
+            if (result.last_updated) {
+                document.getElementById('last-updated-line').textContent = 'Last updated: ' + result.last_updated;
+            }
+            // Update poll log
+            if (result.logs && result.logs.length) {
+                const list = document.getElementById('poll-log-list') || (() => {
+                    const container = document.getElementById('poll-log-container');
+                    container.innerHTML = '<div class="space-y-0" id="poll-log-list"></div>';
+                    return document.getElementById('poll-log-list');
+                })();
+                list.innerHTML = result.logs.map(l =>
+                    `<div class="flex items-center gap-3 text-xs py-1.5 border-b border-slate-800/50">
+                        <span class="${l.success ? 'text-green-400' : 'text-red-400'}">${l.success ? '✓' : '✗'}</span>
+                        <span class="text-slate-600 font-mono w-32 shrink-0">${l.logged_at}</span>
+                        <span class="text-slate-500">${l.message}</span>
+                    </div>`
+                ).join('');
+            }
+            // Refresh chart
+            setTimeout(() => {
+                const active = document.querySelector('.period-btn.active');
+                loadChart(active ? active.id.replace('btn-','') : 'day');
+                loadStats();
+            }, 400);
         } else {
             btn.textContent = '✗ Failed';
+            console.error('Poll failed:', result.error);
+            // Show error in poll log area briefly
+            const container = document.getElementById('poll-log-container');
+            const errDiv = document.createElement('div');
+            errDiv.className = 'text-xs text-red-400 mt-2 p-2 bg-red-900/20 border border-red-900 rounded-lg';
+            errDiv.textContent = '✗ ' + (result.error || 'Unknown error');
+            container.prepend(errDiv);
+            setTimeout(() => errDiv.remove(), 5000);
         }
-    } catch(e) { btn.textContent = '✗ Error'; }
-    setTimeout(() => { btn.textContent = '↻ Refresh'; btn.disabled = false; }, 2000);
+    } catch(e) {
+        btn.textContent = '✗ Error';
+        console.error(e);
+    }
+    setTimeout(() => { btn.textContent = '↻ Refresh'; btn.disabled = false; }, 2500);
+}
+
+// ── Card rename ───────────────────────────────────────────────────────────────
+function startRename() {
+    document.getElementById('card-title').classList.add('hidden');
+    document.getElementById('rename-btn').classList.add('hidden');
+    document.getElementById('rename-input').classList.remove('hidden');
+    document.getElementById('rename-actions').classList.remove('hidden');
+    document.getElementById('rename-input').focus();
+    document.getElementById('rename-input').select();
+}
+function cancelRename() {
+    document.getElementById('card-title').classList.remove('hidden');
+    document.getElementById('rename-btn').classList.remove('hidden');
+    document.getElementById('rename-input').classList.add('hidden');
+    document.getElementById('rename-actions').classList.add('hidden');
+}
+async function saveRename() {
+    const newLabel = document.getElementById('rename-input').value.trim();
+    if (!newLabel) return;
+    const form = new FormData();
+    form.append('card_label', newLabel);
+    const r = await fetch(`/cards/${CARD_ID}/rename`, { method: 'POST', body: form });
+    const result = await r.json();
+    if (result.success) {
+        document.getElementById('card-title').textContent = result.label;
+        document.getElementById('breadcrumb-label').textContent = result.label;
+        document.title = result.label + ' – Balance Tracker';
+        cancelRename();
+    }
 }
 
 loadStats();
 loadChart('day');
-
-setInterval(() => {
-    loadStats();
-    const active = document.querySelector('.period-btn.active');
-    if (active) loadChart(active.id.replace('btn-', ''));
-}, 60000);
+setInterval(() => { loadStats(); const a = document.querySelector('.period-btn.active'); if(a) loadChart(a.id.replace('btn-','')); }, 60000);
 </script>
 {% endblock %}

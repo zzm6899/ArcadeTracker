@@ -386,12 +386,28 @@ async function updateInterval(cardId, interval) {
 // ── Force poll ────────────────────────────────────────────────────────────────
 async function forcePoll(cardId, btn) {
     const orig = btn.textContent;
-    btn.textContent = '...'; btn.disabled = true;
+    btn.textContent = '⟳'; btn.disabled = true;
     try {
         const resp = await fetch(`/cards/${cardId}/force-poll`, { method: 'POST' });
         const r = await resp.json();
-        btn.textContent = r.success ? '✓' : '✗';
-        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
+        if (r.success) {
+            btn.textContent = '✓';
+            // Update the timestamp shown on this card
+            const card = btn.closest('.card, [class*="rounded-xl"]');
+            if (card) {
+                const tsEl = card.querySelector('[data-ts]') || card.querySelector('span.text-xs.text-slate-6\.00') || 
+                             [...card.querySelectorAll('span.text-xs')].find(el => el.textContent.includes('-') && el.textContent.includes(':'));
+                if (tsEl && r.last_updated) tsEl.textContent = r.last_updated;
+            }
+            // Update balances if returned
+            if (r.data) {
+                const bal = card && card.querySelector('[id*="bal"], .text-green-400');
+                const bonus = card && card.querySelector('.text-yellow-400');
+            }
+        } else {
+            btn.textContent = '✗';
+        }
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
     } catch(e) { btn.textContent = orig; btn.disabled = false; }
 }
 

@@ -654,6 +654,63 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
             view=view
         )
 
+
+
+@bot.tree.command(name="help", description="Show all available commands")
+async def cmd_help(interaction: discord.Interaction):
+    user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
+    linked = user is not None
+
+    embed = discord.Embed(
+        title="🎮 Balance Tracker — Help",
+        description="Track your Koko & Timezone arcade card balances.
+" +
+                    ("✅ Your account is linked." if linked else "⚠️ Use `/link` to connect your account first."),
+        color=0x6366f1
+    )
+
+    embed.add_field(name="🔗 Account", value=(
+        "`/link` — Connect Discord to your Balance Tracker account
+"
+        "`/addcard` — Add a new Koko or Timezone card to track"
+    ), inline=False)
+
+    embed.add_field(name="💰 Balances", value=(
+        "`/cards` — Show all your card balances & details
+"
+        "`/balance` — Quick total balance summary
+"
+        "`/spent [period]` — Spending over 24h / 7d / 30d
+"
+        "`/refresh` — Force fetch latest balances now"
+    ), inline=False)
+
+    embed.add_field(name="🏆 Leaderboard", value=(
+        "`/leaderboard` — Public balance rankings *(server only)*
+"
+        "Enable in website Settings → Leaderboard to appear"
+    ), inline=False)
+
+    embed.add_field(name="⚙️ Settings", value=(
+        "`/privacy command:X public:True/False` — Make a command's response public or private
+"
+        "`/help` — This message"
+    ), inline=False)
+
+    if not linked:
+        embed.add_field(name="🚀 Getting Started", value=(
+            f"1. Run `/link` to get a code
+"
+            f"2. Go to {APP_URL}/settings → Discord Link
+"
+            f"3. Enter the code to connect
+"
+            f"4. Use `/addcard` to start tracking!"
+        ), inline=False)
+
+    embed.set_footer(text="Balance Tracker • Manage everything at the website")
+    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=True)
+
 # ─── Run ──────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     bot.run(BOT_TOKEN, log_handler=None)
