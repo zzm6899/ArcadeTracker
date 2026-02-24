@@ -198,22 +198,105 @@ def fetch_koko_balance(token):
         print(f"[Koko] Error: {e}"); return None
 
 # ─── Timezone API ─────────────────────────────────────────────────────────────
-def fetch_timezone_guest(bearer_token, cookies_dict=None):
+TZ_HEADERS = {
+    'Accept': 'application/json',
+    'Origin': 'https://portal.timezonegames.com',
+    'Referer': 'https://portal.timezonegames.com/',
+    'User-Agent': 'okhttp/4.12.0',
+    'x-app-version': '20210722',
+}
+
+def tz_refresh_token(cookies_dict):
+    """Use session cookies to get a fresh bearer token."""
     try:
-        resp = requests.get(f'{TEEG_API}/guest?version=20210722', timeout=15, headers={
-            'Authorization': f'Bearer {bearer_token}',
-            'Accept': 'application/json',
-            'Origin': 'https://portal.timezonegames.com',
-            'Referer': 'https://portal.timezonegames.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }, cookies=cookies_dict or {})
+        resp = requests.get(
+            f'{TEEG_API}/guest?version=20210722',
+            headers=TZ_HEADERS, cookies=cookies_dict or {}, timeout=15
+        )
+        print(f"[Timezone] Token refresh: HTTP {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            # Extract new token from response if present, otherwise cookies may carry auth
+            new_token = data.get('token') or data.get('accessToken')
+            return data, new_token, dict(resp.cookies)
+        return None, None, None
+    except Exception as e:
+        print(f"[Timezone] Refresh error: {e}"); return None, None, None
+
+def fetch_timezone_guest(bearer_token, cookies_dict=None, user_id=None):
+    """Fetch guest data, auto-refreshing token if expired."""
+    cookies = cookies_dict or {}
+    headers = {**TZ_HEADERS, 'Authorization': f'Bearer {bearer_token}'}
+    try:
+        resp = requests.get(f'{TEEG_API}/guest?version=20210722', headers=headers,
+                           cookies=cookies, timeout=15)
         print(f"[Timezone] guest API: HTTP {resp.status_code}")
         if resp.status_code == 200:
             return resp.json()
-        print(f"[Timezone] Error body: {resp.text[:200]}")
+        # 401/403 = token expired, try refresh with cookies
+        if resp.status_code in (401, 403, 400) and cookies:
+            print(f"[Timezone] Token expired (HTTP {resp.status_code}), refreshing via cookies...")
+            data, new_token, new_cookies = tz_refresh_token(cookies)
+            if data:
+                # Save refreshed token if we have user_id
+                if user_id and new_token:
+                    try:
+                        merged_cookies = {**cookies, **(new_cookies or {})}
+                        now = datetime.utcnow()
+                        tok_exp = (now + timedelta(minutes=14)).strftime('%Y-%m-%d %H:%M:%S')
+                        sess_exp = (now + timedelta(days=29)).strftime('%Y-%m-%d %H:%M:%S')
+                        conn = get_db()
+                        conn.execute(
+                            'UPDATE timezone_sessions SET bearer_token=?, cookies_json=?, token_expires_at=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?',
+                            (new_token, json.dumps(merged_cookies), tok_exp, user_id)
+                        )
+                        conn.commit(); conn.close()
+                        print(f"[Timezone] Token refreshed for user {user_id}")
+                    except Exception as e:
+                        print(f"[Timezone] Could not save refreshed token: {e}")
+                return data
+        print(f"[Timezone] Error body: {resp.text[:300]}")
         return None
     except Exception as e:
         print(f"[Timezone] Error: {e}"); return None
+
+def fetch_timezone_transactions(card_number, bearer_token, cookies_dict=None):
+    """Fetch transaction history for a card — as many as available."""
+    cookies = cookies_dict or {}
+    headers = {**TZ_HEADERS, 'Authorization': f'Bearer {bearer_token}'}
+    all_transactions = []
+    try:
+        # Try paginated fetch - grab up to 500 transactions
+        for page in range(1, 11):  # 10 pages max
+            url = f'{TEEG_API}/guest/cards/AU/{card_number}/transactions?page={page}&pageSize=50'
+            resp = requests.get(url, headers=headers, cookies=cookies, timeout=15)
+            print(f"[Timezone] transactions page {page}: HTTP {resp.status_code}")
+            if resp.status_code == 401 and cookies:
+                # Try without page param on first attempt
+                resp = requests.get(
+                    f'{TEEG_API}/guest/cards/AU/{card_number}/transactions',
+                    headers=headers, cookies=cookies, timeout=15
+                )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            # Handle both array and object responses
+            if isinstance(data, list):
+                items = data
+            else:
+                items = data.get('transactions') or data.get('items') or data.get('data') or []
+                if isinstance(data, dict) and 'amount' in data:
+                    items = [data]  # single transaction
+            if not items:
+                break
+            all_transactions.extend(items)
+            # Stop if we got less than a full page (no more pages)
+            if len(items) < 50:
+                break
+        print(f"[Timezone] Got {len(all_transactions)} transactions for card {card_number}")
+        return all_transactions
+    except Exception as e:
+        print(f"[Timezone] Transaction fetch error: {e}"); return []
 
 def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_exp, guest_id=None):
     conn = get_db()
@@ -329,7 +412,7 @@ def poll_cards():
                     conn.close()
                     if tzs and tzs['bearer_token']:
                         cookies = json.loads(tzs['cookies_json'] or '{}')
-                        guest = fetch_timezone_guest(tzs['bearer_token'], cookies)
+                        guest = fetch_timezone_guest(tzs['bearer_token'], cookies, user_id=card['user_id'])
                         if guest:
                             for c in guest.get('cards', []):
                                 if str(c.get('number')) == str(card['card_number']):
@@ -527,7 +610,7 @@ def force_poll(card_id):
         if not tzs:
             return jsonify({'success': False, 'error': 'No Timezone session — reconnect first'}), 400
         try:
-            guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
+            guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'), user_id=user['id'])
             if guest and guest.get('cards'):
                 card_num = str(card['card_number']).strip() if card['card_number'] else ''
                 for c in guest.get('cards', []):
@@ -797,6 +880,59 @@ def api_leaderboard():
     ).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/cards/<int:card_id>/import-transactions', methods=['POST'])
+@login_required
+def import_transactions(card_id):
+    """Import historical transactions from Timezone API into balance_history."""
+    user = get_current_user()
+    conn = get_db()
+    card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=? AND active=1', (card_id, user['id'])).fetchone()
+    if not card or card['card_type'] != 'timezone':
+        conn.close(); return jsonify({'error': 'Card not found or not a Timezone card'}), 404
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+    conn.close()
+    if not tzs: return jsonify({'error': 'No Timezone session'}), 400
+
+    cookies = json.loads(tzs['cookies_json'] or '{}')
+    card_number = card['card_number']
+    if not card_number: return jsonify({'error': 'Card has no card number'}), 400
+
+    transactions = fetch_timezone_transactions(card_number, tzs['bearer_token'], cookies)
+    if not transactions:
+        return jsonify({'error': 'No transactions found or API unavailable'}), 400
+
+    conn = get_db()
+    imported = 0
+    for tx in transactions:
+        # Map transaction fields — Timezone API fields may vary
+        tx_time = tx.get('transactionDate') or tx.get('date') or tx.get('createdAt') or tx.get('timestamp')
+        balance  = tx.get('cashBalance') or tx.get('balance') or tx.get('remainingBalance')
+        bonus    = tx.get('bonusBalance') or tx.get('remainingBonus') or 0
+        points   = tx.get('eTickets') or tx.get('tickets') or tx.get('remainingTickets') or 0
+        if tx_time and balance is not None:
+            # Normalise timestamp
+            try:
+                if 'T' in str(tx_time):
+                    dt = datetime.strptime(str(tx_time)[:19], '%Y-%m-%dT%H:%M:%S')
+                else:
+                    dt = datetime.strptime(str(tx_time)[:19], '%Y-%m-%d %H:%M:%S')
+                ts = dt.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                ts = tx_time
+            # Skip if already imported
+            exists = conn.execute(
+                'SELECT id FROM balance_history WHERE card_id=? AND recorded_at=?', (card_id, ts)
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    'INSERT INTO balance_history (card_id, cash_balance, cash_bonus, points, recorded_at) VALUES (?,?,?,?,?)',
+                    (card_id, float(balance), float(bonus), int(points), ts)
+                )
+                imported += 1
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'imported': imported, 'total': len(transactions)})
 
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
