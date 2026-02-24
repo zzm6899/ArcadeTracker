@@ -119,7 +119,7 @@
         <div class="flex items-center justify-between">
             <div class="flex items-center gap-1.5">
                 <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
-                <span class="text-xs text-slate-600">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
+                <span class="text-xs text-slate-600" data-card-ts="{{ card.id }}">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
             </div>
             <div class="flex items-center gap-1.5" onclick="event.stopPropagation()">
                 <select onchange="updateInterval({{ card.id }}, this.value)"
@@ -392,17 +392,18 @@ async function forcePoll(cardId, btn) {
         const r = await resp.json();
         if (r.success) {
             btn.textContent = '✓';
-            // Update the timestamp shown on this card
-            const card = btn.closest('.card, [class*="rounded-xl"]');
-            if (card) {
-                const tsEl = card.querySelector('[data-ts]') || card.querySelector('span.text-xs.text-slate-6\.00') || 
-                             [...card.querySelectorAll('span.text-xs')].find(el => el.textContent.includes('-') && el.textContent.includes(':'));
-                if (tsEl && r.last_updated) tsEl.textContent = r.last_updated;
-            }
+            // Update timestamp using data-card-ts attribute
+            const tsEl = document.querySelector(`[data-card-ts="${cardId}"]`);
+            if (tsEl && r.last_updated) tsEl.textContent = r.last_updated;
             // Update balances if returned
             if (r.data) {
-                const bal = card && card.querySelector('[id*="bal"], .text-green-400');
-                const bonus = card && card.querySelector('.text-yellow-400');
+                const cardEl = btn.closest('[class*="card"], [class*="rounded"]');
+                if (cardEl) {
+                    const balEl = cardEl.querySelector('.text-green-400');
+                    const bonEl = cardEl.querySelector('.text-yellow-400');
+                    if (balEl) balEl.textContent = '$' + (r.data.cash_balance || 0).toFixed(2);
+                    if (bonEl) bonEl.textContent = '$' + (r.data.cash_bonus || 0).toFixed(2);
+                }
             }
         } else {
             btn.textContent = '✗';

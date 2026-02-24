@@ -20,8 +20,14 @@ KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile
 TEEG_API = 'https://api.teeg.cloud'
 ADMIN_USERNAME    = os.environ.get('ADMIN_USERNAME', '')
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', '')
-DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
-DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
+DISCORD_CLIENT_ID     = os.environ.get('DISCORD_CLIENT_ID', '')
+APP_URL               = os.environ.get('APP_URL', 'http://localhost:5055')
+DISCORD_CLIENT_SECRET = os.environ.get('DISCORD_CLIENT_SECRET', '')
+MAIL_SERVER           = os.environ.get('MAIL_SERVER', '')
+MAIL_PORT             = int(os.environ.get('MAIL_PORT', '587'))
+MAIL_USERNAME         = os.environ.get('MAIL_USERNAME', '')
+MAIL_PASSWORD         = os.environ.get('MAIL_PASSWORD', '')
+MAIL_FROM             = os.environ.get('MAIL_FROM', MAIL_USERNAME)
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():
@@ -111,6 +117,12 @@ def init_db():
         'ALTER TABLE users ADD COLUMN leaderboard_opt_in INTEGER DEFAULT 0',
         'ALTER TABLE cards ADD COLUMN leaderboard_public INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN discord_cmd_privacy TEXT',
+        'ALTER TABLE balance_history ADD COLUMN description TEXT',
+        'ALTER TABLE users ADD COLUMN email TEXT',
+        'ALTER TABLE users ADD COLUMN reset_token TEXT',
+        'ALTER TABLE users ADD COLUMN reset_expires TEXT',
+        'ALTER TABLE timezone_sessions ADD COLUMN refresh_token TEXT',
+        'ALTER TABLE timezone_sessions ADD COLUMN ms_client_id TEXT',
         'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
     ]:
         try: conn.execute(sql)
@@ -198,33 +210,198 @@ def fetch_koko_balance(token):
         print(f"[Koko] Error: {e}"); return None
 
 # ─── Timezone API ─────────────────────────────────────────────────────────────
-def fetch_timezone_guest(bearer_token, cookies_dict=None):
+TZ_HEADERS = {
+    'Accept': 'application/json',
+    'Origin': 'https://portal.timezonegames.com',
+    'Referer': 'https://portal.timezonegames.com/',
+    'User-Agent': 'okhttp/4.12.0',
+    'x-app-version': '20210722',
+}
+
+def tz_refresh_ms_token(refresh_token, ms_client_id=None):
+    """Use Microsoft Identity refresh token to get a new access token for teeg.cloud."""
+    # Timezone uses Microsoft B2C identity - refresh_token lets us get a new bearer
+    cid = ms_client_id or 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # known Timezone clientId
     try:
-        resp = requests.get(f'{TEEG_API}/guest?version=20210722', timeout=15, headers={
-            'Authorization': f'Bearer {bearer_token}',
-            'Accept': 'application/json',
-            'Origin': 'https://portal.timezonegames.com',
-            'Referer': 'https://portal.timezonegames.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }, cookies=cookies_dict or {})
+        resp = requests.post(
+            'https://identity.teeg.cloud/ca0e4868-177b-49d2-8c63-f1044e3edc63/B2C_1A_signupsignin/oauth2/v2.0/token',
+            data={
+                'grant_type': 'refresh_token',
+                'client_id': cid,
+                'refresh_token': refresh_token,
+                'scope': f'openid profile offline_access https://identity.teeg.cloud/{cid}/guest.read',
+            },
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=15
+        )
+        print(f"[Timezone] MS token refresh: HTTP {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            new_token     = data.get('access_token') or data.get('id_token')
+            new_refresh   = data.get('refresh_token', refresh_token)
+            expires_in    = int(data.get('expires_in', 840))
+            return new_token, new_refresh, expires_in
+        print(f"[Timezone] MS refresh failed: {resp.text[:300]}")
+        return None, None, None
+    except Exception as e:
+        print(f"[Timezone] MS refresh error: {e}"); return None, None, None
+
+def tz_refresh_token(cookies_dict):
+    """Use session cookies to get a fresh bearer token."""
+    try:
+        resp = requests.get(
+            f'{TEEG_API}/guest?version=20210722',
+            headers=TZ_HEADERS, cookies=cookies_dict or {}, timeout=15
+        )
+        print(f"[Timezone] Cookie token refresh: HTTP {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            new_token = data.get('token') or data.get('accessToken')
+            return data, new_token, dict(resp.cookies)
+        return None, None, None
+    except Exception as e:
+        print(f"[Timezone] Refresh error: {e}"); return None, None, None
+
+def fetch_timezone_guest(bearer_token, cookies_dict=None, user_id=None):
+    """Fetch guest data, auto-refreshing token if expired."""
+    cookies = cookies_dict or {}
+    headers = {**TZ_HEADERS, 'Authorization': f'Bearer {bearer_token}'}
+    try:
+        resp = requests.get(f'{TEEG_API}/guest?version=20210722', headers=headers,
+                           cookies=cookies, timeout=15)
         print(f"[Timezone] guest API: HTTP {resp.status_code}")
         if resp.status_code == 200:
             return resp.json()
-        print(f"[Timezone] Error body: {resp.text[:200]}")
+        # 401/403 = token expired — try MS refresh token first, then cookie refresh
+        if resp.status_code in (401, 403, 400):
+            print(f"[Timezone] Token expired (HTTP {resp.status_code}), attempting refresh...")
+            new_token = None
+            new_refresh = None
+
+            # Try MS Identity refresh token first (most reliable)
+            if user_id:
+                try:
+                    conn = get_db()
+                    tzs = conn.execute('SELECT refresh_token, ms_client_id FROM timezone_sessions WHERE user_id=?', (user_id,)).fetchone()
+                    conn.close()
+                    if tzs and tzs['refresh_token']:
+                        new_token, new_refresh, expires_in = tz_refresh_ms_token(tzs['refresh_token'], tzs['ms_client_id'])
+                except Exception as e:
+                    print(f"[Timezone] Could not get refresh token: {e}")
+
+            # Fallback: cookie-based refresh
+            if not new_token and cookies:
+                data, new_token, new_cookies = tz_refresh_token(cookies)
+                if data and not new_token:
+                    # Cookie refresh returned guest data without a new token — use it directly
+                    if user_id:
+                        try:
+                            conn = get_db()
+                            conn.execute('UPDATE timezone_sessions SET last_poll_status=? WHERE user_id=?', ('ok', user_id))
+                            conn.commit(); conn.close()
+                        except: pass
+                    return data
+
+            if new_token:
+                # Save refreshed token
+                if user_id:
+                    try:
+                        now = datetime.utcnow()
+                        tok_exp  = (now + timedelta(minutes=14)).strftime('%Y-%m-%d %H:%M:%S')
+                        sess_exp = (now + timedelta(days=29)).strftime('%Y-%m-%d %H:%M:%S')
+                        conn = get_db()
+                        updates = 'bearer_token=?, token_expires_at=?, updated_at=CURRENT_TIMESTAMP'
+                        params  = [new_token, tok_exp]
+                        if new_refresh:
+                            updates += ', refresh_token=?'
+                            params.append(new_refresh)
+                        params.append(user_id)
+                        conn.execute(f'UPDATE timezone_sessions SET {updates} WHERE user_id=?', params)
+                        conn.commit(); conn.close()
+                        print(f"[Timezone] Token refreshed for user {user_id}")
+                    except Exception as e:
+                        print(f"[Timezone] Could not save refreshed token: {e}")
+
+                # Retry with new token
+                headers2 = {**TZ_HEADERS, 'Authorization': f'Bearer {new_token}'}
+                try:
+                    resp2 = requests.get(f'{TEEG_API}/guest?version=20210722', headers=headers2, cookies=cookies, timeout=15)
+                    if resp2.status_code == 200:
+                        return resp2.json()
+                except Exception as e:
+                    print(f"[Timezone] Retry after refresh failed: {e}")
+        print(f"[Timezone] Error body: {resp.text[:300]}")
         return None
     except Exception as e:
         print(f"[Timezone] Error: {e}"); return None
 
-def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_exp, guest_id=None):
+def fetch_timezone_transactions(card_number, bearer_token, cookies_dict=None):
+    """Fetch transaction history for a card — as many as available."""
+    cookies = cookies_dict or {}
+    headers = {**TZ_HEADERS, 'Authorization': f'Bearer {bearer_token}'}
+    all_transactions = []
+    try:
+        # Try several URL patterns - we're not sure which the API uses
+        url_attempts = [
+            f'{TEEG_API}/guest/cards/AU/{card_number}/transactions',
+            f'{TEEG_API}/guest/cards/{card_number}/transactions',
+            f'{TEEG_API}/guest/transactions?cardNumber={card_number}',
+        ]
+        working_url = None
+        for url in url_attempts:
+            resp = requests.get(url, headers=headers, cookies=cookies, timeout=15)
+            print(f"[Timezone] TX probe {url}: HTTP {resp.status_code} — {resp.text[:200]}")
+            if resp.status_code == 200:
+                working_url = url
+                data = resp.json()
+                if isinstance(data, list):
+                    all_transactions.extend(data)
+                else:
+                    items = data.get('transactions') or data.get('items') or data.get('data') or []
+                    all_transactions.extend(items)
+                break
+
+        if not working_url:
+            print(f"[Timezone] No working transaction URL found for card {card_number}")
+            return []
+
+        # If first page worked, try paginated fetches
+        if all_transactions and len(all_transactions) >= 20:
+            for page in range(2, 11):
+                url = f'{working_url}?page={page}&pageSize=50'
+                resp = requests.get(url, headers=headers, cookies=cookies, timeout=15)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                items = data if isinstance(data, list) else (data.get('transactions') or data.get('items') or data.get('data') or [])
+                if not items:
+                    break
+                all_transactions.extend(items)
+                if len(items) < 50:
+                    break
+
+        print(f"[Timezone] Got {len(all_transactions)} transactions for card {card_number}")
+        if all_transactions:
+            print(f"[ImportTx] Sample keys: {list(all_transactions[0].keys())}")
+            print(f"[ImportTx] Sample: {dict(all_transactions[0])}")
+        return all_transactions
+    except Exception as e:
+        print(f"[Timezone] Transaction fetch error: {e}"); return []
+
+def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_exp, guest_id=None, refresh_token=None, ms_client_id=None):
     conn = get_db()
     conn.execute('''
-        INSERT INTO timezone_sessions (user_id, bearer_token, cookies_json, token_expires_at, session_expires_at, guest_id, updated_at)
-        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        INSERT INTO timezone_sessions (user_id, bearer_token, cookies_json, token_expires_at, session_expires_at, guest_id, refresh_token, ms_client_id, last_poll_status, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,'ok',CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             bearer_token=excluded.bearer_token, cookies_json=excluded.cookies_json,
             token_expires_at=excluded.token_expires_at, session_expires_at=excluded.session_expires_at,
-            guest_id=COALESCE(excluded.guest_id, timezone_sessions.guest_id), updated_at=CURRENT_TIMESTAMP
-    ''', (user_id, bearer_token, json.dumps(cookies_dict), token_exp, sess_exp, guest_id))
+            guest_id=COALESCE(excluded.guest_id, timezone_sessions.guest_id),
+            refresh_token=COALESCE(excluded.refresh_token, timezone_sessions.refresh_token),
+            ms_client_id=COALESCE(excluded.ms_client_id, timezone_sessions.ms_client_id),
+            last_poll_status='ok',
+            updated_at=CURRENT_TIMESTAMP
+    ''', (user_id, bearer_token, json.dumps(cookies_dict), token_exp, sess_exp, guest_id, refresh_token, ms_client_id))
     conn.commit(); conn.close()
 
 def tz_session_status(tzs):
@@ -246,7 +423,7 @@ def tz_session_status(tzs):
             age = (now_dt - last).total_seconds()
             # Only call it 'error' if the LAST poll errored AND it happened recently
             # (i.e. not just an old stale error from before a reconnect)
-            if tzs['last_poll_status'] == 'error' and age < TIMEZONE_POLL_INTERVAL * 6:
+            if tzs['last_poll_status'] == 'error' and age < TIMEZONE_POLL_INTERVAL * 2:
                 return 'error'
             # Stale: no successful poll in 3x the poll interval
             if age > TIMEZONE_POLL_INTERVAL * 3:
@@ -347,8 +524,7 @@ def poll_cards():
                     conn.close()
                     if tzs and tzs['bearer_token']:
                         cookies = json.loads(tzs['cookies_json'] or '{}')
-                        guest = fetch_timezone_guest(tzs['bearer_token'], cookies)
-                        print(f"[Poller] Fetched Timezone guest for user {card['user_id']}: {guest.get('givenName','')} with {len(guest.get('cards',[]))} cards")
+                        guest = fetch_timezone_guest(tzs['bearer_token'], cookies, user_id=card['user_id'])
                         if guest:
                             for c in guest.get('cards', []):
                                 if str(c.get('number')) == str(card['card_number']):
@@ -363,7 +539,7 @@ def poll_cards():
                             # Update poll status
                             conn = get_db()
                             status = 'ok' if data else 'card_not_found'
-                            conn.execute('''UPDATE timezone_sessions SET last_poll_at=?, last_poll_status=? WHERE user_id=?''',
+                            conn.execute('UPDATE timezone_sessions SET last_poll_at=?, last_poll_status=? WHERE user_id=?',
                                         (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), status, card['user_id']))
                             conn.commit(); conn.close()
                             log_poll(card['id'], bool(data), status)
@@ -437,6 +613,161 @@ def login():
         flash('Invalid credentials.', 'error')
     return render_template('login.html')
 
+
+@app.route('/auth/discord')
+def discord_oauth_start():
+    """Redirect to Discord OAuth2 login."""
+    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET:
+        flash('Discord login not configured.', 'error')
+        return redirect(url_for('login'))
+    import secrets as _sec
+    state = _sec.token_hex(16)
+    session['discord_oauth_state'] = state
+    # Use APP_URL to ensure https:// is used (url_for may produce http://)
+    redirect_uri = APP_URL.rstrip('/') + '/auth/discord/callback'
+    params = {
+        'client_id': DISCORD_CLIENT_ID,
+        'redirect_uri': redirect_uri,
+        'response_type': 'code',
+        'scope': 'identify email',
+        'state': state
+    }
+    from urllib.parse import urlencode
+    return redirect('https://discord.com/oauth2/authorize?' + urlencode(params))
+
+@app.route('/auth/discord/callback')
+def discord_oauth_callback():
+    error = request.args.get('error')
+    if error:
+        flash('Discord login cancelled.', 'error')
+        return redirect(url_for('login'))
+    code  = request.args.get('code')
+    state = request.args.get('state')
+    if not code or state != session.pop('discord_oauth_state', None):
+        flash('Invalid OAuth state.', 'error')
+        return redirect(url_for('login'))
+
+    redirect_uri = APP_URL.rstrip('/') + '/auth/discord/callback'
+    # Exchange code for token
+    token_resp = requests.post('https://discord.com/api/oauth2/token', data={
+        'client_id': DISCORD_CLIENT_ID,
+        'client_secret': DISCORD_CLIENT_SECRET,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': redirect_uri,
+    }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=10)
+    if token_resp.status_code != 200:
+        flash('Discord auth failed.', 'error'); return redirect(url_for('login'))
+
+    access_token = token_resp.json().get('access_token')
+    # Fetch Discord user info
+    user_resp = requests.get('https://discord.com/api/users/@me',
+        headers={'Authorization': f'Bearer {access_token}'}, timeout=10)
+    if user_resp.status_code != 200:
+        flash('Could not fetch Discord profile.', 'error'); return redirect(url_for('login'))
+
+    duser = user_resp.json()
+    discord_id = str(duser['id'])
+    discord_username = duser.get('username', '')
+    discord_email = duser.get('email', '')
+
+    conn = get_db()
+    # Check if discord_id already linked to an account
+    user = conn.execute('SELECT * FROM users WHERE discord_id=?', (discord_id,)).fetchone()
+    if user:
+        session['user_id'] = user['id']
+        conn.close()
+        return redirect(url_for('dashboard'))
+
+    # Check if email matches an existing account
+    if discord_email:
+        user = conn.execute('SELECT * FROM users WHERE email=?', (discord_email,)).fetchone()
+        if user:
+            conn.execute('UPDATE users SET discord_id=? WHERE id=?', (discord_id, user['id']))
+            conn.commit()
+            session['user_id'] = user['id']
+            conn.close()
+            flash(f'Discord linked to your account {user["username"]}.', 'success')
+            return redirect(url_for('dashboard'))
+
+    # Create new account from Discord profile
+    count = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    is_admin = 1 if count == 0 else 0
+    username = discord_username
+    # Ensure unique username
+    base = username
+    i = 1
+    while conn.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone():
+        username = f'{base}{i}'; i += 1
+    conn.execute('INSERT INTO users (username, password_hash, email, discord_id, is_admin) VALUES (?,?,?,?,?)',
+        (username, '', discord_email, discord_id, is_admin))
+    conn.commit()
+    user = conn.execute('SELECT * FROM users WHERE discord_id=?', (discord_id,)).fetchone()
+    conn.close()
+    session['user_id'] = user['id']
+    flash(f'Welcome {username}! Account created via Discord.', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/forgot-password', methods=['GET','POST'])
+def forgot_password():
+    if request.method == 'POST':
+        identifier = request.form.get('identifier','').strip()
+        conn = get_db()
+        user = conn.execute('SELECT * FROM users WHERE email=? OR username=?', (identifier, identifier)).fetchone()
+        if user and user['email']:
+            import secrets as _sec
+            token = _sec.token_urlsafe(32)
+            expires = (datetime.utcnow() + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+            conn.execute('UPDATE users SET reset_token=?, reset_expires=? WHERE id=?', (token, expires, user['id']))
+            conn.commit()
+            reset_url = url_for('reset_password', token=token, _external=True)
+            # Send email
+            if MAIL_SERVER:
+                try:
+                    import smtplib
+                    from email.mime.text import MIMEText
+                    msg = MIMEText(f'Reset your Balance Tracker password:\n\n{reset_url}\n\nExpires in 2 hours.')
+                    msg['Subject'] = 'Balance Tracker — Password Reset'
+                    msg['From'] = MAIL_FROM
+                    msg['To'] = user['email']
+                    with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as s:
+                        s.starttls()
+                        if MAIL_USERNAME: s.login(MAIL_USERNAME, MAIL_PASSWORD)
+                        s.send_message(msg)
+                    flash('Password reset email sent. Check your inbox.', 'success')
+                except Exception as e:
+                    print(f'[Mail] Error: {e}')
+                    flash(f'Reset link: {reset_url}', 'success')  # fallback — show link
+            else:
+                # No mail configured — show link directly (admin use case)
+                flash(f'No email server configured. Reset link (share securely): {reset_url}', 'success')
+        else:
+            flash('If that account exists and has an email, a reset link was sent.', 'success')
+        conn.close()
+        return redirect(url_for('forgot_password'))
+    return render_template('forgot_password.html')
+
+@app.route('/reset-password/<token>', methods=['GET','POST'])
+def reset_password(token):
+    conn = get_db()
+    user = conn.execute('SELECT * FROM users WHERE reset_token=?', (token,)).fetchone()
+    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    if not user or not user['reset_expires'] or user['reset_expires'] < now:
+        conn.close()
+        flash('Reset link is invalid or expired.', 'error')
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        pw = request.form.get('password','')
+        if len(pw) < 6:
+            return render_template('reset_password.html', token=token, error='Password must be at least 6 characters.')
+        conn.execute('UPDATE users SET password_hash=?, reset_token=NULL, reset_expires=NULL WHERE id=?',
+                    (hash_password(pw), user['id']))
+        conn.commit(); conn.close()
+        flash('Password updated. Please log in.', 'success')
+        return redirect(url_for('login'))
+    conn.close()
+    return render_template('reset_password.html', token=token)
+
 @app.route('/logout')
 def logout():
     session.clear(); return redirect(url_for('login'))
@@ -451,8 +782,9 @@ def settings():
         discord_webhook = request.form.get('discord_webhook', '').strip()
         conn = get_db()
         leaderboard_opt = 1 if request.form.get('leaderboard_opt_in') else 0
-        conn.execute('UPDATE users SET timezone_name=?, show_overview=?, discord_webhook=?, leaderboard_opt_in=? WHERE id=?', 
-                    (tz, show_overview, discord_webhook, leaderboard_opt, user['id']))
+        email = request.form.get('email', '').strip() or None
+        conn.execute('UPDATE users SET timezone_name=?, show_overview=?, discord_webhook=?, leaderboard_opt_in=?, email=? WHERE id=?', 
+                    (tz, show_overview, discord_webhook, leaderboard_opt, email, user['id']))
         conn.commit(); conn.close()
         flash('Settings saved.', 'success')
         return redirect(url_for('settings'))
@@ -568,7 +900,7 @@ def force_poll(card_id):
         if not tzs:
             return jsonify({'success': False, 'error': 'No Timezone session — reconnect first'}), 400
         try:
-            guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
+            guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'), user_id=user['id'])
             if guest and guest.get('cards'):
                 card_num = str(card['card_number']).strip() if card['card_number'] else ''
                 for c in guest.get('cards', []):
@@ -648,8 +980,7 @@ def timezone_connect():
 @app.route('/timezone/start')
 @login_required
 def timezone_start():
-    app_url = os.environ.get('APP_URL', request.host_url.rstrip('/'))
-    return render_template('timezone_start.html', user=get_current_user(), app_url=app_url)
+    return render_template('timezone_start.html', user=get_current_user(), app_url=APP_URL)
 
 @app.route('/timezone/landing')
 @login_required
@@ -672,7 +1003,11 @@ def timezone_callback():
     except:
         token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
     sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-    save_timezone_session(user['id'], bearer_token, cookies, token_exp, sess_exp)
+    # Extract Microsoft refresh token from localStorage data if provided
+    refresh_token = data.get('refresh_token') or data.get('refreshToken')
+    ms_client_id  = data.get('ms_client_id') or data.get('clientId')
+    save_timezone_session(user['id'], bearer_token, cookies, token_exp, sess_exp,
+                          refresh_token=refresh_token, ms_client_id=ms_client_id)
     guest = fetch_timezone_guest(bearer_token, cookies)
     if not guest: return jsonify({'error': 'Could not fetch Timezone data'}), 400
     conn = get_db()
@@ -699,7 +1034,9 @@ def timezone_extract_token():
             except:
                 token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
             sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-            save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'))
+            rt  = data.get('refresh_token') or data.get('refreshToken')
+            cid = data.get('client_id') or data.get('clientId')
+            save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'), refresh_token=rt, ms_client_id=cid)
             return jsonify({'success': True, 'cards': _format_tz_cards(guest), 'name': guest.get('givenName','')})
     return jsonify({'success': False, 'error': 'Could not extract token'})
 
@@ -841,6 +1178,98 @@ def api_leaderboard():
     conn.close()
     return jsonify([dict(r) for r in rows])
 
+
+@app.route('/api/cards/<int:card_id>/import-transactions', methods=['POST'])
+@login_required
+def import_transactions(card_id):
+    """Import historical transactions from Timezone API into balance_history."""
+    user = get_current_user()
+    conn = get_db()
+    card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=? AND active=1', (card_id, user['id'])).fetchone()
+    if not card or card['card_type'] != 'timezone':
+        conn.close(); return jsonify({'error': 'Card not found or not a Timezone card'}), 404
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+    conn.close()
+    if not tzs: return jsonify({'error': 'No Timezone session'}), 400
+
+    cookies = json.loads(tzs['cookies_json'] or '{}')
+    card_number = card['card_number']
+    if not card_number: return jsonify({'error': 'Card has no card number'}), 400
+
+    transactions = fetch_timezone_transactions(card_number, tzs['bearer_token'], cookies)
+    if not transactions:
+        return jsonify({'error': 'No transactions found or API unavailable'}), 400
+
+    # Log first transaction so we can see the real field names
+    if transactions:
+        print(f"[ImportTx] Sample transaction keys: {list(transactions[0].keys())}")
+        print(f"[ImportTx] Sample transaction: {dict(transactions[0])}")
+
+    # Sort transactions oldest first so running balance builds in order
+    transactions = sorted(transactions, key=lambda t: t.get('modified', ''))
+
+    conn = get_db()
+    imported = 0
+    skipped = 0
+    for tx in transactions:
+        tx_time = tx.get('modified')
+        if not tx_time:
+            continue
+
+        running_total = tx.get('runningCumulativeBalance')
+        cash_delta    = float(tx.get('cashBalance') or 0)
+        bonus_delta   = float(tx.get('bonusBalance') or 0)
+        e_cash        = float(tx.get('eCash') or 0)
+        p_cash        = float(tx.get('pCash') or 0)
+        tickets       = int(tx.get('eTickets') or 0)
+        description   = tx.get('description') or tx.get('reason') or None
+
+        # runningCumulativeBalance = 0 means this field isn't set for this tx — skip it
+        # to avoid false 0-balance data points corrupting the chart
+        if running_total is None or float(running_total) == 0:
+            # Only use delta-based calculation if it's a top-up (positive cash)
+            if cash_delta <= 0 and e_cash <= 0 and p_cash <= 0:
+                skipped += 1
+                continue
+            cash_balance = round(cash_delta + e_cash + p_cash, 2)
+            cash_bonus   = 0.0
+        else:
+            running_total = float(running_total)
+            # running total is cash+bonus combined
+            # Use bonus_delta to separate: if bonus was spent (negative), that's bonus component
+            if bonus_delta < 0:
+                # bonus was spent this tx — running total already reflects spend
+                cash_bonus = 0.0
+                cash_balance = round(running_total, 2)
+            elif bonus_delta > 0:
+                # bonus was added — split it out
+                cash_bonus = round(bonus_delta, 2)
+                cash_balance = round(running_total - bonus_delta, 2)
+            else:
+                # Pure cash transaction
+                cash_bonus = 0.0
+                cash_balance = round(running_total, 2)
+
+        # Normalise timestamp — "2026-02-23T05:04:27.0000000+00:00"
+        try:
+            ts = str(tx_time)[:19].replace('T', ' ')
+            datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+        except:
+            continue
+
+        exists = conn.execute(
+            'SELECT id FROM balance_history WHERE card_id=? AND recorded_at=?', (card_id, ts)
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                'INSERT INTO balance_history (card_id, cash_balance, cash_bonus, points, description, recorded_at) VALUES (?,?,?,?,?,?)',
+                (card_id, cash_balance, cash_bonus, tickets, description, ts)
+            )
+            imported += 1
+    conn.commit(); conn.close()
+    print(f"[ImportTx] Imported {imported}, skipped {skipped} zero-balance rows")
+    return jsonify({'success': True, 'imported': imported, 'skipped': skipped, 'total': len(transactions)})
+
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
 @admin_required
@@ -960,11 +1389,12 @@ def api_history(card_id):
     conn = get_db()
     if not conn.execute('SELECT id FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone():
         conn.close(); return jsonify({'error': 'Not found'}), 404
-    rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC',
+    rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at>=? AND cash_balance IS NOT NULL ORDER BY recorded_at ASC',
         (card_id, since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
     conn.close()
     return jsonify({'labels':[r['recorded_at'] for r in rows], 'cash_balance':[r['cash_balance'] for r in rows],
-                    'cash_bonus':[r['cash_bonus'] for r in rows], 'points':[r['points'] for r in rows]})
+                    'cash_bonus':[r['cash_bonus'] for r in rows], 'points':[r['points'] for r in rows],
+                    'descriptions':[r['description'] for r in rows]})
 
 @app.route('/api/cards/<int:card_id>/stats')
 @login_required

@@ -102,6 +102,8 @@ async function run() {
     // ── Token comes from URL ?token= param (injected by bookmarklet) ──────
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token');
+    const refreshToken = params.get('refresh_token');
+    const clientId = params.get('client_id');
 
     if (!token || !token.startsWith('eyJ')) {
         showState('error', 'No token received. Please go back and follow the steps — make sure you paste the code into the Timezone portal address bar while logged in.');
@@ -115,7 +117,7 @@ async function run() {
         const resp = await fetch('/timezone/extract-token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ bearer_token: token, cookies: {} })
+            body: JSON.stringify({ bearer_token: token, cookies: {}, refresh_token: refreshToken, client_id: clientId })
         });
         const result = await resp.json();
         if (result.success) {
