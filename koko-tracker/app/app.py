@@ -1,4 +1,33 @@
 import os, sqlite3, threading, time, hashlib, secrets, json, base64
+import logging
+from collections import deque
+
+# ─── In-memory log buffer (last 500 lines) ────────────────────────────────────
+_log_buffer = deque(maxlen=500)
+
+class _BufferHandler(logging.Handler):
+    def emit(self, record):
+        _log_buffer.append({
+            'ts': self.formatTime(record, '%Y-%m-%d %H:%M:%S'),
+            'level': record.levelname,
+            'msg': self.format(record),
+        })
+
+# Also capture print() output via a stream wrapper
+import sys
+class _PrintCapture:
+    def __init__(self, original):
+        self._orig = original
+    def write(self, msg):
+        if msg.strip():
+            _log_buffer.append({
+                'ts': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+                'level': 'INFO',
+                'msg': msg.rstrip(),
+            })
+        self._orig.write(msg)
+    def flush(self): self._orig.flush()
+    def fileno(self): return self._orig.fileno()
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
 import requests
@@ -6,6 +35,8 @@ from bs4 import BeautifulSoup
 import re
 
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
+sys.stdout = _PrintCapture(sys.stdout)
+sys.stderr = _PrintCapture(sys.stderr)
 
 @app.context_processor
 def inject_discord():
@@ -221,11 +252,21 @@ TZ_HEADERS = {
     'x-app-version': '20210722',
 }
 
+# Timezone MS B2C constants (extracted from localStorage key structure)
+TZ_TENANT_ID  = 'ff9115a9-091c-4a41-8248-bebd73fbe7eb'  # from localStorage key prefix
+TZ_CLIENT_ID  = 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # clientId field in localStorage
+TZ_B2C_POLICY = 'B2C_1A_signupsignin'
+
 def tz_refresh_ms_token(refresh_token, ms_client_id=None):
     """Use Microsoft B2C refresh token to get a new access token for teeg.cloud."""
-    cid    = ms_client_id or TZ_CLIENT_ID
+    cid = ms_client_id or TZ_CLIENT_ID
+    # Tenant ID is the UUID prefix in the localStorage key (NOT the client ID)
     tenant = TZ_TENANT_ID
+    policy = TZ_B2C_POLICY
+    # login.microsoftonline.com works (HTTP 400 = right URL, wrong params)
+    # Need to try different scope formats for B2C
     attempts = [
+        # (endpoint, scope)
         (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
          f'openid offline_access https://identity.teeg.cloud/{cid}/guest.read'),
         (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
@@ -234,6 +275,7 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
          f'{cid}/.default offline_access'),
         (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
          'offline_access'),
+        # B2C-specific endpoint with policy
         (f'https://login.microsoftonline.com/{tenant}/B2C_1A_signupsignin/oauth2/v2.0/token',
          f'openid offline_access https://identity.teeg.cloud/{cid}/guest.read'),
         (f'https://login.microsoftonline.com/common/oauth2/v2.0/token',
@@ -448,6 +490,8 @@ def tz_session_status(tzs):
     # No polls yet (freshly connected) or last poll was recent — show connected
     return 'connected'
 
+
+# ─── Discord Webhook ──────────────────────────────────────────────────────────
 def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
     try:
         diff = new_total - prev_total
@@ -473,26 +517,6 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
         requests.post(webhook_url, json=payload, timeout=5)
     except Exception as e:
         print(f"[Discord] Webhook error: {e}")
-
-def fetch_timezone_history(bearer_token, card_no, cookies_dict=None):
-    try:
-        resp = requests.get(f'{TEEG_API}/guest/cards/AU/{card_no}/transactions', timeout=15, headers={
-            'Authorization': f'Bearer {bearer_token}',
-            'Accept': 'application/json',
-            'Origin': 'https://portal.timezonegames.com',
-            'Referer': 'https://portal.timezonegames.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }, cookies=cookies_dict or {})
-        if resp.status_code == 200:
-            print(f"[Timezone] History API: Fetched transaction history for card {card_no}")
-            return resp.json()
-        print(f"[Timezone] History API error: HTTP {resp.status_code} - {resp.text[:200]}")
-    except Exception as e:
-        print(f"[Timezone] History API error: {e}")
-        return None
-
-
-# ─── Discord Webhook ──────────────────────────────────────────────────────────
 
 # ─── Poller ───────────────────────────────────────────────────────────────────
 def log_poll(card_id, success, message=''):
@@ -522,10 +546,11 @@ def startup_refresh_tz_tokens():
             else:
                 try:
                     exp = datetime.strptime(tzs['token_expires_at'], '%Y-%m-%d %H:%M:%S')
-                    if (exp - now).total_seconds() < 300:
+                    if (exp - now).total_seconds() < 300:  # expired or expiring within 5 min
                         needs_refresh = True
                 except:
                     needs_refresh = True
+
             if needs_refresh:
                 print(f"[Startup] Refreshing token for user {tzs['user_id']}...")
                 new_tok, new_rt, expires_in = tz_refresh_ms_token(tzs['refresh_token'], tzs['ms_client_id'])
@@ -581,7 +606,7 @@ def poll_cards():
                     conn.close()
                     if tzs and tzs['bearer_token']:
                         cookies = json.loads(tzs['cookies_json'] or '{}')
-                        # Proactively refresh token if expiring within 3 minutes
+                        # Proactively refresh token if it expires within 3 minutes
                         bearer = tzs['bearer_token']
                         if tzs['token_expires_at']:
                             try:
@@ -666,17 +691,32 @@ def index():
 @app.route('/register', methods=['GET','POST'])
 def register():
     if request.method == 'POST':
-        u, p = request.form['username'].strip(), request.form['password']
+        u = request.form.get('username','').strip()
+        p = request.form.get('password','')
+        c = request.form.get('confirm_password','')
+        email = request.form.get('email','').strip() or None
         if not u or not p:
             flash('Username and password required.', 'error')
             return render_template('register.html')
+        if len(p) < 8:
+            flash('Password must be at least 8 characters.', 'error')
+            return render_template('register.html')
+        import re as _re
+        if not _re.search(r'[A-Z]', p):
+            flash('Password must contain at least one uppercase letter.', 'error')
+            return render_template('register.html')
+        if not _re.search(r'[0-9]', p):
+            flash('Password must contain at least one number.', 'error')
+            return render_template('register.html')
+        if p != c:
+            flash('Passwords do not match.', 'error')
+            return render_template('register.html')
         conn = get_db()
         try:
-            # First user becomes admin, or if username matches ADMIN_USERNAME env
             count = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
             is_admin = 1 if (count == 0 or (ADMIN_USERNAME and u == ADMIN_USERNAME)) else 0
-            conn.execute('INSERT INTO users (username,password_hash,is_admin) VALUES (?,?,?)',
-                        (u, hash_password(p), is_admin))
+            conn.execute('INSERT INTO users (username,password_hash,email,is_admin) VALUES (?,?,?,?)',
+                        (u, hash_password(p), email, is_admin))
             conn.commit(); flash('Account created! Please log in.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError: flash('Username already taken.', 'error')
@@ -853,34 +893,45 @@ def reset_password(token):
     return render_template('reset_password.html', token=token)
 
 
-@app.route('/admin/timezone-debug')
+@app.route('/api/timezone/reauth', methods=['POST'])
 @login_required
-def timezone_debug():
+def timezone_reauth():
+    """Attempt to refresh Timezone bearer token using stored refresh token."""
     user = get_current_user()
-    if not user or not user['is_admin']:
-        return jsonify({'error': 'Admin only'}), 403
+    # Admin can pass user_id to refresh another user's token
+    data = request.get_json() or {}
+    target_uid = data.get('user_id', user['id'])
+    if target_uid != user['id'] and not user['is_admin']:
+        return jsonify({'success': False, 'error': 'Admin only'}), 403
+
     conn = get_db()
-    sessions = conn.execute('''
-        SELECT ts.*, u.username FROM timezone_sessions ts
-        JOIN users u ON u.id = ts.user_id
-    ''').fetchall()
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (target_uid,)).fetchone()
     conn.close()
-    result = []
-    for s in sessions:
-        result.append({
-            'username': s['username'],
-            'user_id': s['user_id'],
-            'has_bearer': bool(s['bearer_token']),
-            'has_refresh_token': bool(s['refresh_token']),
-            'has_ms_client_id': bool(s['ms_client_id']),
-            'ms_client_id': s['ms_client_id'],
-            'token_expires_at': s['token_expires_at'],
-            'session_expires_at': s['session_expires_at'],
-            'last_poll_at': s['last_poll_at'],
-            'last_poll_status': s['last_poll_status'],
-            'refresh_token_preview': s['refresh_token'][:20] + '...' if s['refresh_token'] else None,
-        })
-    return jsonify(result)
+
+    if not tzs:
+        return jsonify({'success': False, 'error': 'No Timezone session found'})
+    if not tzs['refresh_token']:
+        return jsonify({'success': False, 'error': 'No refresh token stored — user must reconnect via bookmarklet'})
+
+    print(f"[Reauth] Attempting token refresh for user {target_uid}...")
+    new_tok, new_rt, expires_in = tz_refresh_ms_token(tzs['refresh_token'], tzs['ms_client_id'])
+
+    if not new_tok:
+        return jsonify({'success': False, 'error': 'MS token refresh failed — user may need to reconnect via bookmarklet'})
+
+    now = datetime.utcnow()
+    tok_exp = (now + timedelta(seconds=expires_in or 840)).strftime('%Y-%m-%d %H:%M:%S')
+    conn = get_db()
+    upd = 'bearer_token=?, token_expires_at=?, last_poll_status=?, updated_at=CURRENT_TIMESTAMP'
+    params = [new_tok, tok_exp, 'ok']
+    if new_rt:
+        upd += ', refresh_token=?'
+        params.append(new_rt)
+    params.append(target_uid)
+    conn.execute(f'UPDATE timezone_sessions SET {upd} WHERE user_id=?', params)
+    conn.commit(); conn.close()
+    print(f"[Reauth] Token refreshed for user {target_uid}, expires {tok_exp}")
+    return jsonify({'success': True, 'expires': tok_exp, 'message': f'Token refreshed, expires {tok_exp}'})
 
 @app.route('/logout')
 def logout():
@@ -959,28 +1010,6 @@ def delete_card(card_id):
     conn.commit(); conn.close(); flash('Card removed.', 'success')
     return redirect(url_for('dashboard'))
 
-# @app.route('/cards/<int:card_id>/tap-history', methods=['GET'])
-# @login_required
-# def get_tap_history(card_id):
-#     user = get_current_user()
-#     conn = get_db()
-#     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
-#     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
-#     if card['card_type'] != 'timezone':
-#         conn.close(); return jsonify({'error': 'Not a Timezone card'}), 400
-#     tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
-#     conn.close()
-#     if not tzs or not tzs['bearer_token']:
-#         return jsonify({'error': 'No Timezone session'}), 400
-#     guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
-#     if not guest:
-#         return jsonify({'error': 'Could not fetch Timezone data'}), 400
-#     for c in guest.get('cards', []):
-#         if str(c.get('number')) == str(card['card_number']):
-#             history = fetch_timezone_history(tzs['bearer_token'], str(c.get('number')), json.loads(tzs['cookies_json'] or '{}'))
-#             return jsonify({'success': True, 'history': history})
-#     return jsonify({'error': 'Card number not found in Timezone session'})
-
 @app.route('/cards/<int:card_id>/poll-interval', methods=['POST'])
 @login_required
 def update_poll_interval(card_id):
@@ -1019,21 +1048,39 @@ def force_poll(card_id):
                 card_num = str(card['card_number']).strip() if card['card_number'] else ''
                 for c in guest.get('cards', []):
                     api_num = str(c.get('number', '')).strip()
-                    history = fetch_timezone_history(tzs['bearer_token'], api_num, json.loads(tzs['cookies_json'] or '{}'))
                     if api_num == card_num or (card_num and card_num in api_num) or (api_num and api_num in card_num):
                         data = {
                             'cash_balance': float(c.get('cashBalance') or 0),
                             'cash_bonus':   float(c.get('bonusBalance') or 0),
                             'points':       int(c.get('eTickets') or c.get('tickets') or 0),
                             'card_name':    card['card_label'],
-                            'tier':         c.get('tier', ''),
-                            'history':      history if history else []
+                            'tier':         c.get('tier', '')
                         }
                         break
                 if not data:
                     error_msg = f"Card number {card_num!r} not found in Timezone session (found: {[str(c.get('number')) for c in guest.get('cards',[])]})"
             else:
-                error_msg = 'Timezone session returned no cards — token may be expired'
+                # No cards returned — try forcing a token refresh then retry once
+                print(f"[ForcePoll] No cards from Timezone for user {user['id']}, forcing token refresh...")
+                if tzs.get('refresh_token'):
+                    new_tok, new_rt, _ = tz_refresh_ms_token(tzs['refresh_token'], tzs.get('ms_client_id'))
+                    if new_tok:
+                        guest2 = fetch_timezone_guest(new_tok, json.loads(tzs['cookies_json'] or '{}'), user_id=user['id'])
+                        if guest2 and guest2.get('cards'):
+                            card_num = str(card['card_number']).strip() if card['card_number'] else ''
+                            for c in guest2.get('cards', []):
+                                api_num = str(c.get('number', '')).strip()
+                                if api_num == card_num or (card_num and card_num in api_num) or (api_num and api_num in card_num):
+                                    data = {
+                                        'cash_balance': float(c.get('cashBalance') or 0),
+                                        'cash_bonus':   float(c.get('bonusBalance') or 0),
+                                        'points':       int(c.get('eTickets') or c.get('tickets') or 0),
+                                        'card_name':    card['card_label'],
+                                        'tier':         c.get('tier', '')
+                                    }
+                                    break
+                if not data:
+                    error_msg = 'Timezone session returned no cards — please reconnect'
         except Exception as e:
             error_msg = str(e)
 
@@ -1384,6 +1431,36 @@ def import_transactions(card_id):
     print(f"[ImportTx] Imported {imported}, skipped {skipped} zero-balance rows")
     return jsonify({'success': True, 'imported': imported, 'skipped': skipped, 'total': len(transactions)})
 
+
+@app.route('/admin/timezone-debug')
+@login_required
+def timezone_debug():
+    user = get_current_user()
+    if not user or not user['is_admin']:
+        return jsonify({'error': 'Admin only'}), 403
+    conn = get_db()
+    sessions = conn.execute('''
+        SELECT ts.*, u.username FROM timezone_sessions ts
+        JOIN users u ON u.id = ts.user_id
+    ''').fetchall()
+    conn.close()
+    result = []
+    for s in sessions:
+        result.append({
+            'username': s['username'],
+            'user_id': s['user_id'],
+            'has_bearer': bool(s['bearer_token']),
+            'has_refresh_token': bool(s['refresh_token']),
+            'has_ms_client_id': bool(s['ms_client_id']),
+            'ms_client_id': s['ms_client_id'],
+            'token_expires_at': s['token_expires_at'],
+            'session_expires_at': s['session_expires_at'],
+            'last_poll_at': s['last_poll_at'],
+            'last_poll_status': s['last_poll_status'],
+            'refresh_token_preview': s['refresh_token'][:20] + '...' if s['refresh_token'] else None,
+        })
+    return jsonify(result)
+
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
 @admin_required
@@ -1515,7 +1592,6 @@ def api_history(card_id):
 def api_stats(card_id):
     user = get_current_user()
     conn = get_db()
-    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
     latest = conn.execute('SELECT * FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1', (card_id,)).fetchone()
@@ -1523,12 +1599,11 @@ def api_stats(card_id):
     since_24h = (datetime.utcnow()-timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
     first_24h = conn.execute('SELECT cash_balance,cash_bonus FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC LIMIT 1',
         (card_id, since_24h)).fetchone()
-    history = fetch_timezone_history(tzs['bearer_token'], str(card['card_number']), json.loads(tzs['cookies_json'] or '{}')) if (card['card_type']=='timezone' and tzs) else None
     conn.close()
     spent_24h = None
     if first_24h and latest:
         spent_24h = round(((first_24h['cash_balance'] or 0)+(first_24h['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
-    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type'], 'history': history or []})
+    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type']})
 
 @app.route('/api/dashboard/overview')
 @login_required
@@ -1596,5 +1671,6 @@ def start_discord_bot():
 if __name__ == '__main__':
     init_db()
     threading.Thread(target=poll_cards, daemon=True).start()
+    threading.Thread(target=token_watcher, daemon=True).start()
     start_discord_bot()
     app.run(host='0.0.0.0', port=5000, debug=False)

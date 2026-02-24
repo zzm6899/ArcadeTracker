@@ -52,6 +52,12 @@
                 ⬇ Import History
             </button>
             {% endif %}
+            {% if card.card_type == 'timezone' %}
+            <button onclick="tzReauth(this)" id="reauth-btn"
+                class="text-xs text-yellow-500 hover:text-yellow-300 px-3 py-1.5 border border-yellow-800/50 hover:border-yellow-600 rounded-lg transition">
+                🔑 Re-auth
+            </button>
+            {% endif %}
             <button onclick="forcePoll()" id="poll-btn"
                 class="text-xs text-slate-500 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition">
                 ↻ Refresh
@@ -130,20 +136,6 @@
     <div id="tx-log-container">
         <p class="text-slate-600 text-sm">Click <strong>⬇ Import History</strong> to load game transactions.</p>
     </div>
-    <div class="overflow-y-auto rounded-lg border border-slate-700/50" style="max-height: 320px; background-color: #0f172a;">
-        <table class="w-full">
-            <thead class="sticky top-0 bg-slate-900 border-b border-slate-700">
-                <tr>
-                    <th class="py-3 px-4 text-left text-slate-400 text-xs font-semibold tracking-wide">Date</th>
-                    <th class="py-3 px-4 text-left text-slate-400 text-xs font-semibold tracking-wide">Description</th>
-                    <th class="py-3 px-4 text-right text-slate-400 text-xs font-semibold tracking-wide">Change</th>
-                </tr>
-            </thead>
-            <tbody id="tap-history-body">
-                
-            </tbody>
-        </table>
-    </div>
 </div>
 {% endif %}
 
@@ -171,27 +163,6 @@
 .period-btn { color: #64748b; }
 .period-btn.active { background: #4f46e5; color: white; }
 .period-btn:hover:not(.active) { color: #e2e8f0; }
-
-/* Table styling */
-table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-/* Scrollbar styling */
-.overflow-y-auto::-webkit-scrollbar {
-    width: 6px;
-}
-.overflow-y-auto::-webkit-scrollbar-track {
-    background: #0f172a;
-}
-.overflow-y-auto::-webkit-scrollbar-thumb {
-    background: #334155;
-    border-radius: 3px;
-}
-.overflow-y-auto::-webkit-scrollbar-thumb:hover {
-    background: #475569;
-}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script>
@@ -215,24 +186,6 @@ function formatLabel(ts) {
     return d.toLocaleString('en-AU', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 
-function formatDateForHistory(ts) {
-    if (!ts) return '–';
-    try {
-        const d = new Date(ts);
-        if (isNaN(d.getTime())) return '–';
-        const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        const monthName = months[d.getUTCMonth()];
-        const day = d.getUTCDate();
-        const year = d.getUTCFullYear();
-        const hour = String(d.getUTCHours()).padStart(2, '0');
-        const min = String(d.getUTCMinutes()).padStart(2, '0');
-        return `${monthName} ${day} ${hour}:${min}`;
-    } catch(e) {
-        console.error('Date format error:', ts, e);
-        return '–';
-    }
-}
-
 async function loadStats() {
     try {
         const r = await fetch(`/api/cards/${CARD_ID}/stats`);
@@ -248,18 +201,6 @@ async function loadStats() {
             el.textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
             el.className = 'font-bold text-xl ' + (spent > 0 ? 'text-red-400' : 'text-green-400');
         }
-        const tbody = document.getElementById('tap-history-body');
-            if(d.history && d.history.length){
-                tbody.innerHTML = d.history.map(h => `
-                    <tr class="border-b border-slate-800/50 hover:bg-slate-900/50 transition">
-                        <td class="py-3 px-4 text-slate-300 text-xs font-mono">${formatDateForHistory(h.modified)}</td>
-                        <td class="py-3 px-4 text-slate-300 text-xs">${h.description || 'Recharge'}</td>
-                        <td class="py-3 px-4 text-right text-green-400 text-xs ${(h.bonusBalance + h.cashBalance < 0) ? 'text-red-400' : 'text-green-400'} font-semibold">${(h.bonusBalance + h.cashBalance > 0 ? '+' : '')}${(h.bonusBalance + h.cashBalance).toFixed(2)}</td>
-                    </tr>
-                `).join('');
-            } else {
-                tbody.innerHTML = '<tr><td colspan="3" class="py-4 px-4 text-center text-slate-600 text-sm">No activity yet.</td></tr>';
-            }
     } catch(e) { console.error('Stats error:', e); }
 }
 
@@ -330,6 +271,37 @@ async function loadChart(period = 'day') {
     } catch(e) { console.error('Chart error:', e); }
 }
 
+// ── Timezone token re-auth ─────────────────────────────────────────────────────
+async function tzReauth(btn) {
+    const orig = btn.textContent;
+    btn.textContent = '⟳ Refreshing...'; btn.disabled = true;
+    try {
+        const r = await fetch('/api/timezone/reauth', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: '{}'
+        });
+        const d = await r.json();
+        if (d.success) {
+            btn.textContent = '✅ Refreshed!';
+            btn.className = btn.className.replace('text-yellow-500', 'text-green-400').replace('border-yellow-800/50', 'border-green-800/50');
+            setTimeout(() => location.reload(), 1200);
+        } else {
+            btn.textContent = '❌ Failed';
+            // Show error in poll log area
+            const container = document.getElementById('poll-log-container');
+            if (container) {
+                const errDiv = document.createElement('div');
+                errDiv.className = 'text-xs text-red-400 mt-2 p-2 bg-red-900/20 border border-red-900 rounded-lg';
+                errDiv.textContent = '✗ Token refresh failed — reconnect via bookmarklet in Settings';
+                container.prepend(errDiv);
+                setTimeout(() => errDiv.remove(), 6000);
+            }
+            setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
+        }
+    } catch(e) { btn.textContent = orig; btn.disabled = false; }
+}
+
 // ── Force poll — updates stats, chart, poll log and timestamp ─────────────────
 async function forcePoll() {
     const btn = document.getElementById('poll-btn');
@@ -370,7 +342,6 @@ async function forcePoll() {
                 const active = document.querySelector('.period-btn.active');
                 loadChart(active ? active.id.replace('btn-','') : 'day');
                 loadStats();
-                loadHistory();
             }, 400);
         } else {
             btn.textContent = '✗ Failed';

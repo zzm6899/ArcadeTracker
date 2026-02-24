@@ -158,18 +158,158 @@
                 </span>
             </div>
         </div>
+        <div class="flex flex-col gap-1 items-end shrink-0">
         {% if st in ['stale','error'] %}
-        <span class="text-xs text-red-300 bg-red-900/20 border border-red-900 rounded-lg px-2 py-1">
-            ⚠️ {{ 'API error — needs reconnect' if st == 'error' else 'Stale — check token' }}
-        </span>
+        <button onclick="tzReauth({{ ts.user_id }}, this)"
+            class="text-xs text-red-300 bg-red-900/20 border border-red-900 hover:bg-red-900/40 rounded-lg px-2 py-1 transition">
+            ⚠️ {{ 'Error' if st == 'error' else 'Stale' }} — 🔄 Refresh Token
+        </button>
+        {% else %}
+        <button onclick="tzReauth({{ ts.user_id }}, this)"
+            class="text-xs text-slate-600 hover:text-slate-400 border border-slate-700 hover:border-slate-600 rounded-lg px-2 py-1 transition">
+            🔄 Refresh Token
+        </button>
         {% endif %}
+        </div>
     </div>
     {% endfor %}
     </div>
 </div>
 {% endif %}
 
+
+<!-- Console Log -->
+<div class="card rounded-2xl p-5 mt-6">
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">🖥️ Console Log</h2>
+        <div class="flex items-center gap-2">
+            <input id="log-filter" type="text" placeholder="Filter logs..."
+                class="input-field text-xs px-3 py-1.5 rounded-lg w-40"
+                oninput="filterLogs()">
+            <label class="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer">
+                <input type="checkbox" id="log-autoscroll" checked class="rounded"> Auto-scroll
+            </label>
+            <label class="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer">
+                <input type="checkbox" id="log-autorefresh" checked class="rounded"> Live
+            </label>
+            <button onclick="clearLogDisplay()" class="text-xs text-slate-600 hover:text-slate-400 px-2 py-1 border border-slate-700 rounded-lg">Clear</button>
+        </div>
+    </div>
+    <div id="log-console"
+        class="bg-slate-950 rounded-xl p-3 font-mono text-xs overflow-y-auto space-y-0.5"
+        style="height: 340px;">
+        <div class="text-slate-600">Loading logs...</div>
+    </div>
+</div>
+
 <script>
+let _logLines = [];
+let _logRefreshInterval = null;
+let _logSeen = 0;
+
+const LEVEL_STYLES = {
+    'ERROR':   'text-red-400',
+    'WARNING': 'text-yellow-400',
+    'INFO':    'text-slate-300',
+    'DEBUG':   'text-slate-500',
+};
+
+function renderLogs() {
+    const filter = (document.getElementById('log-filter').value || '').toLowerCase();
+    const console_ = document.getElementById('log-console');
+    const autoscroll = document.getElementById('log-autoscroll').checked;
+
+    const filtered = filter
+        ? _logLines.filter(l => l.msg.toLowerCase().includes(filter) || l.level.toLowerCase().includes(filter))
+        : _logLines;
+
+    console_.innerHTML = filtered.length === 0
+        ? '<div class="text-slate-600">No logs yet.</div>'
+        : filtered.map(l => {
+            const cls = LEVEL_STYLES[l.level] || 'text-slate-400';
+            const lvl = l.level === 'ERROR' ? `<span class="text-red-500 font-bold">[ERR]</span>` :
+                        l.level === 'WARNING' ? `<span class="text-yellow-500">[WRN]</span>` : '';
+            // Colour-code known prefixes
+            const msg = l.msg
+                .replace(/\[Poller\]/g, '<span class="text-blue-400">[Poller]</span>')
+                .replace(/\[Timezone\]/g, '<span class="text-purple-400">[Timezone]</span>')
+                .replace(/\[Startup\]/g, '<span class="text-cyan-400">[Startup]</span>')
+                .replace(/\[Reauth\]/g, '<span class="text-yellow-400">[Reauth]</span>')
+                .replace(/\[Token watcher\]/g, '<span class="text-yellow-400">[Token watcher]</span>')
+                .replace(/\[Bot\]/g, '<span class="text-indigo-400">[Bot]</span>')
+                .replace(/\[Discord\]/g, '<span class="text-indigo-400">[Discord]</span>')
+                .replace(/\[Mail\]/g, '<span class="text-pink-400">[Mail]</span>')
+                .replace(/HTTP 200/g, '<span class="text-green-500">HTTP 200</span>')
+                .replace(/HTTP [45]\d\d/g, m => `<span class="text-red-400">${m}</span>`)
+                .replace(/SUCCESS/g, '<span class="text-green-400 font-bold">SUCCESS</span>');
+            return `<div class="flex gap-2 leading-5 hover:bg-slate-900/50 px-1 rounded">
+                <span class="text-slate-600 shrink-0 w-36">${l.ts}</span>
+                ${lvl}
+                <span class="${cls} break-all">${msg}</span>
+            </div>`;
+        }).join('');
+
+    if (autoscroll) console_.scrollTop = console_.scrollHeight;
+}
+
+function filterLogs() { renderLogs(); }
+
+function clearLogDisplay() {
+    _logLines = [];
+    _logSeen = 0;
+    document.getElementById('log-console').innerHTML = '<div class="text-slate-600">Cleared.</div>';
+}
+
+async function fetchLogs() {
+    try {
+        const r = await fetch('/admin/logs');
+        const d = await r.json();
+        if (d.lines && d.lines.length !== _logSeen) {
+            _logLines = d.lines;
+            _logSeen = d.lines.length;
+            renderLogs();
+        }
+    } catch(e) {
+        document.getElementById('log-console').innerHTML = '<div class="text-red-400">Failed to fetch logs.</div>';
+    }
+}
+
+// Auto-refresh toggle
+document.getElementById('log-autorefresh').addEventListener('change', function() {
+    if (this.checked) {
+        _logRefreshInterval = setInterval(fetchLogs, 2000);
+    } else {
+        clearInterval(_logRefreshInterval);
+    }
+});
+
+// Initial load + start live refresh
+fetchLogs();
+_logRefreshInterval = setInterval(fetchLogs, 2000);
+</script>
+
+<script>
+async function tzReauth(userId, btn) {
+    const orig = btn.textContent;
+    btn.textContent = '⟳ Refreshing...'; btn.disabled = true;
+    try {
+        const r = await fetch('/api/timezone/reauth', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({user_id: userId})
+        });
+        const d = await r.json();
+        if (d.success) {
+            btn.textContent = '✅ Refreshed!';
+            btn.className = btn.className.replace(/text-red-\w+/g, 'text-green-400').replace(/border-red-\w+/g, 'border-green-700').replace(/bg-red-\w+\/\w+/g, '');
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            btn.textContent = '❌ ' + (d.error || 'Failed');
+            setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
+        }
+    } catch(e) { btn.textContent = orig; btn.disabled = false; }
+}
+
 function toggleRename(uid) {
     const f = document.getElementById('rename-form-' + uid);
     f.classList.toggle('hidden');

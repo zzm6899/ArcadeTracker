@@ -148,7 +148,10 @@
         {% if tz_session %}
         <span class="text-xs text-slate-600">Last poll: {{ tz_session.last_poll_at[:16] if tz_session.last_poll_at else 'Never' }}</span>
         {% if tz_status in ['stale','error'] %}
-        <span class="text-xs text-red-400">⚠️ {{ tz_status }}</span>
+        <button id="tz-reauth-btn" onclick="tzReauth(this)"
+            class="text-xs text-red-400 hover:text-red-300 border border-red-900/50 hover:border-red-700 rounded-lg px-2 py-0.5 transition">
+            ⚠️ {{ tz_status }} — 🔄 Refresh
+        </button>
         {% endif %}
         {% endif %}
     </div>
@@ -384,6 +387,24 @@ async function updateInterval(cardId, interval) {
 }
 
 // ── Force poll ────────────────────────────────────────────────────────────────
+async function tzReauth(btn) {
+    const orig = btn.textContent;
+    btn.textContent = '⟳ Refreshing...'; btn.disabled = true;
+    try {
+        const r = await fetch('/api/timezone/reauth', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+        const d = await r.json();
+        if (d.success) {
+            btn.textContent = '✅ Refreshed!';
+            btn.className = 'text-xs text-green-400 border border-green-900/50 rounded-lg px-2 py-0.5';
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            btn.textContent = '❌ ' + (d.error || 'Failed — reconnect via bookmarklet');
+            btn.style.maxWidth = '280px';
+            setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+        }
+    } catch(e) { btn.textContent = orig; btn.disabled = false; }
+}
+
 async function forcePoll(cardId, btn) {
     const orig = btn.textContent;
     btn.textContent = '⟳'; btn.disabled = true;
