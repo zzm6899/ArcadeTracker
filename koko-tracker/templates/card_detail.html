@@ -1,5 +1,21 @@
 {% extends "base.html" %}
-{% block title %}{{ card.card_label or card.card_number or 'Card' }} – Balance Tracker{% endblock %}
+{% block title %}{{ card.card_label or card.card_number or 'Card' }} – Balance Tracker<!-- Poll Logs -->
+{% if poll_logs %}
+<div class="card rounded-2xl p-6 mt-6">
+    <h2 class="text-lg font-bold text-white mb-4">📋 Recent Poll Log</h2>
+    <div class="space-y-1.5">
+    {% for log in poll_logs %}
+    <div class="flex items-center gap-3 text-xs py-1.5 border-b border-slate-800">
+        <span class="{{ 'text-green-400' if log.success else 'text-red-400' }}">{{ '✅' if log.success else '❌' }}</span>
+        <span class="text-slate-500 font-mono">{{ log.logged_at[:16] }}</span>
+        <span class="text-slate-400">{{ log.message or ('OK' if log.success else 'Failed') }}</span>
+    </div>
+    {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% endblock %}
 {% block content %}
 
 <div class="flex items-center gap-4 mb-6">
@@ -8,14 +24,29 @@
 
 <div class="card rounded-2xl p-6 mb-6">
     <div class="flex items-start justify-between">
-        <div>
-            <div class="text-xs text-indigo-400 font-medium uppercase tracking-wider mb-1">Game Card</div>
+        <div class="flex-1">
+            <div class="flex items-center gap-2 mb-1 flex-wrap">
+                {% if card.card_type == 'timezone' %}
+                <div class="text-xs text-yellow-400 font-medium uppercase tracking-wider">🕹️ Timezone Powercard</div>
+                {% else %}
+                <div class="text-xs text-purple-400 font-medium uppercase tracking-wider">🎮 Koko Card</div>
+                {% endif %}
+                {% if card.tier %}
+                <span class="text-xs px-2 py-0.5 rounded-full font-medium
+                    {% if card.tier == 'Platinum' %}bg-purple-900/60 text-purple-300 border border-purple-700
+                    {% elif card.tier == 'Gold' %}bg-yellow-900/60 text-yellow-300 border border-yellow-700
+                    {% elif card.tier == 'Silver' %}bg-slate-600/60 text-slate-300 border border-slate-500
+                    {% else %}bg-orange-900/60 text-orange-300 border border-orange-700{% endif %}">
+                    {{ card.tier }}
+                </span>
+                {% endif %}
+            </div>
             <h1 class="text-2xl font-bold text-white">{{ card.card_label or card.card_number or card.card_token }}</h1>
             {% if card.card_number %}
             <p class="text-slate-500 text-sm mt-0.5 font-mono">{{ card.card_number }}</p>
             {% endif %}
         </div>
-        <span class="text-3xl">🎰</span>
+        <span class="text-3xl">{{ '🕹️' if card.card_type == 'timezone' else '🎮' }}</span>
     </div>
     
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6" id="stats-container">
@@ -28,8 +59,8 @@
             <div class="font-bold text-yellow-400 text-2xl" id="stat-bonus">–</div>
         </div>
         <div class="bg-slate-800 rounded-xl p-4">
-            <div class="text-xs text-slate-400 mb-1">Points</div>
-            <div class="font-bold text-purple-400 text-2xl" id="stat-points">–</div>
+            <div class="text-xs text-slate-400 mb-1">{{ 'e-Tickets' if card.card_type == 'timezone' else 'Points' }}</div>
+            <div class="font-bold text-{{ 'orange' if card.card_type == 'timezone' else 'purple' }}-400 text-2xl" id="stat-points">–</div>
         </div>
         <div class="bg-slate-800 rounded-xl p-4">
             <div class="text-xs text-slate-400 mb-1">Spent (24h)</div>
@@ -241,5 +272,21 @@ setInterval(() => {
     if (active) loadChart(active.id.replace('btn-', ''));
 }, 60000);
 </script>
+
+<!-- Poll Logs -->
+{% if poll_logs %}
+<div class="card rounded-2xl p-6 mt-6">
+    <h2 class="text-lg font-bold text-white mb-4">📋 Recent Poll Log</h2>
+    <div class="space-y-1.5">
+    {% for log in poll_logs %}
+    <div class="flex items-center gap-3 text-xs py-1.5 border-b border-slate-800">
+        <span class="{{ 'text-green-400' if log.success else 'text-red-400' }}">{{ '✅' if log.success else '❌' }}</span>
+        <span class="text-slate-500 font-mono">{{ log.logged_at[:16] }}</span>
+        <span class="text-slate-400">{{ log.message or ('OK' if log.success else 'Failed') }}</span>
+    </div>
+    {% endfor %}
+    </div>
+</div>
+{% endif %}
 
 {% endblock %}

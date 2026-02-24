@@ -9,11 +9,13 @@ app = Flask(__name__, template_folder='../templates', static_folder='../static')
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
 DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
-POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 60))
+DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 60))
 TIMEZONE_POLL_INTERVAL = int(os.environ.get('TIMEZONE_POLL_INTERVAL', 900))
 KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
 TEEG_API = 'https://api.teeg.cloud'
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
 
+# ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -27,6 +29,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            is_admin INTEGER DEFAULT 0,
+            timezone_name TEXT DEFAULT 'Australia/Sydney',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS cards (
@@ -37,6 +41,7 @@ def init_db():
             card_label TEXT,
             card_number TEXT,
             tier TEXT,
+            poll_interval INTEGER DEFAULT 60,
             active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id),
@@ -49,6 +54,7 @@ def init_db():
             cash_bonus REAL,
             points INTEGER,
             card_name TEXT,
+            tier TEXT,
             recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (card_id) REFERENCES cards(id)
         );
@@ -60,21 +66,36 @@ def init_db():
             token_expires_at TEXT,
             session_expires_at TEXT,
             guest_id TEXT,
+            last_poll_at TEXT,
+            last_poll_status TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
+        CREATE TABLE IF NOT EXISTS poll_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            success INTEGER DEFAULT 1,
+            message TEXT,
+            logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE INDEX IF NOT EXISTS idx_history_card_time ON balance_history(card_id, recorded_at);
     ''')
-    # Migrations for existing databases
+    # Migrations
     for sql in [
         'ALTER TABLE cards ADD COLUMN tier TEXT',
+        'ALTER TABLE cards ADD COLUMN poll_interval INTEGER DEFAULT 60',
         'ALTER TABLE balance_history ADD COLUMN tier TEXT',
+        'ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN timezone_name TEXT DEFAULT "Australia/Sydney"',
+        'ALTER TABLE timezone_sessions ADD COLUMN last_poll_at TEXT',
+        'ALTER TABLE timezone_sessions ADD COLUMN last_poll_status TEXT',
     ]:
         try: conn.execute(sql)
         except: pass
     conn.commit()
     conn.close()
 
+# ─── Auth ─────────────────────────────────────────────────────────────────────
 def hash_password(p): return hashlib.sha256(p.encode()).hexdigest()
 
 def get_current_user():
@@ -92,11 +113,21 @@ def login_required(f):
         return f(*a, **k)
     return d
 
-# ── Koko scraper ──────────────────────────────────────────────────────────────
+def admin_required(f):
+    from functools import wraps
+    @wraps(f)
+    def d(*a, **k):
+        u = get_current_user()
+        if not u: return redirect(url_for('login'))
+        if not u['is_admin']: return redirect(url_for('dashboard'))
+        return f(*a, **k)
+    return d
+
+# ─── Koko scraper ─────────────────────────────────────────────────────────────
 def fetch_koko_balance(token):
     try:
         resp = requests.get(f"{KOKO_BASE_URL}?i={token}", timeout=15, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         soup = BeautifulSoup(resp.text, 'html.parser')
         data = {'card_name': None, 'cash_balance': None, 'cash_bonus': None, 'points': None}
@@ -133,7 +164,7 @@ def fetch_koko_balance(token):
     except Exception as e:
         print(f"[Koko] Error: {e}"); return None
 
-# ── Timezone API ──────────────────────────────────────────────────────────────
+# ─── Timezone API ─────────────────────────────────────────────────────────────
 def fetch_timezone_guest(bearer_token, cookies_dict=None):
     try:
         resp = requests.get(f'{TEEG_API}/guest?version=20210722', timeout=15, headers={
@@ -141,10 +172,13 @@ def fetch_timezone_guest(bearer_token, cookies_dict=None):
             'Accept': 'application/json',
             'Origin': 'https://portal.timezonegames.com',
             'Referer': 'https://portal.timezonegames.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         }, cookies=cookies_dict or {})
         print(f"[Timezone] guest API: HTTP {resp.status_code}")
-        return resp.json() if resp.status_code == 200 else None
+        if resp.status_code == 200:
+            return resp.json()
+        print(f"[Timezone] Error body: {resp.text[:200]}")
+        return None
     except Exception as e:
         print(f"[Timezone] Error: {e}"); return None
 
@@ -160,25 +194,62 @@ def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_e
     ''', (user_id, bearer_token, json.dumps(cookies_dict), token_exp, sess_exp, guest_id))
     conn.commit(); conn.close()
 
-# ── Poller ────────────────────────────────────────────────────────────────────
+def tz_session_status(tzs):
+    """Return status string for a timezone session."""
+    if not tzs or not tzs['bearer_token']:
+        return 'disconnected'
+    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    if tzs['session_expires_at'] and tzs['session_expires_at'] < now:
+        return 'expired'
+    if tzs['last_poll_status'] == 'error':
+        return 'error'
+    if tzs['last_poll_at']:
+        last = datetime.strptime(tzs['last_poll_at'], '%Y-%m-%d %H:%M:%S')
+        if (datetime.utcnow() - last).total_seconds() > TIMEZONE_POLL_INTERVAL * 3:
+            return 'stale'
+    return 'connected'
+
+# ─── Poller ───────────────────────────────────────────────────────────────────
+def log_poll(card_id, success, message=''):
+    try:
+        conn = get_db()
+        conn.execute('INSERT INTO poll_log (card_id, success, message) VALUES (?,?,?)',
+                    (card_id, 1 if success else 0, message))
+        # Keep only last 100 entries per card
+        conn.execute('''DELETE FROM poll_log WHERE card_id=? AND id NOT IN 
+                       (SELECT id FROM poll_log WHERE card_id=? ORDER BY logged_at DESC LIMIT 100)''',
+                    (card_id, card_id))
+        conn.commit(); conn.close()
+    except: pass
+
 def poll_cards():
-    print(f"[Poller] Started. Koko:{POLL_INTERVAL}s Timezone:{TIMEZONE_POLL_INTERVAL}s")
-    last_tz_poll = {}
+    print(f"[Poller] Started. Default: {DEFAULT_POLL_INTERVAL}s Timezone: {TIMEZONE_POLL_INTERVAL}s")
+    last_poll = {}  # card_id -> last poll timestamp
+
     while True:
         try:
             conn = get_db()
             cards = conn.execute('SELECT * FROM cards WHERE active=1').fetchall()
             conn.close()
+
+            now = time.time()
             for card in cards:
-                data = None
                 ctype = card['card_type'] or 'koko'
+                interval = card['poll_interval'] or (TIMEZONE_POLL_INTERVAL if ctype == 'timezone' else DEFAULT_POLL_INTERVAL)
+
+                if now - last_poll.get(card['id'], 0) < interval:
+                    continue
+                last_poll[card['id']] = now
+
+                data = None
                 if ctype == 'koko':
                     data = fetch_koko_balance(card['card_token'])
+                    if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
+                        log_poll(card['id'], True, 'OK')
+                    else:
+                        log_poll(card['id'], False, 'No data returned')
+
                 elif ctype == 'timezone':
-                    now = time.time()
-                    if now - last_tz_poll.get(card['id'], 0) < TIMEZONE_POLL_INTERVAL:
-                        continue
-                    last_tz_poll[card['id']] = now
                     conn = get_db()
                     tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (card['user_id'],)).fetchone()
                     conn.close()
@@ -196,19 +267,37 @@ def poll_cards():
                                         'tier': c.get('tier', ''),
                                     }
                                     break
+                            # Update poll status
+                            conn = get_db()
+                            status = 'ok' if data else 'card_not_found'
+                            conn.execute('''UPDATE timezone_sessions SET last_poll_at=?, last_poll_status=? WHERE user_id=?''',
+                                        (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), status, card['user_id']))
+                            conn.commit(); conn.close()
+                            log_poll(card['id'], bool(data), status)
+                        else:
+                            conn = get_db()
+                            conn.execute('UPDATE timezone_sessions SET last_poll_status=? WHERE user_id=?',
+                                        ('error', card['user_id']))
+                            conn.commit(); conn.close()
+                            log_poll(card['id'], False, 'API error - token may be expired')
+                            print(f"[Poller] Timezone API error for user {card['user_id']} - token may be expired")
+                    else:
+                        log_poll(card['id'], False, 'No session token')
+
                 if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
                     conn = get_db()
-                    conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name) VALUES (?,?,?,?,?)',
-                        (card['id'], data.get('cash_balance'), data.get('cash_bonus'), data.get('points'), data.get('card_name')))
-                    if data.get('card_name') and not card['card_number']:
-                        conn.execute('UPDATE cards SET card_number=? WHERE id=?', (data['card_name'], card['id']))
+                    conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name,tier) VALUES (?,?,?,?,?,?)',
+                        (card['id'], data.get('cash_balance'), data.get('cash_bonus'), data.get('points'), data.get('card_name'), data.get('tier','')))
+                    if data.get('tier'):
+                        conn.execute('UPDATE cards SET tier=? WHERE id=?', (data['tier'], card['id']))
                     conn.commit(); conn.close()
                     print(f"[Poller] Card {card['id']} ({ctype}): {data.get('cash_balance')}/{data.get('cash_bonus')}/{data.get('points')}")
+
         except Exception as e:
             print(f"[Poller] Error: {e}")
-        time.sleep(POLL_INTERVAL)
+        time.sleep(10)  # Check every 10s, each card polls at its own interval
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ─── Routes: Auth ─────────────────────────────────────────────────────────────
 @app.route('/')
 def index():
     return redirect(url_for('dashboard') if get_current_user() else url_for('login'))
@@ -222,7 +311,10 @@ def register():
             return render_template('register.html')
         conn = get_db()
         try:
-            conn.execute('INSERT INTO users (username,password_hash) VALUES (?,?)', (u, hash_password(p)))
+            # First user becomes admin
+            count = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            conn.execute('INSERT INTO users (username,password_hash,is_admin) VALUES (?,?,?)',
+                        (u, hash_password(p), 1 if count == 0 else 0))
             conn.commit(); flash('Account created! Please log in.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError: flash('Username already taken.', 'error')
@@ -245,6 +337,20 @@ def login():
 def logout():
     session.clear(); return redirect(url_for('login'))
 
+@app.route('/settings', methods=['GET','POST'])
+@login_required
+def settings():
+    user = get_current_user()
+    if request.method == 'POST':
+        tz = request.form.get('timezone_name', 'Australia/Sydney')
+        conn = get_db()
+        conn.execute('UPDATE users SET timezone_name=? WHERE id=?', (tz, user['id']))
+        conn.commit(); conn.close()
+        flash('Settings saved.', 'success')
+        return redirect(url_for('settings'))
+    return render_template('settings.html', user=user)
+
+# ─── Routes: Dashboard ────────────────────────────────────────────────────────
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -258,26 +364,31 @@ def dashboard():
     ''', (user['id'],)).fetchall()
     tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
     conn.close()
-    return render_template('dashboard.html', user=user, cards=cards, tz_connected=bool(tzs and tzs['bearer_token']), tz_session=tzs)
+    tz_status = tz_session_status(tzs)
+    return render_template('dashboard.html', user=user, cards=cards,
+                          tz_connected=tz_status=='connected', tz_session=tzs,
+                          tz_status=tz_status)
 
+# ─── Routes: Cards ────────────────────────────────────────────────────────────
 @app.route('/cards/add', methods=['POST'])
 @login_required
 def add_card():
     user = get_current_user()
     token = request.form.get('card_token','').strip()
     label = request.form.get('card_label','').strip()
+    interval = int(request.form.get('poll_interval', DEFAULT_POLL_INTERVAL))
     if not token: flash('Card token is required.', 'error'); return redirect(url_for('dashboard'))
     data = fetch_koko_balance(token)
     if not data or all(v is None for v in [data['cash_balance'], data['cash_bonus'], data['points']]):
         flash('Could not fetch data for that card token.', 'error'); return redirect(url_for('dashboard'))
     conn = get_db()
     try:
-        conn.execute('INSERT INTO cards (user_id,card_type,card_token,card_label,card_number) VALUES (?,?,?,?,?)',
-            (user['id'],'koko',token, label or data.get('card_name',token), data.get('card_name')))
+        conn.execute('INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,poll_interval) VALUES (?,?,?,?,?,?)',
+            (user['id'],'koko',token, label or data.get('card_name',token), data.get('card_name'), interval))
         cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name) VALUES (?,?,?,?,?)',
             (cid, data['cash_balance'], data['cash_bonus'], data['points'], data['card_name']))
-        conn.commit(); flash(f'Koko card added! Balance: ${data["cash_balance"] or 0:.2f}', 'success')
+        conn.commit(); flash(f'Koko card added!', 'success')
     except sqlite3.IntegrityError: flash('Card already added.', 'error')
     finally: conn.close()
     return redirect(url_for('dashboard'))
@@ -291,21 +402,77 @@ def delete_card(card_id):
     conn.commit(); conn.close(); flash('Card removed.', 'success')
     return redirect(url_for('dashboard'))
 
+@app.route('/cards/<int:card_id>/poll-interval', methods=['POST'])
+@login_required
+def update_poll_interval(card_id):
+    user = get_current_user()
+    interval = int(request.form.get('poll_interval', DEFAULT_POLL_INTERVAL))
+    conn = get_db()
+    conn.execute('UPDATE cards SET poll_interval=? WHERE id=? AND user_id=?', (interval, card_id, user['id']))
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'interval': interval})
+
+@app.route('/cards/<int:card_id>/force-poll', methods=['POST'])
+@login_required
+def force_poll(card_id):
+    user = get_current_user()
+    conn = get_db()
+    card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
+    conn.close()
+    if not card: return jsonify({'error': 'Not found'}), 404
+
+    data = None
+    if card['card_type'] == 'koko':
+        data = fetch_koko_balance(card['card_token'])
+    elif card['card_type'] == 'timezone':
+        conn = get_db()
+        tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+        conn.close()
+        if tzs:
+            guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
+            if guest:
+                for c in guest.get('cards', []):
+                    if str(c.get('number')) == str(card['card_number']):
+                        data = {'cash_balance': c.get('cashBalance',0), 'cash_bonus': c.get('bonusBalance',0),
+                                'points': c.get('eTickets',0), 'card_name': card['card_label'], 'tier': c.get('tier','')}
+                        break
+
+    if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
+        conn = get_db()
+        conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name,tier) VALUES (?,?,?,?,?,?)',
+            (card_id, data.get('cash_balance'), data.get('cash_bonus'), data.get('points'), data.get('card_name'), data.get('tier','')))
+        conn.commit(); conn.close()
+        log_poll(card_id, True, 'Manual poll')
+        return jsonify({'success': True, 'data': data})
+    return jsonify({'error': 'Could not fetch data'}), 400
+
 @app.route('/cards/<int:card_id>')
 @login_required
 def card_detail(card_id):
     user = get_current_user()
     conn = get_db()
     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=? AND active=1', (card_id, user['id'])).fetchone()
+    if not card: conn.close(); return redirect(url_for('dashboard'))
+    logs = conn.execute('SELECT * FROM poll_log WHERE card_id=? ORDER BY logged_at DESC LIMIT 20', (card_id,)).fetchall()
     conn.close()
-    if not card: return redirect(url_for('dashboard'))
-    return render_template('card_detail.html', user=user, card=card)
+    return render_template('card_detail.html', user=user, card=card, poll_logs=logs)
 
-# ── Timezone routes ───────────────────────────────────────────────────────────
+# ─── Routes: Timezone ─────────────────────────────────────────────────────────
 @app.route('/timezone/connect')
 @login_required
 def timezone_connect():
     return render_template('timezone_connect.html', user=get_current_user())
+
+@app.route('/timezone/start')
+@login_required
+def timezone_start():
+    app_url = os.environ.get('APP_URL', request.host_url.rstrip('/'))
+    return render_template('timezone_start.html', user=get_current_user(), app_url=app_url)
+
+@app.route('/timezone/landing')
+@login_required
+def timezone_landing():
+    return render_template('timezone_landing.html', user=get_current_user())
 
 @app.route('/timezone/callback', methods=['POST'])
 @login_required
@@ -329,13 +496,38 @@ def timezone_callback():
     conn = get_db()
     conn.execute('UPDATE timezone_sessions SET guest_id=? WHERE user_id=?', (guest.get('id'), user['id']))
     conn.commit(); conn.close()
-    cards = [{'number': str(c.get('number','')), 'cashBalance': c.get('cashBalance',0),
-               'bonusBalance': c.get('bonusBalance',0), 'tickets': c.get('eTickets', c.get('tickets',0)),
-               'paperTickets': c.get('paperTickets',0), 'cumulativeBalance': c.get('cumulativeBalance',0),
-               'tier': c.get('tier',''), 'status': c.get('status','Active'),
-               'fullCardNumber': c.get('fullCardNumber',''),
-               'country': c.get('country','')} for c in guest.get('cards',[])]
+    cards = _format_tz_cards(guest)
     return jsonify({'success': True, 'cards': cards, 'name': guest.get('givenName','')})
+
+@app.route('/timezone/extract-token', methods=['POST'])
+@login_required
+def timezone_extract_token():
+    user = get_current_user()
+    data = request.get_json() or {}
+    bearer_token = data.get('bearer_token')
+    cookies_from_browser = data.get('cookies', {})
+    if bearer_token and bearer_token.startswith('eyJ'):
+        guest = fetch_timezone_guest(bearer_token, cookies_from_browser)
+        if guest:
+            try:
+                payload = bearer_token.split('.')[1]
+                payload += '=' * (4 - len(payload) % 4)
+                claims = json.loads(base64.b64decode(payload))
+                token_exp = datetime.utcfromtimestamp(claims['exp']).strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+            sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+            save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'))
+            return jsonify({'success': True, 'cards': _format_tz_cards(guest), 'name': guest.get('givenName','')})
+    return jsonify({'success': False, 'error': 'Could not extract token'})
+
+def _format_tz_cards(guest):
+    return [{'number': str(c.get('number','')), 'cashBalance': c.get('cashBalance',0),
+             'bonusBalance': c.get('bonusBalance',0), 'tickets': c.get('eTickets', c.get('tickets',0)),
+             'paperTickets': c.get('paperTickets',0), 'cumulativeBalance': c.get('cumulativeBalance',0),
+             'tier': c.get('tier',''), 'status': c.get('status','Active'),
+             'fullCardNumber': c.get('fullCardNumber',''), 'country': c.get('country','')}
+            for c in guest.get('cards',[])]
 
 @app.route('/timezone/add-card', methods=['POST'])
 @login_required
@@ -347,22 +539,22 @@ def timezone_add_card():
     bonus_balance = float(request.form.get('bonus_balance', 0))
     tickets = int(float(request.form.get('tickets', 0)))
     tier = request.form.get('tier', '')
+    interval = int(request.form.get('poll_interval', TIMEZONE_POLL_INTERVAL))
     if not card_number: flash('Card number required.', 'error'); return redirect(url_for('dashboard'))
     conn = get_db()
     try:
-        # Check if card exists but was removed (active=0)
         existing = conn.execute("SELECT id FROM cards WHERE user_id=? AND card_token=?",
             (user['id'], f'tz_{card_number}')).fetchone()
         if existing:
-            conn.execute("UPDATE cards SET active=1, card_label=? WHERE id=?",
-                (card_label or f'Timezone {card_number}', existing['id']))
+            conn.execute("UPDATE cards SET active=1, card_label=?, tier=? WHERE id=?",
+                (card_label or f'Timezone {card_number}', tier, existing['id']))
             cid = existing['id']
         else:
-            conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,tier) VALUES (?,'timezone',?,?,?,?)",
-                (user['id'], f'tz_{card_number}', card_label or f'Timezone {card_number}', card_number, tier))
+            conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,tier,poll_interval) VALUES (?,'timezone',?,?,?,?,?)",
+                (user['id'], f'tz_{card_number}', card_label or f'Timezone {card_number}', card_number, tier, interval))
             cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
-        conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name) VALUES (?,?,?,?,?)',
-            (cid, cash_balance, bonus_balance, tickets, card_label or f'Timezone {card_number}'))
+        conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name,tier) VALUES (?,?,?,?,?,?)',
+            (cid, cash_balance, bonus_balance, tickets, card_label or f'Timezone {card_number}', tier))
         conn.commit(); flash(f'Timezone card {card_number} added!', 'success')
     except sqlite3.IntegrityError: flash('Card already tracked.', 'error')
     finally: conn.close()
@@ -378,6 +570,45 @@ def timezone_disconnect():
     conn.commit(); conn.close(); flash('Timezone account disconnected.', 'success')
     return redirect(url_for('dashboard'))
 
+@app.route('/timezone/extractor')
+@login_required
+def timezone_extractor():
+    return render_template('timezone_extractor.html')
+
+# ─── Routes: Admin ────────────────────────────────────────────────────────────
+@app.route('/admin')
+@admin_required
+def admin():
+    conn = get_db()
+    users = conn.execute('SELECT * FROM users ORDER BY created_at').fetchall()
+    cards = conn.execute('''
+        SELECT c.*, u.username,
+               h.cash_balance, h.cash_bonus, h.points, h.recorded_at as last_updated
+        FROM cards c
+        JOIN users u ON c.user_id = u.id
+        LEFT JOIN balance_history h ON h.id=(SELECT id FROM balance_history WHERE card_id=c.id ORDER BY recorded_at DESC LIMIT 1)
+        WHERE c.active=1 ORDER BY u.username, c.card_type
+    ''').fetchall()
+    tz_sessions = conn.execute('''
+        SELECT ts.*, u.username FROM timezone_sessions ts
+        JOIN users u ON ts.user_id = u.id
+    ''').fetchall()
+    conn.close()
+    tz_statuses = {ts['user_id']: tz_session_status(ts) for ts in tz_sessions}
+    return render_template('admin.html', users=users, cards=cards,
+                          tz_sessions=tz_sessions, tz_statuses=tz_statuses,
+                          user=get_current_user())
+
+@app.route('/admin/make-admin/<int:user_id>', methods=['POST'])
+@admin_required
+def make_admin(user_id):
+    conn = get_db()
+    conn.execute('UPDATE users SET is_admin=1 WHERE id=?', (user_id,))
+    conn.commit(); conn.close()
+    flash('User promoted to admin.', 'success')
+    return redirect(url_for('admin'))
+
+# ─── Routes: API ──────────────────────────────────────────────────────────────
 @app.route('/api/cards/<int:card_id>/history')
 @login_required
 def api_history(card_id):
@@ -411,88 +642,40 @@ def api_stats(card_id):
         spent_24h = round(((first_24h['cash_balance'] or 0)+(first_24h['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
     return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type']})
 
-@app.route('/timezone/extractor')
+@app.route('/api/dashboard/overview')
 @login_required
-def timezone_extractor():
-    """
-    Bridge page loaded inside the iframe after Timezone login.
-    Runs on our domain so it can postMessage the parent freely.
-    It also makes a server-side call to TEEG using the cookies
-    passed from the browser to validate and extract the bearer token.
-    """
-    return render_template('timezone_extractor.html')
-
-@app.route('/timezone/extract-token', methods=['POST'])
-@login_required
-def timezone_extract_token():
-    """
-    Called by the extractor page with whatever token/cookie data
-    it could read from the portal's localStorage/sessionStorage.
-    Falls back to server-side probe using browser-forwarded cookies.
-    """
+def api_dashboard_overview():
+    """All cards combined history for the overview graph."""
     user = get_current_user()
-    data = request.get_json() or {}
-    bearer_token = data.get('bearer_token')
-    cookies_from_browser = data.get('cookies', {})
+    period = request.args.get('period', 'day')
+    since = datetime.utcnow() - ({'day': timedelta(hours=24), 'week': timedelta(days=7), 'month': timedelta(days=30)}.get(period, timedelta(hours=24)))
+    conn = get_db()
+    cards = conn.execute('SELECT id, card_label, card_type, card_number FROM cards WHERE user_id=? AND active=1', (user['id'],)).fetchall()
+    result = []
+    for card in cards:
+        rows = conn.execute('SELECT cash_balance, cash_bonus, points, recorded_at FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC',
+            (card['id'], since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
+        result.append({
+            'card_id': card['id'],
+            'label': card['card_label'] or card['card_number'] or 'Card',
+            'card_type': card['card_type'],
+            'data': [{'t': r['recorded_at'], 'total': (r['cash_balance'] or 0) + (r['cash_bonus'] or 0), 'points': r['points']} for r in rows]
+        })
+    conn.close()
+    return jsonify(result)
 
-    # If the extractor found a token in storage, use it directly
-    if bearer_token and bearer_token.startswith('eyJ'):
-        guest = fetch_timezone_guest(bearer_token, cookies_from_browser)
-        if guest:
-            try:
-                payload = bearer_token.split('.')[1]
-                payload += '=' * (4 - len(payload) % 4)
-                claims = json.loads(base64.b64decode(payload))
-                token_exp = datetime.utcfromtimestamp(claims['exp']).strftime('%Y-%m-%d %H:%M:%S')
-            except:
-                token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
-            sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-            save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'))
-            cards = [{'number': str(c.get('number','')), 
-                      'cashBalance': c.get('cashBalance',0),
-                      'bonusBalance': c.get('bonusBalance',0), 
-                      'tickets': c.get('eTickets', c.get('tickets',0)),
-                      'paperTickets': c.get('paperTickets',0),
-                      'cumulativeBalance': c.get('cumulativeBalance',0),
-                      'tier': c.get('tier',''),
-                      'status': c.get('status','Active'),
-                      'fullCardNumber': c.get('fullCardNumber',''),
-                      'country': c.get('country','')} for c in guest.get('cards',[])]
-            return jsonify({'success': True, 'cards': cards, 'name': guest.get('givenName','')})
-
-    return jsonify({'success': False, 'error': 'Could not extract token'})
-
-@app.route('/timezone/landing')
-@login_required
-def timezone_landing():
-    """
-    Mobile-friendly landing page after Timezone login.
-    User is redirected here from their browser after logging in.
-    Page reads token from localStorage and sends it to the server.
-    """
-    return render_template('timezone_landing.html', user=get_current_user())
-
-
-@app.route('/cards/resolve-qr', methods=['POST'])
+@app.route('/api/cards/resolve-qr', methods=['POST'])
 @login_required
 def resolve_qr():
-    """Follow a QR code URL redirect and extract the Koko token."""
     data = request.get_json()
     url = data.get('url', '').strip()
-    if not url:
-        return jsonify({'error': 'No URL provided'}), 400
+    if not url: return jsonify({'error': 'No URL'}), 400
     try:
-        # Follow redirects to get final URL
-        resp = requests.get(url, timeout=10, allow_redirects=True, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+        resp = requests.get(url, timeout=10, allow_redirects=True, headers={'User-Agent': 'Mozilla/5.0'})
         final_url = resp.url
-        print(f"[QR] {url} -> {final_url}")
-        # Extract token from ?i= param
         m = re.search(r'[?&]i=([^&]+)', final_url)
         if m:
             token = m.group(1)
-            # Validate by fetching balance
             balance = fetch_koko_balance(token)
             if balance and any(v is not None for v in [balance.get('cash_balance'), balance.get('cash_bonus'), balance.get('points')]):
                 return jsonify({'success': True, 'token': token, 'balance': balance})
@@ -501,12 +684,11 @@ def resolve_qr():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/timezone/start')
-@login_required  
-def timezone_start():
-    """Redirect user to Timezone portal, with our landing page as the return destination."""
-    app_url = os.environ.get('APP_URL', request.host_url.rstrip('/'))
-    return render_template('timezone_start.html', user=get_current_user(), app_url=app_url)
+# Keep old route for backward compat
+@app.route('/cards/resolve-qr', methods=['POST'])
+@login_required
+def resolve_qr_old():
+    return resolve_qr()
 
 if __name__ == '__main__':
     init_db()

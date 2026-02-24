@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}Balance Tracker{% endblock %}</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/utc.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/timezone.min.js"></script>
     <style>
         body { background: #0f172a; color: #e2e8f0; }
         .card { background: #1e293b; border: 1px solid #334155; }
@@ -30,6 +31,8 @@
         {% if session.user_id %}
         <div class="flex items-center gap-4">
             <span class="text-slate-400 text-sm">{{ user.username if user else '' }}</span>
+            {% if user and user.is_admin %}<a href="/admin" class="text-xs text-indigo-400 hover:text-indigo-300 transition">Admin</a>{% endif %}
+            <a href="/settings" class="text-sm text-slate-400 hover:text-white transition">Settings</a>
             <a href="/logout" class="text-sm text-slate-400 hover:text-white transition">Logout</a>
         </div>
         {% endif %}
@@ -46,5 +49,17 @@
 
         {% block content %}{% endblock %}
     </div>
+<script>
+// Localize all timestamps to user timezone
+dayjs.extend(dayjs_plugin_utc);
+dayjs.extend(dayjs_plugin_timezone);
+const USER_TZ = "{{ user.timezone_name if user else 'Australia/Sydney' }}";
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-utc]').forEach(function(el) {
+        const utc = el.getAttribute('data-utc');
+        if (utc) el.textContent = dayjs.utc(utc).tz(USER_TZ).format('MMM D, HH:mm');
+    });
+});
+</script>
 </body>
 </html>

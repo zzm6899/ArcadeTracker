@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Admin – Balance Tracker{% endblock %}
+{% block content %}
+
+<div class="flex items-center justify-between mb-6 flex-wrap gap-3">
+    <div>
+        <h1 class="text-2xl font-bold text-white">⚙️ Admin Panel</h1>
+        <p class="text-slate-400 text-sm mt-0.5">All users, cards and sessions</p>
+    </div>
+    <a href="/dashboard" class="text-slate-400 hover:text-white text-sm">← Dashboard</a>
+</div>
+
+<!-- Users -->
+<div class="card rounded-2xl p-5 mb-6">
+    <h2 class="text-lg font-bold text-white mb-4">👥 Users ({{ users|length }})</h2>
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-slate-400 text-xs uppercase tracking-wider border-b border-slate-700">
+                    <th class="text-left py-2 pr-4">ID</th>
+                    <th class="text-left py-2 pr-4">Username</th>
+                    <th class="text-left py-2 pr-4">Admin</th>
+                    <th class="text-left py-2 pr-4">Timezone</th>
+                    <th class="text-left py-2 pr-4">TZ Session</th>
+                    <th class="text-left py-2">Joined</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800">
+            {% for u in users %}
+            <tr class="text-slate-300 hover:bg-slate-800/50">
+                <td class="py-2 pr-4 text-slate-500 font-mono text-xs">{{ u.id }}</td>
+                <td class="py-2 pr-4 font-medium text-white">{{ u.username }}</td>
+                <td class="py-2 pr-4">
+                    {% if u.is_admin %}<span class="text-xs bg-indigo-900/50 text-indigo-300 border border-indigo-700 px-2 py-0.5 rounded-full">Admin</span>
+                    {% else %}<span class="text-slate-600 text-xs">User</span>{% endif %}
+                </td>
+                <td class="py-2 pr-4 text-xs text-slate-400">{{ u.timezone_name or 'Australia/Sydney' }}</td>
+                <td class="py-2 pr-4">
+                    {% set st = tz_statuses.get(u.id, 'disconnected') %}
+                    <span class="text-xs px-2 py-0.5 rounded-full
+                        {% if st == 'connected' %}bg-green-900/50 text-green-400 border border-green-800
+                        {% elif st == 'stale' %}bg-yellow-900/50 text-yellow-400 border border-yellow-800
+                        {% elif st == 'error' %}bg-red-900/50 text-red-400 border border-red-800
+                        {% elif st == 'expired' %}bg-orange-900/50 text-orange-400 border border-orange-800
+                        {% else %}bg-slate-700 text-slate-500{% endif %}">
+                        {{ st }}
+                    </span>
+                </td>
+                <td class="py-2 text-xs text-slate-500">{{ u.created_at[:10] }}</td>
+                <td class="py-2 pl-4">
+                    {% if not u.is_admin %}
+                    <form method="POST" action="/admin/make-admin/{{ u.id }}" class="inline">
+                        <button class="text-xs text-indigo-400 hover:text-indigo-300">Make Admin</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- All Cards -->
+<div class="card rounded-2xl p-5 mb-6">
+    <h2 class="text-lg font-bold text-white mb-4">🃏 All Active Cards ({{ cards|length }})</h2>
+    <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+            <thead>
+                <tr class="text-slate-400 text-xs uppercase tracking-wider border-b border-slate-700">
+                    <th class="text-left py-2 pr-4">User</th>
+                    <th class="text-left py-2 pr-4">Type</th>
+                    <th class="text-left py-2 pr-4">Label</th>
+                    <th class="text-left py-2 pr-4">Number</th>
+                    <th class="text-left py-2 pr-4">Balance</th>
+                    <th class="text-left py-2 pr-4">Bonus</th>
+                    <th class="text-left py-2 pr-4">Points</th>
+                    <th class="text-left py-2 pr-4">Poll</th>
+                    <th class="text-left py-2">Last Updated</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800">
+            {% for card in cards %}
+            {% set age_mins = ((now - card.last_updated)|string|float / 60) if card.last_updated else 999 %}
+            <tr class="text-slate-300 hover:bg-slate-800/50 {% if card.last_updated and age_mins > 30 %}opacity-60{% endif %}">
+                <td class="py-2 pr-4 font-medium text-white text-xs">{{ card.username }}</td>
+                <td class="py-2 pr-4">
+                    <span class="text-xs px-2 py-0.5 rounded-full {% if card.card_type == 'timezone' %}bg-yellow-900/50 text-yellow-400{% else %}bg-purple-900/50 text-purple-400{% endif %}">
+                        {{ card.card_type }}
+                    </span>
+                </td>
+                <td class="py-2 pr-4 text-sm">{{ card.card_label }}</td>
+                <td class="py-2 pr-4 font-mono text-xs text-slate-400">{{ card.card_number }}</td>
+                <td class="py-2 pr-4 text-green-400">${{ "%.2f"|format(card.cash_balance or 0) }}</td>
+                <td class="py-2 pr-4 text-yellow-400">${{ "%.2f"|format(card.cash_bonus or 0) }}</td>
+                <td class="py-2 pr-4 text-orange-400">{{ card.points or 0 }}</td>
+                <td class="py-2 pr-4 text-xs text-slate-400">{{ card.poll_interval }}s</td>
+                <td class="py-2 text-xs {% if card.last_updated and age_mins > 30 %}text-red-400{% else %}text-slate-500{% endif %}">
+                    {{ card.last_updated[:16] if card.last_updated else 'Never' }}
+                    {% if card.last_updated and age_mins > 30 %} ⚠️{% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Timezone Sessions -->
+<div class="card rounded-2xl p-5">
+    <h2 class="text-lg font-bold text-white mb-4">🕹️ Timezone Sessions</h2>
+    <div class="space-y-3">
+    {% for ts in tz_sessions %}
+    {% set st = tz_statuses.get(ts.user_id, 'disconnected') %}
+    <div class="bg-slate-800 rounded-xl p-4 flex items-center justify-between gap-4 flex-wrap">
+        <div>
+            <div class="flex items-center gap-2 mb-1">
+                <span class="font-medium text-white">{{ ts.username }}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full
+                    {% if st == 'connected' %}bg-green-900/50 text-green-400 border border-green-800
+                    {% elif st == 'stale' %}bg-yellow-900/50 text-yellow-400 border border-yellow-800
+                    {% elif st == 'error' %}bg-red-900/50 text-red-400 border border-red-800
+                    {% else %}bg-slate-700 text-slate-400{% endif %}">
+                    {{ st }}
+                </span>
+            </div>
+            <div class="text-xs text-slate-400 space-y-0.5">
+                <div>Token expires: {{ ts.token_expires_at or 'Unknown' }}</div>
+                <div>Session expires: {{ ts.session_expires_at or 'Unknown' }}</div>
+                <div>Last poll: {{ ts.last_poll_at or 'Never' }} 
+                    {% if ts.last_poll_status %}<span class="{% if ts.last_poll_status == 'ok' %}text-green-400{% else %}text-red-400{% endif %}">({{ ts.last_poll_status }})</span>{% endif %}
+                </div>
+            </div>
+        </div>
+        {% if st == 'stale' or st == 'error' %}
+        <div class="text-xs text-red-300 bg-red-900/30 border border-red-800 rounded-lg p-2">
+            ⚠️ {{ 'Token expired or API error — user needs to reconnect' if st == 'error' else 'No recent polls — check token' }}
+        </div>
+        {% endif %}
+    </div>
+    {% endfor %}
+    </div>
+</div>
+
+<script>
+// Pass current time to Jinja for age calculation
+document.addEventListener('DOMContentLoaded', function() {
+    // Highlight stale cards
+    document.querySelectorAll('td').forEach(function(td) {
+        if (td.textContent.includes('⚠️')) {
+            td.closest('tr').style.background = 'rgba(220,38,38,0.05)';
+        }
+    });
+});
+</script>
+{% endblock %}
