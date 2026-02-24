@@ -6,6 +6,11 @@ from bs4 import BeautifulSoup
 import re
 
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
+
+@app.context_processor
+def inject_discord():
+    invite = f'https://discord.com/oauth2/authorize?client_id={DISCORD_CLIENT_ID}' if DISCORD_CLIENT_ID else None
+    return dict(discord_invite=invite)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 
 DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
@@ -13,8 +18,10 @@ DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 60))
 TIMEZONE_POLL_INTERVAL = int(os.environ.get('TIMEZONE_POLL_INTERVAL', 900))
 KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
 TEEG_API = 'https://api.teeg.cloud'
-ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', '')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
+ADMIN_USERNAME    = os.environ.get('ADMIN_USERNAME', '')
+ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', '')
+DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
+DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():

@@ -14,7 +14,20 @@ from discord.ext import tasks
 DB_PATH   = os.environ.get('DB_PATH', '/data/koko.db')
 BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '')
 GUILD_ID  = os.environ.get('DISCORD_GUILD_ID', '')
-APP_URL   = os.environ.get('APP_URL', 'http://localhost:5055')
+APP_URL          = os.environ.get('APP_URL', 'http://localhost:5055')
+DISCORD_CLIENT_ID = os.environ.get('DISCORD_CLIENT_ID', '')
+
+def invite_url():
+    cid = DISCORD_CLIENT_ID
+    if cid:
+        return f"https://discord.com/oauth2/authorize?client_id={cid}"
+    return None
+
+def bot_buttons():
+    """Returns a View with a website button."""
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="🌐 Open Website", url=APP_URL, style=discord.ButtonStyle.link))
+    return view
 
 if not BOT_TOKEN:
     print("[Bot] No DISCORD_BOT_TOKEN set — bot disabled.")
@@ -231,7 +244,7 @@ async def cmd_link(interaction: discord.Interaction):
         description="Enter this code in Balance Tracker Settings → Discord Link")
     embed.add_field(name="Code (expires 15min)", value=f"```{code}```", inline=False)
     embed.add_field(name="Where", value=f"{APP_URL}/settings", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=True)
 
 
 @bot.tree.command(name="cards", description="Show your card balances")
@@ -254,7 +267,7 @@ async def cmd_cards(interaction: discord.Interaction):
                f"🎫 {card['points'] or 0:,} {pts_label}\n"
                f"🕐 {last}")
         embed.add_field(name=f"{card_emoji(card['card_type'])} {label}{tier}", value=val, inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=ephem)
+    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem)
 
 
 @bot.tree.command(name="balance", description="Quick total balance summary")
@@ -270,7 +283,7 @@ async def cmd_balance(interaction: discord.Interaction):
         description=f"**${total:.2f}** across {len(cards)} card(s)\n🎫 {tickets:,} tickets/points",
         color=0x22c55e
     )
-    await interaction.response.send_message(embed=embed, ephemeral=ephem)
+    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem)
 
 
 @bot.tree.command(name="spent", description="How much you've spent in a timeframe")
@@ -371,7 +384,7 @@ async def cmd_leaderboard(interaction: discord.Interaction):
     if not rows:
         embed = discord.Embed(title="🏆 Leaderboard", color=0xfbbf24,
             description="No public cards yet.\nEnable leaderboard in Settings to appear here.")
-        await interaction.response.send_message(embed=embed, ephemeral=ephem); return
+        await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem); return
 
     medals = ['🥇','🥈','🥉']
     embed = discord.Embed(title="🏆 Balance Leaderboard", color=0xfbbf24)
@@ -386,7 +399,7 @@ async def cmd_leaderboard(interaction: discord.Interaction):
             inline=False
         )
     embed.set_footer(text="Enable in Settings → Leaderboard to appear here")
-    await interaction.response.send_message(embed=embed, ephemeral=ephem)
+    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem)
 
 
 @bot.tree.command(name="privacy", description="Toggle whether each command response is public or private")
