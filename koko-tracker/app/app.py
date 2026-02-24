@@ -21,13 +21,7 @@ TEEG_API = 'https://api.teeg.cloud'
 ADMIN_USERNAME    = os.environ.get('ADMIN_USERNAME', '')
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', '')
 DISCORD_CLIENT_ID     = os.environ.get('DISCORD_CLIENT_ID', '')
-DISCORD_CLIENT_SECRET = os.environ.get('DISCORD_CLIENT_SECRET', '')
-MAIL_SERVER           = os.environ.get('MAIL_SERVER', '')
-MAIL_PORT             = int(os.environ.get('MAIL_PORT', '587'))
-MAIL_USERNAME         = os.environ.get('MAIL_USERNAME', '')
-MAIL_PASSWORD         = os.environ.get('MAIL_PASSWORD', '')
-MAIL_FROM             = os.environ.get('MAIL_FROM', MAIL_USERNAME)
-DISCORD_CLIENT_ID     = os.environ.get('DISCORD_CLIENT_ID', '')
+APP_URL               = os.environ.get('APP_URL', 'http://localhost:5055')
 DISCORD_CLIENT_SECRET = os.environ.get('DISCORD_CLIENT_SECRET', '')
 MAIL_SERVER           = os.environ.get('MAIL_SERVER', '')
 MAIL_PORT             = int(os.environ.get('MAIL_PORT', '587'))
@@ -943,8 +937,7 @@ def timezone_connect():
 @app.route('/timezone/start')
 @login_required
 def timezone_start():
-    app_url = os.environ.get('APP_URL', request.host_url.rstrip('/'))
-    return render_template('timezone_start.html', user=get_current_user(), app_url=app_url)
+    return render_template('timezone_start.html', user=get_current_user(), app_url=APP_URL)
 
 @app.route('/timezone/landing')
 @login_required
