@@ -553,7 +553,6 @@ def force_poll(card_id):
         conn = get_db()
         conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name,tier) VALUES (?,?,?,?,?,?)',
             (card_id, data.get('cash_balance'), data.get('cash_bonus'), data.get('points'), data.get('card_name'), data.get('tier','')))
-        conn.execute('UPDATE cards SET last_updated=? WHERE id=?', (now_str, card_id))
         if data.get('tier'):
             conn.execute('UPDATE cards SET tier=? WHERE id=?', (data['tier'], card_id))
         conn.commit()
