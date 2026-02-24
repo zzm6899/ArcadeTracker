@@ -391,14 +391,15 @@ def fetch_timezone_transactions(card_number, bearer_token, cookies_dict=None):
 def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_exp, guest_id=None, refresh_token=None, ms_client_id=None):
     conn = get_db()
     conn.execute('''
-        INSERT INTO timezone_sessions (user_id, bearer_token, cookies_json, token_expires_at, session_expires_at, guest_id, refresh_token, ms_client_id, updated_at)
-        VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        INSERT INTO timezone_sessions (user_id, bearer_token, cookies_json, token_expires_at, session_expires_at, guest_id, refresh_token, ms_client_id, last_poll_status, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,'ok',CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             bearer_token=excluded.bearer_token, cookies_json=excluded.cookies_json,
             token_expires_at=excluded.token_expires_at, session_expires_at=excluded.session_expires_at,
             guest_id=COALESCE(excluded.guest_id, timezone_sessions.guest_id),
             refresh_token=COALESCE(excluded.refresh_token, timezone_sessions.refresh_token),
             ms_client_id=COALESCE(excluded.ms_client_id, timezone_sessions.ms_client_id),
+            last_poll_status='ok',
             updated_at=CURRENT_TIMESTAMP
     ''', (user_id, bearer_token, json.dumps(cookies_dict), token_exp, sess_exp, guest_id, refresh_token, ms_client_id))
     conn.commit(); conn.close()
@@ -422,7 +423,7 @@ def tz_session_status(tzs):
             age = (now_dt - last).total_seconds()
             # Only call it 'error' if the LAST poll errored AND it happened recently
             # (i.e. not just an old stale error from before a reconnect)
-            if tzs['last_poll_status'] == 'error' and age < TIMEZONE_POLL_INTERVAL * 6:
+            if tzs['last_poll_status'] == 'error' and age < TIMEZONE_POLL_INTERVAL * 2:
                 return 'error'
             # Stale: no successful poll in 3x the poll interval
             if age > TIMEZONE_POLL_INTERVAL * 3:
@@ -520,7 +521,7 @@ def poll_cards():
                             # Update poll status
                             conn = get_db()
                             status = 'ok' if data else 'card_not_found'
-                            conn.execute('''UPDATE timezone_sessions SET last_poll_at=?, last_poll_status=? WHERE user_id=?''',
+                            conn.execute('UPDATE timezone_sessions SET last_poll_at=?, last_poll_status=? WHERE user_id=?',
                                         (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), status, card['user_id']))
                             conn.commit(); conn.close()
                             log_poll(card['id'], bool(data), status)
@@ -1346,7 +1347,7 @@ def api_history(card_id):
     conn = get_db()
     if not conn.execute('SELECT id FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone():
         conn.close(); return jsonify({'error': 'Not found'}), 404
-    rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at>=? AND cash_balance IS NOT NULL AND cash_balance != 0 ORDER BY recorded_at ASC',
+    rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at>=? AND cash_balance IS NOT NULL ORDER BY recorded_at ASC',
         (card_id, since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
     conn.close()
     return jsonify({'labels':[r['recorded_at'] for r in rows], 'cash_balance':[r['cash_balance'] for r in rows],
