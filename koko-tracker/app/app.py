@@ -276,28 +276,36 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
         (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
          f'openid offline_access {cid}/.default'),
     ]
-    for endpoint, client_id, scope in attempts:
-        try:
-            resp = requests.post(endpoint, data={
-                'grant_type': 'refresh_token',
-                'client_id': client_id,
-                'refresh_token': refresh_token,
-                'scope': scope,
-            }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
-            label = endpoint.split('/')[3][:20] + '|' + scope[:25]
-            print(f"[Timezone] MS refresh {label}: HTTP {resp.status_code}")
-            if resp.status_code == 200:
-                data = resp.json()
-                new_token   = data.get('access_token') or data.get('id_token')
-                new_refresh = data.get('refresh_token', refresh_token)
-                expires_in  = int(data.get('expires_in', 840))
-                print(f"[Timezone] MS refresh SUCCESS, expires {expires_in}s")
-                return new_token, new_refresh, expires_in
-            else:
-                err = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
-                print(f"[Timezone] MS refresh fail: {err.get('error','')}: {err.get('error_description','')[:100]}")
-        except Exception as e:
-            print(f"[Timezone] MS refresh error: {e}")
+    # Log the token being used (first + last 20 chars for debugging)
+    rt_preview = refresh_token[:20] + '...' + refresh_token[-20:] if len(refresh_token) > 40 else refresh_token
+    print(f"[Timezone] MS refresh attempt, rt_len={len(refresh_token)}, rt={rt_preview}")
+
+    # Only try the first attempt to get clean diagnostic output
+    endpoint, client_id, scope = attempts[0]
+    try:
+        payload = {
+            'grant_type': 'refresh_token',
+            'client_id': client_id,
+            'refresh_token': refresh_token,
+            'scope': scope,
+        }
+        import urllib.parse
+        encoded = urllib.parse.urlencode(payload)
+        print(f"[Timezone] POST {endpoint}")
+        print(f"[Timezone] Body (truncated): grant_type=refresh_token&client_id={client_id}&scope={scope}&refresh_token={refresh_token[:30]}...")
+        print(f"[Timezone] Body length: {len(encoded)}")
+        resp = requests.post(endpoint, data=payload,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
+        print(f"[Timezone] Response {resp.status_code}: {resp.text[:400]}")
+        if resp.status_code == 200:
+            data = resp.json()
+            new_token   = data.get('access_token') or data.get('id_token')
+            new_refresh = data.get('refresh_token', refresh_token)
+            expires_in  = int(data.get('expires_in', 840))
+            print(f"[Timezone] MS refresh SUCCESS, expires {expires_in}s")
+            return new_token, new_refresh, expires_in
+    except Exception as e:
+        print(f"[Timezone] MS refresh error: {e}")
     return None, None, None
 
 def tz_refresh_token(cookies_dict):
