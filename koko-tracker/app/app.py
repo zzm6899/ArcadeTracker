@@ -111,6 +111,7 @@ def init_db():
         'ALTER TABLE users ADD COLUMN leaderboard_opt_in INTEGER DEFAULT 0',
         'ALTER TABLE cards ADD COLUMN leaderboard_public INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN discord_cmd_privacy TEXT',
+        'ALTER TABLE balance_history ADD COLUMN description TEXT',
         'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
     ]:
         try: conn.execute(sql)
@@ -923,41 +924,55 @@ def import_transactions(card_id):
         print(f"[ImportTx] Sample transaction keys: {list(transactions[0].keys())}")
         print(f"[ImportTx] Sample transaction: {dict(transactions[0])}")
 
+    # Sort transactions oldest first so running balance builds in order
+    transactions = sorted(transactions, key=lambda t: t.get('modified', ''))
+
     conn = get_db()
     imported = 0
     for tx in transactions:
-        # Map transaction fields — Timezone API fields may vary
-        tx_time = (tx.get('transactionDate') or tx.get('date') or tx.get('createdAt') or
-                   tx.get('timestamp') or tx.get('created') or tx.get('processedAt'))
-        balance  = (tx.get('cashBalance') or tx.get('balance') or tx.get('remainingBalance') or
-                    tx.get('cash') or tx.get('closingCashBalance') or tx.get('afterCashBalance'))
-        bonus    = (tx.get('bonusBalance') or tx.get('remainingBonus') or tx.get('closingBonusBalance') or
-                    tx.get('afterBonusBalance') or 0)
-        points   = (tx.get('eTickets') or tx.get('tickets') or tx.get('remainingTickets') or
-                    tx.get('closingETickets') or tx.get('afterETickets') or 0)
-        if tx_time and balance is not None:
-            # Normalise timestamp
-            try:
-                if 'T' in str(tx_time):
-                    dt = datetime.strptime(str(tx_time)[:19], '%Y-%m-%dT%H:%M:%S')
-                else:
-                    dt = datetime.strptime(str(tx_time)[:19], '%Y-%m-%d %H:%M:%S')
-                ts = dt.strftime('%Y-%m-%d %H:%M:%S')
-            except:
-                ts = tx_time
-            # Skip if already imported
-            exists = conn.execute(
-                'SELECT id FROM balance_history WHERE card_id=? AND recorded_at=?', (card_id, ts)
-            ).fetchone()
-            if not exists:
-                conn.execute(
-                    'INSERT INTO balance_history (card_id, cash_balance, cash_bonus, points, recorded_at) VALUES (?,?,?,?,?)',
-                    (card_id, float(balance), float(bonus), int(points), ts)
-                )
-                imported += 1
+        tx_time = tx.get('modified')
+        if not tx_time:
+            continue
+
+        # runningCumulativeBalance = true running cash total after this transaction
+        running_total = tx.get('runningCumulativeBalance')
+        cash_delta    = float(tx.get('cashBalance') or 0)
+        bonus_delta   = float(tx.get('bonusBalance') or 0)
+        e_cash        = float(tx.get('eCash') or 0)
+        p_cash        = float(tx.get('pCash') or 0)
+        tickets       = int(tx.get('eTickets') or 0)
+        description   = tx.get('description') or tx.get('reason') or None
+
+        # Use runningCumulativeBalance as the cash snapshot
+        # bonusBalance delta tells us bonus component
+        if running_total is not None:
+            running_total = float(running_total)
+            # running total includes both cash and bonus — split them
+            # bonus_delta < 0 means bonus was spent, > 0 means bonus added
+            cash_balance = round(running_total - max(bonus_delta, 0), 2)
+            cash_bonus   = round(max(bonus_delta, 0), 2)
+        else:
+            cash_balance = round(cash_delta + e_cash + p_cash, 2)
+            cash_bonus   = round(max(bonus_delta, 0), 2)
+
+        # Normalise timestamp — "2026-02-23T05:04:27.0000000+00:00"
+        try:
+            ts = str(tx_time)[:19].replace('T', ' ')
+            datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
+        except:
+            continue
+
+        exists = conn.execute(
+            'SELECT id FROM balance_history WHERE card_id=? AND recorded_at=?', (card_id, ts)
+        ).fetchone()
+        if not exists:
+            conn.execute(
+                'INSERT INTO balance_history (card_id, cash_balance, cash_bonus, points, description, recorded_at) VALUES (?,?,?,?,?,?)',
+                (card_id, cash_balance, cash_bonus, tickets, description, ts)
+            )
+            imported += 1
     conn.commit(); conn.close()
-    sample = dict(transactions[0]) if transactions else {}
-    return jsonify({'success': True, 'imported': imported, 'total': len(transactions), 'sample_fields': list(sample.keys()), 'sample': sample})
+    return jsonify({'success': True, 'imported': imported, 'total': len(transactions)})
 
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
@@ -1082,7 +1097,8 @@ def api_history(card_id):
         (card_id, since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
     conn.close()
     return jsonify({'labels':[r['recorded_at'] for r in rows], 'cash_balance':[r['cash_balance'] for r in rows],
-                    'cash_bonus':[r['cash_bonus'] for r in rows], 'points':[r['points'] for r in rows]})
+                    'cash_bonus':[r['cash_bonus'] for r in rows], 'points':[r['points'] for r in rows],
+                    'descriptions':[r['description'] if 'description' in r.keys() else None for r in rows]})
 
 @app.route('/api/cards/<int:card_id>/stats')
 @login_required
