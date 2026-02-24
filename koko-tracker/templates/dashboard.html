@@ -8,408 +8,387 @@
 {% endfor %}{% endif %}{% endwith %}
 
 <!-- Header -->
-<div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+<div class="flex items-start justify-between mb-6 flex-wrap gap-3">
     <div>
         <h1 class="text-2xl font-bold text-white">My Cards</h1>
-        <p class="text-slate-400 text-sm mt-0.5">Balances update per-card interval</p>
+        <p class="text-slate-500 text-sm mt-0.5">Balances update per-card interval</p>
     </div>
     <div class="flex gap-2 flex-wrap items-center">
-        {% if user.is_admin %}
-        <a href="/admin" class="px-3 py-2 rounded-lg text-xs border border-slate-600 text-slate-400 hover:bg-slate-700 transition">⚙️ Admin</a>
-        {% endif %}
-        <a href="/settings" class="px-3 py-2 rounded-lg text-xs border border-slate-600 text-slate-400 hover:bg-slate-700 transition">Settings</a>
+        {% if user.is_admin %}<a href="/admin" class="px-3 py-1.5 rounded-lg text-xs border border-indigo-800 text-indigo-400 hover:bg-indigo-900/30 transition">⚙️ Admin</a>{% endif %}
 
-        <!-- Timezone status -->
         {% if tz_status == 'connected' %}
-        <div class="flex items-center gap-2 px-3 py-2 bg-green-900/20 border border-green-800 rounded-lg">
-            <span class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
-            <span class="text-green-300 text-xs font-medium">Timezone Connected</span>
+        <div class="flex items-center gap-2 px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs">
+            <span class="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
+            <span class="text-slate-300">Timezone</span>
             <form method="POST" action="/timezone/disconnect" class="inline">
-                <button class="text-xs text-green-600 hover:text-green-300 ml-1">✕</button>
+                <button class="text-slate-500 hover:text-red-400 transition ml-0.5">✕</button>
             </form>
         </div>
-        {% elif tz_status == 'stale' %}
-        <div class="flex items-center gap-2 px-3 py-2 bg-yellow-900/20 border border-yellow-700 rounded-lg">
-            <span class="w-2 h-2 bg-yellow-400 rounded-full"></span>
-            <span class="text-yellow-300 text-xs">Timezone Stale</span>
-            <a href="/timezone/start" class="text-xs text-yellow-500 hover:text-yellow-300 ml-1">Refresh</a>
-        </div>
-        {% elif tz_status == 'error' %}
-        <div class="flex items-center gap-2 px-3 py-2 bg-red-900/20 border border-red-800 rounded-lg">
-            <span class="w-2 h-2 bg-red-400 rounded-full"></span>
-            <span class="text-red-300 text-xs">Timezone Error</span>
-            <a href="/timezone/start" class="text-xs text-red-400 hover:text-red-300 ml-1">Reconnect</a>
-        </div>
-        {% elif tz_status == 'expired' %}
-        <div class="flex items-center gap-2 px-3 py-2 bg-orange-900/20 border border-orange-800 rounded-lg">
-            <span class="w-2 h-2 bg-orange-400 rounded-full"></span>
-            <span class="text-orange-300 text-xs">Timezone Expired</span>
-            <a href="/timezone/start" class="text-xs text-orange-400 hover:text-orange-300 ml-1">Reconnect</a>
-        </div>
-        {% else %}
-        <a href="/timezone/start" class="px-4 py-2 rounded-lg text-sm font-medium border border-yellow-700 text-yellow-400 hover:bg-yellow-900/30 transition flex items-center gap-2">
-            🕹️ Connect Timezone
+        {% elif tz_status in ['stale','error','expired'] %}
+        <a href="/timezone/start" class="flex items-center gap-2 px-3 py-1.5 bg-red-900/20 border border-red-800 rounded-lg text-xs text-red-400 hover:bg-red-900/40 transition">
+            <span class="w-1.5 h-1.5 bg-red-400 rounded-full"></span>
+            Timezone {{ tz_status|title }} — Reconnect
         </a>
+        {% else %}
+        <a href="/timezone/start" class="px-3 py-1.5 rounded-lg text-xs border border-yellow-800 text-yellow-500 hover:bg-yellow-900/30 transition">🕹️ Connect Timezone</a>
         {% endif %}
 
         <button onclick="document.getElementById('add-koko-modal').classList.remove('hidden'); setTimeout(startScanner,100)"
-            class="btn-primary px-4 py-2 rounded-lg text-sm font-medium text-white">+ Add Koko Card</button>
+            class="btn-primary px-4 py-1.5 rounded-lg text-sm font-medium text-white">+ Add Koko</button>
     </div>
 </div>
 
-<!-- Overview Graph (toggleable) -->
-<div class="card rounded-2xl mb-6 overflow-hidden">
-    <button onclick="toggleOverview()" class="w-full flex items-center justify-between px-5 py-4 hover:bg-slate-800/50 transition">
+<!-- Balance Overview (toggleable via settings) -->
+{% if user.show_overview != 0 %}
+<div class="card rounded-2xl mb-6 overflow-hidden" id="overview-card">
+    <button onclick="toggleOverview()" class="w-full flex items-center justify-between px-5 py-3.5 hover:bg-slate-800/40 transition text-left">
         <div class="flex items-center gap-3">
-            <span class="text-slate-300 font-medium text-sm">📊 Balance Overview</span>
-            <div id="overview-summary" class="text-xs text-slate-500"></div>
+            <span class="text-slate-300 text-sm font-medium">📊 Balance Overview</span>
+            <span id="overview-summary" class="text-xs text-slate-500"></span>
         </div>
-        <div class="flex items-center gap-3">
-            <div class="flex gap-1" id="period-btns">
+        <div class="flex items-center gap-2">
+            <div class="flex gap-1 bg-slate-800 rounded-lg p-0.5">
                 {% for p, label in [('day','24h'),('week','7d'),('month','30d')] %}
                 <button onclick="event.stopPropagation(); setOverviewPeriod('{{ p }}')"
-                    class="period-btn text-xs px-2 py-1 rounded-lg {% if p == 'day' %}bg-indigo-600 text-white{% else %}text-slate-400 hover:text-white{% endif %}"
+                    class="period-btn text-xs px-2.5 py-1 rounded-md transition {% if p == 'day' %}bg-indigo-600 text-white{% else %}text-slate-400 hover:text-white{% endif %}"
                     data-period="{{ p }}">{{ label }}</button>
                 {% endfor %}
             </div>
-            <span id="overview-chevron" class="text-slate-400 text-sm transition-transform">▼</span>
+            <span id="overview-chevron" class="text-slate-500 text-xs">▼</span>
         </div>
     </button>
-    <div id="overview-panel" class="hidden px-5 pb-5">
-        <canvas id="overview-chart" height="80"></canvas>
+    <div id="overview-panel" class="hidden border-t border-slate-700/50 px-5 py-4">
+        <div id="overview-loading" class="flex items-center justify-center py-8 text-slate-500 text-sm">Loading...</div>
+        <canvas id="overview-chart" class="hidden" height="80"></canvas>
+        <div id="overview-empty" class="hidden text-center py-8 text-slate-500 text-sm">No data yet — check back after the first poll.</div>
     </div>
 </div>
+{% endif %}
 
 {% if cards %}
-    {% set koko_cards = cards | selectattr('card_type', 'equalto', 'koko') | list %}
-    {% set tz_cards = cards | selectattr('card_type', 'equalto', 'timezone') | list %}
+{% set koko_cards = cards | selectattr('card_type', 'equalto', 'koko') | list %}
+{% set tz_cards = cards | selectattr('card_type', 'equalto', 'timezone') | list %}
 
-    {% if koko_cards %}
-    <div class="mb-6">
-        <div class="flex items-center gap-2 mb-3">
-            <span class="text-xs font-bold uppercase tracking-widest text-purple-400">🎮 Koko</span>
-            <div class="flex-1 h-px bg-slate-700"></div>
+{% macro tier_badge(tier) %}
+{% if tier %}
+<span class="text-xs px-2 py-0.5 rounded-full font-medium
+    {% if tier == 'Platinum' %}bg-purple-900/60 text-purple-300 border border-purple-700
+    {% elif tier == 'Gold' %}bg-yellow-900/60 text-yellow-300 border border-yellow-700
+    {% elif tier == 'Silver' %}bg-slate-600/60 text-slate-300 border border-slate-500
+    {% else %}bg-orange-900/60 text-orange-300 border border-orange-700{% endif %}">
+    ★ {{ tier }}
+</span>
+{% endif %}
+{% endmacro %}
+
+{% if koko_cards %}
+<div class="mb-6">
+    <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs font-semibold uppercase tracking-widest text-purple-400">🎮 Koko</span>
+        <div class="flex-1 h-px bg-slate-800"></div>
+    </div>
+    <div class="grid gap-3 md:grid-cols-2">
+    {% for card in koko_cards %}
+    <div class="card rounded-xl p-4 hover:border-purple-800 transition cursor-pointer group relative"
+         onclick="window.location='/cards/{{ card.id }}'">
+        <div class="flex items-start justify-between mb-3">
+            <div>
+                <p class="text-xs text-purple-400 font-medium uppercase tracking-wider mb-0.5">Koko Card</p>
+                <h2 class="font-bold text-white">{{ card.card_label or card.card_number or card.card_token }}</h2>
+                {% if card.card_number and card.card_label %}<p class="text-slate-600 text-xs font-mono">{{ card.card_number }}</p>{% endif %}
+            </div>
+            <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
+                class="opacity-0 group-hover:opacity-100 text-xs text-slate-500 hover:text-white px-2 py-1 border border-slate-700 rounded-lg transition">
+                ↻
+            </button>
         </div>
-        <div class="grid gap-4 md:grid-cols-2">
-        {% for card in koko_cards %}
-        <div class="card rounded-2xl p-5 hover:border-purple-500 transition cursor-pointer group" onclick="window.location='/cards/{{ card.id }}'">
-            <div class="flex items-start justify-between mb-4">
-                <div>
-                    <div class="text-xs text-purple-400 font-medium uppercase tracking-wider mb-1">Koko Card</div>
-                    <h2 class="font-bold text-white text-lg">{{ card.card_label or card.card_number or card.card_token }}</h2>
-                    {% if card.card_number and card.card_label %}<p class="text-slate-500 text-xs font-mono">{{ card.card_number }}</p>{% endif %}
-                </div>
-                <div class="flex flex-col items-end gap-2">
-                    <span class="text-2xl">🎮</span>
-                    <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
-                        class="opacity-0 group-hover:opacity-100 text-xs text-slate-400 hover:text-white px-2 py-1 border border-slate-600 rounded-lg transition">
-                        ↻ Poll
-                    </button>
-                </div>
+        <div class="grid grid-cols-3 gap-2 mb-3">
+            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
+                <p class="text-xs text-slate-500 mb-0.5">Balance</p>
+                <p class="font-bold text-green-400 text-sm">${{ "%.2f"|format(card.cash_balance or 0) }}</p>
             </div>
-            <div class="grid grid-cols-3 gap-2">
-                <div class="bg-slate-800 rounded-xl p-3 text-center">
-                    <div class="text-xs text-slate-400 mb-1">Balance</div>
-                    <div class="font-bold text-green-400">${{ "%.2f"|format(card.cash_balance or 0) }}</div>
-                </div>
-                <div class="bg-slate-800 rounded-xl p-3 text-center">
-                    <div class="text-xs text-slate-400 mb-1">Bonus</div>
-                    <div class="font-bold text-yellow-400">${{ "%.2f"|format(card.cash_bonus or 0) }}</div>
-                </div>
-                <div class="bg-slate-800 rounded-xl p-3 text-center">
-                    <div class="text-xs text-slate-400 mb-1">Points</div>
-                    <div class="font-bold text-purple-400">{{ card.points or 0 }}</div>
-                </div>
+            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
+                <p class="text-xs text-slate-500 mb-0.5">Bonus</p>
+                <p class="font-bold text-yellow-400 text-sm">${{ "%.2f"|format(card.cash_bonus or 0) }}</p>
             </div>
-            <div class="flex items-center justify-between mt-3">
-                <div class="flex items-center gap-1.5 text-xs text-slate-500" id="last-updated-{{ card.id }}">
-                    <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse inline-block"></span>
-                    <span>{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
-                </div>
-                <div class="flex items-center gap-2">
-                    <!-- Poll interval selector -->
-                    <select onchange="event.stopPropagation(); updateInterval({{ card.id }}, this.value)"
-                        onclick="event.stopPropagation()"
-                        class="text-xs bg-slate-800 text-slate-400 border border-slate-600 rounded-lg px-2 py-1">
-                        {% for val, lbl in [(60,'1 min'),(300,'5 min'),(900,'15 min'),(3600,'1 hr'),(86400,'Daily')] %}
-                        <option value="{{ val }}" {% if (card.poll_interval or 60) == val %}selected{% endif %}>{{ lbl }}</option>
-                        {% endfor %}
-                    </select>
-                    <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-purple-400 px-3 py-1 border border-purple-900 rounded-lg">View →</a>
-                    <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
-                        <button onclick="return confirm('Remove?')" class="text-xs text-red-400 px-3 py-1 border border-red-900 rounded-lg">✕</button>
-                    </form>
-                </div>
+            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
+                <p class="text-xs text-slate-500 mb-0.5">Points</p>
+                <p class="font-bold text-purple-400 text-sm">{{ card.points or 0 }}</p>
             </div>
         </div>
-        {% endfor %}
+        <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                <span class="text-xs text-slate-600">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
+            </div>
+            <div class="flex items-center gap-1.5" onclick="event.stopPropagation()">
+                <select onchange="updateInterval({{ card.id }}, this.value)"
+                    class="text-xs bg-slate-800 text-slate-400 border border-slate-700 rounded-lg px-2 py-1">
+                    {% for val, lbl in [(60,'1 min'),(300,'5 min'),(900,'15 min'),(3600,'1 hr'),(86400,'Daily')] %}
+                    <option value="{{ val }}" {% if (card.poll_interval or 60) == val %}selected{% endif %}>{{ lbl }}</option>
+                    {% endfor %}
+                </select>
+                <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-slate-500 hover:text-purple-400 px-2 py-1 border border-slate-700 rounded-lg transition">View</a>
+                <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
+                    <button onclick="return confirm('Remove card?')" class="text-xs text-slate-600 hover:text-red-400 px-2 py-1 border border-slate-700 rounded-lg transition">✕</button>
+                </form>
+            </div>
         </div>
     </div>
-    {% endif %}
+    {% endfor %}
+    </div>
+</div>
+{% endif %}
 
-    {% if tz_cards %}
-    <div class="mb-6">
-        <div class="flex items-center gap-2 mb-3">
-            <span class="text-xs font-bold uppercase tracking-widest text-yellow-400">🕹️ Timezone</span>
-            <div class="flex-1 h-px bg-slate-700"></div>
-            <!-- Timezone session status detail -->
-            {% if tz_session %}
-            <span class="text-xs text-slate-500">Last poll: {{ tz_session.last_poll_at[:16] if tz_session.last_poll_at else 'Never' }}</span>
-            {% if tz_status == 'stale' or tz_status == 'error' %}
-            <span class="text-xs text-red-400">⚠️ {{ 'Stale' if tz_status == 'stale' else 'Error' }}</span>
-            {% endif %}
-            {% endif %}
+{% if tz_cards %}
+<div class="mb-6">
+    <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs font-semibold uppercase tracking-widest text-yellow-500">🕹️ Timezone</span>
+        <div class="flex-1 h-px bg-slate-800"></div>
+        {% if tz_session %}
+        <span class="text-xs text-slate-600">Last poll: {{ tz_session.last_poll_at[:16] if tz_session.last_poll_at else 'Never' }}</span>
+        {% if tz_status in ['stale','error'] %}
+        <span class="text-xs text-red-400">⚠️ {{ tz_status }}</span>
+        {% endif %}
+        {% endif %}
+    </div>
+    <div class="grid gap-3 md:grid-cols-2">
+    {% for card in tz_cards %}
+    <div class="card rounded-xl p-4 hover:border-yellow-800 transition cursor-pointer group relative"
+         onclick="window.location='/cards/{{ card.id }}'">
+        <div class="flex items-start justify-between mb-3">
+            <div>
+                <div class="flex items-center gap-2 mb-0.5">
+                    <p class="text-xs text-yellow-500 font-medium uppercase tracking-wider">Timezone</p>
+                    {{ tier_badge(card.tier) }}
+                </div>
+                <h2 class="font-bold text-white">{{ card.card_label or card.card_number }}</h2>
+                <p class="text-slate-600 text-xs font-mono">{{ card.card_number }}</p>
+            </div>
+            <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
+                class="opacity-0 group-hover:opacity-100 text-xs text-slate-500 hover:text-white px-2 py-1 border border-slate-700 rounded-lg transition">
+                ↻
+            </button>
         </div>
-        <div class="grid gap-4 md:grid-cols-2">
-        {% for card in tz_cards %}
-        <div class="card rounded-2xl p-5 hover:border-yellow-500 transition cursor-pointer group" onclick="window.location='/cards/{{ card.id }}'">
-            <div class="flex items-start justify-between mb-4">
-                <div>
-                    <div class="flex items-center gap-2 mb-1">
-                        <div class="text-xs text-yellow-400 font-medium uppercase tracking-wider">Timezone</div>
-                        {% if card.tier %}
-                        <span class="text-xs px-2 py-0.5 rounded-full font-medium
-                            {% if card.tier == 'Platinum' %}bg-purple-900/60 text-purple-300 border border-purple-700
-                            {% elif card.tier == 'Gold' %}bg-yellow-900/60 text-yellow-300 border border-yellow-700
-                            {% elif card.tier == 'Silver' %}bg-slate-600/60 text-slate-300 border border-slate-500
-                            {% else %}bg-orange-900/60 text-orange-300 border border-orange-700{% endif %}">
-                            {{ card.tier }}
-                        </span>
-                        {% endif %}
-                    </div>
-                    <h2 class="font-bold text-white text-lg">{{ card.card_label or card.card_number }}</h2>
-                    <p class="text-slate-500 text-xs font-mono">{{ card.card_number }}</p>
-                </div>
-                <div class="flex flex-col items-end gap-2">
-                    <span class="text-2xl">🕹️</span>
-                    <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
-                        class="opacity-0 group-hover:opacity-100 text-xs text-slate-400 hover:text-white px-2 py-1 border border-slate-600 rounded-lg transition">
-                        ↻ Poll
-                    </button>
-                </div>
+        <div class="grid grid-cols-3 gap-2 mb-3">
+            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
+                <p class="text-xs text-slate-500 mb-0.5">Credits</p>
+                <p class="font-bold text-green-400 text-sm">${{ "%.2f"|format(card.cash_balance or 0) }}</p>
             </div>
-            <div class="grid grid-cols-3 gap-2">
-                <div class="bg-slate-800 rounded-xl p-3 text-center">
-                    <div class="text-xs text-slate-400 mb-1">Credits</div>
-                    <div class="font-bold text-green-400">${{ "%.2f"|format(card.cash_balance or 0) }}</div>
-                </div>
-                <div class="bg-slate-800 rounded-xl p-3 text-center">
-                    <div class="text-xs text-slate-400 mb-1">Bonus</div>
-                    <div class="font-bold text-yellow-400">${{ "%.2f"|format(card.cash_bonus or 0) }}</div>
-                </div>
-                <div class="bg-slate-800 rounded-xl p-3 text-center">
-                    <div class="text-xs text-slate-400 mb-1">e-Tickets</div>
-                    <div class="font-bold text-orange-400">{{ card.points or 0 }}</div>
-                </div>
+            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
+                <p class="text-xs text-slate-500 mb-0.5">Bonus</p>
+                <p class="font-bold text-yellow-400 text-sm">${{ "%.2f"|format(card.cash_bonus or 0) }}</p>
             </div>
-            {% if card.tier %}
-            <div class="mt-2 flex items-center gap-2">
-                <span class="text-xs text-slate-500">Membership:</span>
-                <span class="text-xs px-2 py-0.5 rounded-full font-medium
-                    {% if card.tier == 'Platinum' %}bg-purple-900/60 text-purple-300 border border-purple-700
-                    {% elif card.tier == 'Gold' %}bg-yellow-900/60 text-yellow-300 border border-yellow-700
-                    {% elif card.tier == 'Silver' %}bg-slate-600/60 text-slate-300 border border-slate-500
-                    {% else %}bg-orange-900/60 text-orange-300 border border-orange-700{% endif %}">
-                    ★ {{ card.tier }}
+            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
+                <p class="text-xs text-slate-500 mb-0.5">e-Tickets</p>
+                <p class="font-bold text-orange-400 text-sm">{{ card.points or 0 }}</p>
+            </div>
+        </div>
+        <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5">
+                <span class="w-1.5 h-1.5 rounded-full {% if tz_status == 'connected' %}bg-yellow-500 animate-pulse{% elif tz_status == 'error' %}bg-red-500{% else %}bg-slate-600{% endif %}"></span>
+                <span class="text-xs {% if tz_status == 'error' %}text-red-500{% else %}text-slate-600{% endif %}">
+                    {{ card.last_updated[:16] if card.last_updated else 'Pending...' }}
                 </span>
             </div>
-            {% endif %}
-            <div class="flex items-center justify-between mt-3">
-                <div class="flex items-center gap-1.5 text-xs {% if tz_status == 'error' or tz_status == 'stale' %}text-red-400{% else %}text-slate-500{% endif %}">
-                    <span class="w-1.5 h-1.5 rounded-full {% if tz_status == 'connected' %}bg-yellow-500 animate-pulse{% elif tz_status == 'error' %}bg-red-500{% else %}bg-slate-500{% endif %} inline-block"></span>
-                    <span id="last-updated-{{ card.id }}">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
-                </div>
-                <div class="flex items-center gap-2">
-                    <select onchange="event.stopPropagation(); updateInterval({{ card.id }}, this.value)"
-                        onclick="event.stopPropagation()"
-                        class="text-xs bg-slate-800 text-slate-400 border border-slate-600 rounded-lg px-2 py-1">
-                        {% for val, lbl in [(300,'5 min'),(900,'15 min'),(1800,'30 min'),(3600,'1 hr'),(86400,'Daily')] %}
-                        <option value="{{ val }}" {% if (card.poll_interval or 900) == val %}selected{% endif %}>{{ lbl }}</option>
-                        {% endfor %}
-                    </select>
-                    <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-yellow-400 px-3 py-1 border border-yellow-900 rounded-lg">View →</a>
-                    <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
-                        <button onclick="return confirm('Remove?')" class="text-xs text-red-400 px-3 py-1 border border-red-900 rounded-lg">✕</button>
-                    </form>
-                </div>
+            <div class="flex items-center gap-1.5" onclick="event.stopPropagation()">
+                <select onchange="updateInterval({{ card.id }}, this.value)"
+                    class="text-xs bg-slate-800 text-slate-400 border border-slate-700 rounded-lg px-2 py-1">
+                    {% for val, lbl in [(300,'5 min'),(900,'15 min'),(1800,'30 min'),(3600,'1 hr'),(86400,'Daily')] %}
+                    <option value="{{ val }}" {% if (card.poll_interval or 900) == val %}selected{% endif %}>{{ lbl }}</option>
+                    {% endfor %}
+                </select>
+                <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-slate-500 hover:text-yellow-400 px-2 py-1 border border-slate-700 rounded-lg transition">View</a>
+                <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
+                    <button onclick="return confirm('Remove card?')" class="text-xs text-slate-600 hover:text-red-400 px-2 py-1 border border-slate-700 rounded-lg transition">✕</button>
+                </form>
             </div>
         </div>
-        {% endfor %}
-        </div>
     </div>
-    {% endif %}
+    {% endfor %}
+    </div>
+</div>
+{% endif %}
 
 {% else %}
 <div class="card rounded-2xl p-16 text-center">
-    <div class="text-6xl mb-4">🎮</div>
-    <h2 class="text-xl font-bold text-white mb-2">No cards yet</h2>
-    <p class="text-slate-400 mb-6">Add a Koko card or connect your Timezone account</p>
+    <div class="text-5xl mb-4">🎮</div>
+    <h2 class="text-lg font-bold text-white mb-2">No cards yet</h2>
+    <p class="text-slate-500 text-sm mb-6">Add a Koko card by scanning its QR code, or connect your Timezone account</p>
     <div class="flex gap-3 justify-center flex-wrap">
         <button onclick="document.getElementById('add-koko-modal').classList.remove('hidden'); setTimeout(startScanner,100)"
-            class="btn-primary px-5 py-2.5 rounded-lg text-sm font-medium text-white">+ Add Koko Card</button>
-        <a href="/timezone/start" class="px-5 py-2.5 rounded-lg text-sm font-medium border border-yellow-700 text-yellow-400 hover:bg-yellow-900/30 transition">🕹️ Connect Timezone</a>
+            class="btn-primary px-5 py-2 rounded-lg text-sm font-medium text-white">+ Add Koko Card</button>
+        <a href="/timezone/start" class="px-5 py-2 rounded-lg text-sm font-medium border border-yellow-800 text-yellow-500 hover:bg-yellow-900/30 transition">🕹️ Connect Timezone</a>
     </div>
 </div>
 {% endif %}
 
 <!-- Add Koko Modal -->
-<div id="add-koko-modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-    <div class="card rounded-2xl p-6 w-full max-w-md">
-        <div class="flex items-center justify-between mb-5">
-            <h2 class="text-lg font-bold text-white">Add Koko Card</h2>
-            <button onclick="closeModal()" class="text-slate-400 hover:text-white text-xl">✕</button>
+<div id="add-koko-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+    <div class="card rounded-2xl p-6 w-full max-w-sm">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-base font-bold text-white">Add Koko Card</h2>
+            <button onclick="closeModal()" class="text-slate-500 hover:text-white transition">✕</button>
         </div>
-        <div class="flex gap-2 mb-5 bg-slate-800 rounded-xl p-1">
+        <div class="flex gap-1 mb-4 bg-slate-800 rounded-xl p-1">
             <button onclick="setTab('scan')" id="tab-scan" class="flex-1 py-2 rounded-lg text-sm font-medium transition tab-active">📷 Scan QR</button>
             <button onclick="setTab('manual')" id="tab-manual" class="flex-1 py-2 rounded-lg text-sm font-medium transition text-slate-400">✏️ Manual</button>
         </div>
+
+        <!-- Scan tab -->
         <div id="tab-content-scan">
-            <div class="relative bg-black rounded-xl overflow-hidden mb-4" style="height:240px;">
+            <div class="relative bg-black rounded-xl overflow-hidden mb-3" style="height:220px;">
                 <video id="scanner-video" class="w-full h-full object-cover" playsinline muted></video>
                 <canvas id="scanner-canvas" class="hidden"></canvas>
                 <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <div class="w-44 h-44 border-2 border-white/40 rounded-xl relative">
-                        <div class="absolute top-0 left-0 w-5 h-5 border-t-4 border-l-4 border-indigo-400 rounded-tl-lg"></div>
-                        <div class="absolute top-0 right-0 w-5 h-5 border-t-4 border-r-4 border-indigo-400 rounded-tr-lg"></div>
-                        <div class="absolute bottom-0 left-0 w-5 h-5 border-b-4 border-l-4 border-indigo-400 rounded-bl-lg"></div>
-                        <div class="absolute bottom-0 right-0 w-5 h-5 border-b-4 border-r-4 border-indigo-400 rounded-br-lg"></div>
+                    <div class="w-40 h-40 relative">
+                        <div class="absolute top-0 left-0 w-5 h-5 border-t-4 border-l-4 border-indigo-400 rounded-tl"></div>
+                        <div class="absolute top-0 right-0 w-5 h-5 border-t-4 border-r-4 border-indigo-400 rounded-tr"></div>
+                        <div class="absolute bottom-0 left-0 w-5 h-5 border-b-4 border-l-4 border-indigo-400 rounded-bl"></div>
+                        <div class="absolute bottom-0 right-0 w-5 h-5 border-b-4 border-r-4 border-indigo-400 rounded-br"></div>
                     </div>
                 </div>
-                <div id="scanner-status" class="absolute bottom-2 left-0 right-0 text-center text-xs text-white/60">Point at QR code on card</div>
+                <p id="scanner-status" class="absolute bottom-2 left-0 right-0 text-center text-xs text-white/50">Point at QR code on card</p>
             </div>
-            <div id="scan-result" class="hidden bg-slate-800 rounded-xl p-4 mb-3">
-                <div class="text-xs text-green-400 mb-1">✅ Card detected!</div>
-                <div class="font-mono text-white text-sm" id="scan-token-display"></div>
-                <div class="text-xs text-slate-400 mt-1" id="scan-balance-display"></div>
+            <div id="scan-result" class="hidden bg-green-900/20 border border-green-800 rounded-xl p-3 mb-3">
+                <p class="text-xs text-green-400 mb-0.5">✅ Card found!</p>
+                <p class="font-mono text-white text-xs" id="scan-token-display"></p>
+                <p class="text-xs text-slate-400 mt-0.5" id="scan-balance-display"></p>
             </div>
-            <div id="scan-error" class="hidden bg-red-900/30 border border-red-700 rounded-xl p-3 mb-3 text-sm text-red-300"></div>
-            <div class="space-y-3">
-                <input id="scan-label" type="text" class="input-field w-full px-4 py-2.5 rounded-lg text-sm" placeholder="Nickname (optional)">
-                <button onclick="addScannedCard()" id="scan-add-btn" disabled
-                    class="w-full py-2.5 rounded-lg text-sm font-medium text-slate-500 bg-slate-700 cursor-not-allowed">Scan a card first</button>
-            </div>
+            <div id="scan-error" class="hidden bg-red-900/20 border border-red-800 rounded-xl p-3 mb-3 text-xs text-red-300"></div>
+            <input id="scan-label" type="text" class="input-field w-full px-3 py-2 rounded-lg text-sm mb-2" placeholder="Nickname (optional)">
+            <button onclick="addScannedCard()" id="scan-add-btn" disabled
+                class="w-full py-2.5 rounded-lg text-sm font-medium text-slate-500 bg-slate-800 cursor-not-allowed transition">Scan a card first</button>
         </div>
+
+        <!-- Manual tab -->
         <div id="tab-content-manual" class="hidden">
-            <form method="POST" action="/cards/add" class="space-y-4">
+            <form method="POST" action="/cards/add" class="space-y-3">
                 <div>
-                    <label class="block text-sm text-slate-400 mb-1">Card Token <span class="text-red-400">*</span></label>
-                    <input name="card_token" type="text" required class="input-field w-full px-4 py-2.5 rounded-lg text-sm font-mono" placeholder="e.g. 1ag9ukYM">
-                    <p class="text-xs text-slate-500 mt-1">From URL: ...BalanceMobile.aspx?i=<span class="text-yellow-400">TOKEN</span></p>
+                    <label class="block text-xs text-slate-400 mb-1">Card Token <span class="text-red-400">*</span></label>
+                    <input name="card_token" type="text" required class="input-field w-full px-3 py-2 rounded-lg text-sm font-mono" placeholder="e.g. 1ag9ukYM">
+                    <p class="text-xs text-slate-600 mt-1">...BalanceMobile.aspx?i=<span class="text-yellow-500">TOKEN</span></p>
                 </div>
-                <div>
-                    <label class="block text-sm text-slate-400 mb-1">Nickname (optional)</label>
-                    <input name="card_label" type="text" class="input-field w-full px-4 py-2.5 rounded-lg text-sm" placeholder="e.g. My Main Card">
-                </div>
-                <div>
-                    <label class="block text-sm text-slate-400 mb-1">Poll Interval</label>
-                    <select name="poll_interval" class="input-field w-full px-4 py-2.5 rounded-lg text-sm">
-                        <option value="60">Every 1 minute</option>
-                        <option value="300">Every 5 minutes</option>
-                        <option value="900">Every 15 minutes</option>
-                        <option value="3600">Every hour</option>
-                        <option value="86400">Daily</option>
-                    </select>
-                </div>
-                <div class="flex gap-3">
-                    <button type="button" onclick="closeModal()" class="flex-1 py-2.5 rounded-lg text-sm border border-slate-600 text-slate-300 hover:bg-slate-700">Cancel</button>
-                    <button type="submit" class="flex-1 btn-primary py-2.5 rounded-lg text-sm font-medium text-white">Add Card</button>
+                <input name="card_label" type="text" class="input-field w-full px-3 py-2 rounded-lg text-sm" placeholder="Nickname (optional)">
+                <select name="poll_interval" class="input-field w-full px-3 py-2 rounded-lg text-sm">
+                    <option value="60">Every 1 minute</option>
+                    <option value="300">Every 5 minutes</option>
+                    <option value="900">Every 15 minutes</option>
+                    <option value="3600">Hourly</option>
+                    <option value="86400">Daily</option>
+                </select>
+                <div class="flex gap-2 pt-1">
+                    <button type="button" onclick="closeModal()" class="flex-1 py-2 rounded-lg text-sm border border-slate-700 text-slate-400">Cancel</button>
+                    <button type="submit" class="flex-1 btn-primary py-2 rounded-lg text-sm font-medium text-white">Add Card</button>
                 </div>
             </form>
         </div>
     </div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="/static/js/jsQR.js"></script>
 <style>.tab-active { background: #4f46e5; color: white; }</style>
 <script>
-// ── Overview graph ──────────────────────────────────────────────────────────
-let overviewChart = null;
-let overviewOpen = false;
-let overviewPeriod = 'day';
+// ── Overview graph ────────────────────────────────────────────────────────────
+let overviewChart = null, overviewOpen = false, overviewPeriod = 'day';
 const COLORS = ['#818cf8','#fbbf24','#34d399','#f87171','#a78bfa','#38bdf8'];
 
 function toggleOverview() {
     overviewOpen = !overviewOpen;
     document.getElementById('overview-panel').classList.toggle('hidden', !overviewOpen);
-    document.getElementById('overview-chevron').style.transform = overviewOpen ? 'rotate(180deg)' : '';
-    if (overviewOpen) loadOverview();
+    document.getElementById('overview-chevron').textContent = overviewOpen ? '▲' : '▼';
+    if (overviewOpen && !overviewChart) loadOverview();
 }
 
 function setOverviewPeriod(p) {
     overviewPeriod = p;
     document.querySelectorAll('.period-btn').forEach(b => {
-        b.className = 'period-btn text-xs px-2 py-1 rounded-lg ' + (b.dataset.period === p ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white');
+        const active = b.dataset.period === p;
+        b.className = 'period-btn text-xs px-2.5 py-1 rounded-md transition ' + (active ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white');
     });
     if (overviewOpen) loadOverview();
 }
 
 async function loadOverview() {
-    const resp = await fetch(`/api/dashboard/overview?period=${overviewPeriod}`);
-    const series = await resp.json();
-    const ctx = document.getElementById('overview-chart').getContext('2d');
-    if (overviewChart) overviewChart.destroy();
+    document.getElementById('overview-loading').classList.remove('hidden');
+    document.getElementById('overview-chart').classList.add('hidden');
+    document.getElementById('overview-empty').classList.add('hidden');
+    try {
+        const resp = await fetch(`/api/dashboard/overview?period=${overviewPeriod}`);
+        const series = await resp.json();
+        document.getElementById('overview-loading').classList.add('hidden');
 
-    const totalNow = series.reduce((sum, s) => {
-        if (!s.data.length) return sum;
-        const last = s.data[s.data.length-1];
-        return sum + (last.total || 0);
-    }, 0);
-    document.getElementById('overview-summary').textContent = `Total: $${totalNow.toFixed(2)} across ${series.length} card(s)`;
+        const hasData = series.some(s => s.data.length > 1);
+        if (!hasData) { document.getElementById('overview-empty').classList.remove('hidden'); return; }
 
-    overviewChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-            datasets: series.map((s, i) => ({
-                label: s.label,
-                data: s.data.map(d => ({ x: d.t, y: d.total })),
-                borderColor: COLORS[i % COLORS.length],
-                backgroundColor: COLORS[i % COLORS.length] + '20',
-                tension: 0.3, fill: false, pointRadius: 2, borderWidth: 2,
-            }))
-        },
-        options: {
-            responsive: true, interaction: { mode: 'index', intersect: false },
-            plugins: { legend: { labels: { color: '#94a3b8', boxWidth: 12, font: { size: 11 } } } },
-            scales: {
-                x: { type: 'category', ticks: { color: '#64748b', maxTicksLimit: 8, font: { size: 10 } }, grid: { color: '#1e293b' } },
-                y: { ticks: { color: '#64748b', callback: v => '$'+v.toFixed(0) }, grid: { color: '#1e293b' } }
+        const total = series.reduce((s, c) => s + (c.data.length ? c.data[c.data.length-1].total : 0), 0);
+        document.getElementById('overview-summary').textContent = `Total $${total.toFixed(2)} · ${series.length} card(s)`;
+
+        const canvas = document.getElementById('overview-chart');
+        canvas.classList.remove('hidden');
+        if (overviewChart) overviewChart.destroy();
+
+        // Build unified timeline
+        overviewChart = new Chart(canvas.getContext('2d'), {
+            type: 'line',
+            data: {
+                datasets: series.filter(s => s.data.length > 0).map((s, i) => ({
+                    label: s.label,
+                    data: s.data.map(d => ({ x: d.t.replace('T',' '), y: d.total })),
+                    borderColor: COLORS[i % COLORS.length],
+                    backgroundColor: COLORS[i % COLORS.length] + '15',
+                    tension: 0.3, fill: false, pointRadius: 2, borderWidth: 2,
+                }))
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                plugins: {
+                    legend: { labels: { color: '#64748b', boxWidth: 10, font: { size: 11 } } },
+                    tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
+                               titleColor: '#e2e8f0', bodyColor: '#94a3b8',
+                               callbacks: { label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}` } }
+                },
+                scales: {
+                    x: { type: 'category', ticks: { color: '#475569', maxTicksLimit: 6, font: { size: 10 } }, grid: { color: '#1e293b' } },
+                    y: { ticks: { color: '#475569', callback: v => '$'+v.toFixed(0), font: { size: 10 } }, grid: { color: '#1e293b' } }
+                }
             }
-        }
-    });
+        });
+    } catch(e) {
+        document.getElementById('overview-loading').textContent = 'Failed to load chart';
+        console.error(e);
+    }
 }
 
-// ── Poll interval update ────────────────────────────────────────────────────
+// ── Poll interval ─────────────────────────────────────────────────────────────
 async function updateInterval(cardId, interval) {
     const form = new FormData();
     form.append('poll_interval', interval);
     await fetch(`/cards/${cardId}/poll-interval`, { method: 'POST', body: form });
 }
 
-// ── Force poll ──────────────────────────────────────────────────────────────
+// ── Force poll ────────────────────────────────────────────────────────────────
 async function forcePoll(cardId, btn) {
-    btn.textContent = '...';
-    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = '...'; btn.disabled = true;
     try {
         const resp = await fetch(`/cards/${cardId}/force-poll`, { method: 'POST' });
-        const result = await resp.json();
-        if (result.success) {
-            btn.textContent = '✅';
-            const d = result.data;
-            document.getElementById(`last-updated-${cardId}`).querySelector('span:last-child').textContent = 'Just now';
-            setTimeout(() => { btn.textContent = '↻ Poll'; btn.disabled = false; }, 2000);
-        } else {
-            btn.textContent = '❌'; setTimeout(() => { btn.textContent = '↻ Poll'; btn.disabled = false; }, 2000);
-        }
-    } catch(e) { btn.textContent = '↻ Poll'; btn.disabled = false; }
+        const r = await resp.json();
+        btn.textContent = r.success ? '✓' : '✗';
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
+    } catch(e) { btn.textContent = orig; btn.disabled = false; }
 }
 
-// ── QR Scanner ─────────────────────────────────────────────────────────────
+// ── QR Scanner ────────────────────────────────────────────────────────────────
 let scannerStream = null, scannerInterval = null, scannedToken = null;
 
 function closeModal() {
     document.getElementById('add-koko-modal').classList.add('hidden');
     stopScanner();
+    document.getElementById('scan-result').classList.add('hidden');
+    document.getElementById('scan-error').classList.add('hidden');
+    scannedToken = null;
 }
 function setTab(tab) {
     ['scan','manual'].forEach(t => {
@@ -425,8 +404,10 @@ function startScanner() {
             scannerStream = stream;
             const v = document.getElementById('scanner-video');
             v.srcObject = stream; v.play();
-            scannerInterval = setInterval(scanFrame, 200);
-        }).catch(e => { document.getElementById('scanner-status').textContent = 'Camera denied — use manual entry'; });
+            scannerInterval = setInterval(scanFrame, 250);
+        }).catch(() => {
+            document.getElementById('scanner-status').textContent = 'Camera denied — use manual tab';
+        });
 }
 function stopScanner() {
     clearInterval(scannerInterval); scannerInterval = null;
@@ -438,13 +419,12 @@ function scanFrame() {
     const c = document.getElementById('scanner-canvas');
     c.width = v.videoWidth; c.height = v.videoHeight;
     const ctx = c.getContext('2d'); ctx.drawImage(v, 0, 0);
-    const img = ctx.getImageData(0, 0, c.width, c.height);
-    const code = jsQR(img.data, img.width, img.height);
+    const code = jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height);
     if (code && code.data) {
         const url = code.data;
         if (url.toLowerCase().includes('icardinc.net') || url.toLowerCase().includes('kokoamusement') || url.toLowerCase().includes('balancemobile')) {
             stopScanner();
-            document.getElementById('scanner-status').textContent = '✅ Found! Fetching...';
+            document.getElementById('scanner-status').textContent = 'Found! Fetching...';
             resolveQR(url);
         }
     }
@@ -452,39 +432,54 @@ function scanFrame() {
 async function resolveQR(url) {
     document.getElementById('scan-error').classList.add('hidden');
     try {
-        const resp = await fetch('/api/cards/resolve-qr', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({url}) });
-        const result = await resp.json();
-        if (result.success) {
-            scannedToken = result.token;
-            document.getElementById('scan-token-display').textContent = 'Token: ' + result.token;
-            const b = result.balance;
-            document.getElementById('scan-balance-display').textContent = `$${(b.cash_balance||0).toFixed(2)} balance · $${(b.cash_bonus||0).toFixed(2)} bonus · ${b.points||0} pts`;
+        const resp = await fetch('/api/cards/resolve-qr', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url}) });
+        const r = await resp.json();
+        if (r.success) {
+            scannedToken = r.token;
+            document.getElementById('scan-token-display').textContent = r.token;
+            const b = r.balance;
+            document.getElementById('scan-balance-display').textContent =
+                `$${(b.cash_balance||0).toFixed(2)} + $${(b.cash_bonus||0).toFixed(2)} bonus · ${b.points||0} pts`;
             document.getElementById('scan-result').classList.remove('hidden');
             const btn = document.getElementById('scan-add-btn');
             btn.disabled = false;
-            btn.className = 'w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white';
-            btn.textContent = '+ Add This Card';
+            btn.className = 'w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white transition';
+            btn.textContent = '+ Add Card';
         } else {
-            document.getElementById('scan-error').textContent = result.error || 'Could not read card';
+            document.getElementById('scan-error').textContent = r.error || 'Could not read card';
             document.getElementById('scan-error').classList.remove('hidden');
             setTimeout(startScanner, 2000);
         }
     } catch(e) {
-        document.getElementById('scan-error').textContent = 'Error: ' + e.message;
+        document.getElementById('scan-error').textContent = e.message;
         document.getElementById('scan-error').classList.remove('hidden');
         setTimeout(startScanner, 2000);
     }
 }
 function addScannedCard() {
     if (!scannedToken) return;
-    const label = document.getElementById('scan-label').value.trim();
     const form = document.createElement('form');
     form.method = 'POST'; form.action = '/cards/add';
-    [['card_token', scannedToken], ['card_label', label], ['poll_interval', '60']].forEach(([n,v]) => {
-        const i = document.createElement('input'); i.type = 'hidden'; i.name = n; i.value = v;
+    [['card_token', scannedToken], ['card_label', document.getElementById('scan-label').value.trim()], ['poll_interval','60']].forEach(([n,v]) => {
+        const i = document.createElement('input'); i.type='hidden'; i.name=n; i.value=v;
         form.appendChild(i);
     });
     document.body.appendChild(form); form.submit();
 }
+
+// Load Chart.js only when needed
+function ensureChartJS(cb) {
+    if (typeof Chart !== 'undefined') return cb();
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js';
+    s.onload = cb;
+    document.head.appendChild(s);
+}
+
+// Override toggleOverview to lazy-load Chart.js
+const _toggleOverview = toggleOverview;
+window.toggleOverview = function() {
+    ensureChartJS(_toggleOverview);
+};
 </script>
 {% endblock %}

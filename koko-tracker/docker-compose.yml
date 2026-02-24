@@ -15,6 +15,7 @@ services:
       # Optional: set a custom DB path
       # - DB_PATH=/data/koko.db
       - APP_URL=https://card.z2hs.au
+      - ADMIN_USERNAME=admin  # Set this to auto-grant admin to that username
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 30s

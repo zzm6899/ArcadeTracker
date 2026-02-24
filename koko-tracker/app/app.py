@@ -13,7 +13,8 @@ DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 60))
 TIMEZONE_POLL_INTERVAL = int(os.environ.get('TIMEZONE_POLL_INTERVAL', 900))
 KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
 TEEG_API = 'https://api.teeg.cloud'
-ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', '')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 def get_db():
@@ -31,6 +32,7 @@ def init_db():
             password_hash TEXT NOT NULL,
             is_admin INTEGER DEFAULT 0,
             timezone_name TEXT DEFAULT 'Australia/Sydney',
+            show_overview INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS cards (
@@ -89,8 +91,14 @@ def init_db():
         'ALTER TABLE users ADD COLUMN timezone_name TEXT DEFAULT "Australia/Sydney"',
         'ALTER TABLE timezone_sessions ADD COLUMN last_poll_at TEXT',
         'ALTER TABLE timezone_sessions ADD COLUMN last_poll_status TEXT',
+        'ALTER TABLE users ADD COLUMN show_overview INTEGER DEFAULT 1',
     ]:
         try: conn.execute(sql)
+        except: pass
+    # Sync env-defined admin
+    if ADMIN_USERNAME:
+        try:
+            conn.execute('UPDATE users SET is_admin=1 WHERE username=?', (ADMIN_USERNAME,))
         except: pass
     conn.commit()
     conn.close()
@@ -311,10 +319,11 @@ def register():
             return render_template('register.html')
         conn = get_db()
         try:
-            # First user becomes admin
+            # First user becomes admin, or if username matches ADMIN_USERNAME env
             count = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+            is_admin = 1 if (count == 0 or (ADMIN_USERNAME and u == ADMIN_USERNAME)) else 0
             conn.execute('INSERT INTO users (username,password_hash,is_admin) VALUES (?,?,?)',
-                        (u, hash_password(p), 1 if count == 0 else 0))
+                        (u, hash_password(p), is_admin))
             conn.commit(); flash('Account created! Please log in.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError: flash('Username already taken.', 'error')
@@ -343,8 +352,9 @@ def settings():
     user = get_current_user()
     if request.method == 'POST':
         tz = request.form.get('timezone_name', 'Australia/Sydney')
+        show_overview = 1 if request.form.get('show_overview') else 0
         conn = get_db()
-        conn.execute('UPDATE users SET timezone_name=? WHERE id=?', (tz, user['id']))
+        conn.execute('UPDATE users SET timezone_name=?, show_overview=? WHERE id=?', (tz, show_overview, user['id']))
         conn.commit(); conn.close()
         flash('Settings saved.', 'success')
         return redirect(url_for('settings'))
