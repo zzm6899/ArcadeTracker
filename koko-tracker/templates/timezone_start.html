@@ -72,21 +72,26 @@ document.addEventListener('DOMContentLoaded', function() {
     var appUrl = {{ app_url | tojson }};
 
     var bookmarklet = 'javascript:void(function(){' +
-        'var t=null,at=null;' +
+        'var t=null,at=null,rt=null,cid=null;' +
         'for(var i=0;i<localStorage.length;i++){' +
             'var k=localStorage.key(i);' +
             'var v=localStorage.getItem(k);' +
             'if(v){try{' +
                 'var p=JSON.parse(v);' +
                 'if(p.secret&&p.secret.startsWith(\'eyJ\')){' +
-                    'if(k.indexOf(\'accesstoken\')>-1){at=p.secret;}' +
+                    'if(k.indexOf(\'accesstoken\')>-1){at=p.secret;if(p.clientId)cid=p.clientId;}' +
                     'else if(k.indexOf(\'idtoken\')>-1&&!at){t=p.secret;}' +
                 '}' +
+                'if(p.credentialType===\'RefreshToken\'&&p.secret){rt=p.secret;if(p.clientId)cid=p.clientId;}' +
             '}catch(e){}}' +
         '}' +
         'var tok=at||t;' +
-        'if(tok){window.location=\''+appUrl+'/timezone/landing?token=\'+encodeURIComponent(tok);}' +
-        'else{alert(\'Not logged in to Timezone yet!\');}' +
+        'if(tok){' +
+            'var u=\''+appUrl+'/timezone/landing?token=\'+encodeURIComponent(tok);' +
+            'if(rt)u+=\'&refresh_token=\'+encodeURIComponent(rt);' +
+            'if(cid)u+=\'&client_id=\'+encodeURIComponent(cid);' +
+            'window.location=u;' +
+        '}else{alert(\'Not logged in to Timezone yet!\');}' +
     '})();';
 
     var display = document.getElementById('bookmarklet-display');

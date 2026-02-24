@@ -127,6 +127,8 @@ def init_db():
         'ALTER TABLE users ADD COLUMN email TEXT',
         'ALTER TABLE users ADD COLUMN reset_token TEXT',
         'ALTER TABLE users ADD COLUMN reset_expires TEXT',
+        'ALTER TABLE timezone_sessions ADD COLUMN refresh_token TEXT',
+        'ALTER TABLE timezone_sessions ADD COLUMN ms_client_id TEXT',
         'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
     ]:
         try: conn.execute(sql)
@@ -222,6 +224,34 @@ TZ_HEADERS = {
     'x-app-version': '20210722',
 }
 
+def tz_refresh_ms_token(refresh_token, ms_client_id=None):
+    """Use Microsoft Identity refresh token to get a new access token for teeg.cloud."""
+    # Timezone uses Microsoft B2C identity - refresh_token lets us get a new bearer
+    cid = ms_client_id or 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # known Timezone clientId
+    try:
+        resp = requests.post(
+            'https://identity.teeg.cloud/ca0e4868-177b-49d2-8c63-f1044e3edc63/B2C_1A_signupsignin/oauth2/v2.0/token',
+            data={
+                'grant_type': 'refresh_token',
+                'client_id': cid,
+                'refresh_token': refresh_token,
+                'scope': f'openid profile offline_access https://identity.teeg.cloud/{cid}/guest.read',
+            },
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
+            timeout=15
+        )
+        print(f"[Timezone] MS token refresh: HTTP {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            new_token     = data.get('access_token') or data.get('id_token')
+            new_refresh   = data.get('refresh_token', refresh_token)
+            expires_in    = int(data.get('expires_in', 840))
+            return new_token, new_refresh, expires_in
+        print(f"[Timezone] MS refresh failed: {resp.text[:300]}")
+        return None, None, None
+    except Exception as e:
+        print(f"[Timezone] MS refresh error: {e}"); return None, None, None
+
 def tz_refresh_token(cookies_dict):
     """Use session cookies to get a fresh bearer token."""
     try:
@@ -229,10 +259,9 @@ def tz_refresh_token(cookies_dict):
             f'{TEEG_API}/guest?version=20210722',
             headers=TZ_HEADERS, cookies=cookies_dict or {}, timeout=15
         )
-        print(f"[Timezone] Token refresh: HTTP {resp.status_code}")
+        print(f"[Timezone] Cookie token refresh: HTTP {resp.status_code}")
         if resp.status_code == 200:
             data = resp.json()
-            # Extract new token from response if present, otherwise cookies may carry auth
             new_token = data.get('token') or data.get('accessToken')
             return data, new_token, dict(resp.cookies)
         return None, None, None
@@ -249,28 +278,64 @@ def fetch_timezone_guest(bearer_token, cookies_dict=None, user_id=None):
         print(f"[Timezone] guest API: HTTP {resp.status_code}")
         if resp.status_code == 200:
             return resp.json()
-        # 401/403 = token expired, try refresh with cookies
-        if resp.status_code in (401, 403, 400) and cookies:
-            print(f"[Timezone] Token expired (HTTP {resp.status_code}), refreshing via cookies...")
-            data, new_token, new_cookies = tz_refresh_token(cookies)
-            if data:
-                # Save refreshed token if we have user_id
-                if user_id and new_token:
+        # 401/403 = token expired — try MS refresh token first, then cookie refresh
+        if resp.status_code in (401, 403, 400):
+            print(f"[Timezone] Token expired (HTTP {resp.status_code}), attempting refresh...")
+            new_token = None
+            new_refresh = None
+
+            # Try MS Identity refresh token first (most reliable)
+            if user_id:
+                try:
+                    conn = get_db()
+                    tzs = conn.execute('SELECT refresh_token, ms_client_id FROM timezone_sessions WHERE user_id=?', (user_id,)).fetchone()
+                    conn.close()
+                    if tzs and tzs['refresh_token']:
+                        new_token, new_refresh, expires_in = tz_refresh_ms_token(tzs['refresh_token'], tzs['ms_client_id'])
+                except Exception as e:
+                    print(f"[Timezone] Could not get refresh token: {e}")
+
+            # Fallback: cookie-based refresh
+            if not new_token and cookies:
+                data, new_token, new_cookies = tz_refresh_token(cookies)
+                if data and not new_token:
+                    # Cookie refresh returned guest data without a new token — use it directly
+                    if user_id:
+                        try:
+                            conn = get_db()
+                            conn.execute('UPDATE timezone_sessions SET last_poll_status=? WHERE user_id=?', ('ok', user_id))
+                            conn.commit(); conn.close()
+                        except: pass
+                    return data
+
+            if new_token:
+                # Save refreshed token
+                if user_id:
                     try:
-                        merged_cookies = {**cookies, **(new_cookies or {})}
                         now = datetime.utcnow()
-                        tok_exp = (now + timedelta(minutes=14)).strftime('%Y-%m-%d %H:%M:%S')
+                        tok_exp  = (now + timedelta(minutes=14)).strftime('%Y-%m-%d %H:%M:%S')
                         sess_exp = (now + timedelta(days=29)).strftime('%Y-%m-%d %H:%M:%S')
                         conn = get_db()
-                        conn.execute(
-                            'UPDATE timezone_sessions SET bearer_token=?, cookies_json=?, token_expires_at=?, updated_at=CURRENT_TIMESTAMP WHERE user_id=?',
-                            (new_token, json.dumps(merged_cookies), tok_exp, user_id)
-                        )
+                        updates = 'bearer_token=?, token_expires_at=?, updated_at=CURRENT_TIMESTAMP'
+                        params  = [new_token, tok_exp]
+                        if new_refresh:
+                            updates += ', refresh_token=?'
+                            params.append(new_refresh)
+                        params.append(user_id)
+                        conn.execute(f'UPDATE timezone_sessions SET {updates} WHERE user_id=?', params)
                         conn.commit(); conn.close()
                         print(f"[Timezone] Token refreshed for user {user_id}")
                     except Exception as e:
                         print(f"[Timezone] Could not save refreshed token: {e}")
-                return data
+
+                # Retry with new token
+                headers2 = {**TZ_HEADERS, 'Authorization': f'Bearer {new_token}'}
+                try:
+                    resp2 = requests.get(f'{TEEG_API}/guest?version=20210722', headers=headers2, cookies=cookies, timeout=15)
+                    if resp2.status_code == 200:
+                        return resp2.json()
+                except Exception as e:
+                    print(f"[Timezone] Retry after refresh failed: {e}")
         print(f"[Timezone] Error body: {resp.text[:300]}")
         return None
     except Exception as e:
@@ -329,16 +394,19 @@ def fetch_timezone_transactions(card_number, bearer_token, cookies_dict=None):
     except Exception as e:
         print(f"[Timezone] Transaction fetch error: {e}"); return []
 
-def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_exp, guest_id=None):
+def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_exp, guest_id=None, refresh_token=None, ms_client_id=None):
     conn = get_db()
     conn.execute('''
-        INSERT INTO timezone_sessions (user_id, bearer_token, cookies_json, token_expires_at, session_expires_at, guest_id, updated_at)
-        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        INSERT INTO timezone_sessions (user_id, bearer_token, cookies_json, token_expires_at, session_expires_at, guest_id, refresh_token, ms_client_id, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
         ON CONFLICT(user_id) DO UPDATE SET
             bearer_token=excluded.bearer_token, cookies_json=excluded.cookies_json,
             token_expires_at=excluded.token_expires_at, session_expires_at=excluded.session_expires_at,
-            guest_id=COALESCE(excluded.guest_id, timezone_sessions.guest_id), updated_at=CURRENT_TIMESTAMP
-    ''', (user_id, bearer_token, json.dumps(cookies_dict), token_exp, sess_exp, guest_id))
+            guest_id=COALESCE(excluded.guest_id, timezone_sessions.guest_id),
+            refresh_token=COALESCE(excluded.refresh_token, timezone_sessions.refresh_token),
+            ms_client_id=COALESCE(excluded.ms_client_id, timezone_sessions.ms_client_id),
+            updated_at=CURRENT_TIMESTAMP
+    ''', (user_id, bearer_token, json.dumps(cookies_dict), token_exp, sess_exp, guest_id, refresh_token, ms_client_id))
     conn.commit(); conn.close()
 
 def tz_session_status(tzs):
@@ -542,7 +610,8 @@ def discord_oauth_start():
     import secrets as _sec
     state = _sec.token_hex(16)
     session['discord_oauth_state'] = state
-    redirect_uri = url_for('discord_oauth_callback', _external=True)
+    # Use APP_URL to ensure https:// is used (url_for may produce http://)
+    redirect_uri = APP_URL.rstrip('/') + '/auth/discord/callback'
     params = {
         'client_id': DISCORD_CLIENT_ID,
         'redirect_uri': redirect_uri,
@@ -557,7 +626,7 @@ def discord_oauth_start():
 def discord_oauth_callback():
     error = request.args.get('error')
     if error:
-        flash(f'Discord login cancelled.', 'error')
+        flash('Discord login cancelled.', 'error')
         return redirect(url_for('login'))
     code  = request.args.get('code')
     state = request.args.get('state')
@@ -565,7 +634,7 @@ def discord_oauth_callback():
         flash('Invalid OAuth state.', 'error')
         return redirect(url_for('login'))
 
-    redirect_uri = url_for('discord_oauth_callback', _external=True)
+    redirect_uri = APP_URL.rstrip('/') + '/auth/discord/callback'
     # Exchange code for token
     token_resp = requests.post('https://discord.com/api/oauth2/token', data={
         'client_id': DISCORD_CLIENT_ID,
@@ -898,7 +967,11 @@ def timezone_callback():
     except:
         token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
     sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-    save_timezone_session(user['id'], bearer_token, cookies, token_exp, sess_exp)
+    # Extract Microsoft refresh token from localStorage data if provided
+    refresh_token = data.get('refresh_token') or data.get('refreshToken')
+    ms_client_id  = data.get('ms_client_id') or data.get('clientId')
+    save_timezone_session(user['id'], bearer_token, cookies, token_exp, sess_exp,
+                          refresh_token=refresh_token, ms_client_id=ms_client_id)
     guest = fetch_timezone_guest(bearer_token, cookies)
     if not guest: return jsonify({'error': 'Could not fetch Timezone data'}), 400
     conn = get_db()
@@ -925,7 +998,9 @@ def timezone_extract_token():
             except:
                 token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
             sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-            save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'))
+            rt  = data.get('refresh_token') or data.get('refreshToken')
+            cid = data.get('client_id') or data.get('clientId')
+            save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'), refresh_token=rt, ms_client_id=cid)
             return jsonify({'success': True, 'cards': _format_tz_cards(guest), 'name': guest.get('givenName','')})
     return jsonify({'success': False, 'error': 'Could not extract token'})
 
