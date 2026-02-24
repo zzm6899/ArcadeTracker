@@ -45,10 +45,18 @@
 
             {% if card.card_number %}<p class="text-slate-600 text-xs font-mono mt-1">{{ card.card_number }}</p>{% endif %}
         </div>
-        <button onclick="forcePoll()" id="poll-btn"
-            class="text-xs text-slate-500 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition shrink-0">
-            ↻ Refresh
-        </button>
+        <div class="flex items-center gap-2 shrink-0">
+            {% if card.card_type == 'timezone' %}
+            <button onclick="importHistory()" id="import-btn"
+                class="text-xs text-indigo-400 hover:text-white px-3 py-1.5 border border-indigo-900 rounded-lg transition">
+                ⬇ Import History
+            </button>
+            {% endif %}
+            <button onclick="forcePoll()" id="poll-btn"
+                class="text-xs text-slate-500 hover:text-white px-3 py-1.5 border border-slate-700 rounded-lg transition">
+                ↻ Refresh
+            </button>
+        </div>
     </div>
 
     <!-- Last updated -->
@@ -303,6 +311,27 @@ async function saveRename() {
         document.title = result.label + ' – Balance Tracker';
         cancelRename();
     }
+}
+
+async function importHistory() {
+    const btn = document.getElementById('import-btn');
+    if (!btn) return;
+    btn.textContent = '⟳ Importing…'; btn.disabled = true;
+    try {
+        const r = await fetch(`/api/cards/${CARD_ID}/import-transactions`, { method: 'POST' });
+        const result = await r.json();
+        if (result.success) {
+            btn.textContent = `✓ ${result.imported} imported`;
+            if (result.imported > 0) {
+                setTimeout(() => { loadChart(document.querySelector('.period-btn.active')?.id.replace('btn-','') || 'day'); loadStats(); }, 500);
+            }
+        } else {
+            btn.textContent = '✗ ' + (result.error || 'Failed');
+        }
+    } catch(e) {
+        btn.textContent = '✗ Error';
+    }
+    setTimeout(() => { btn.textContent = '⬇ Import History'; btn.disabled = false; }, 3000);
 }
 
 loadStats();
