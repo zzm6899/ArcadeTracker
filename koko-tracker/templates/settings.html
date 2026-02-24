@@ -76,6 +76,15 @@
             </div>
 
             <div class="border-t border-slate-800 pt-4">
+                {% if user.discord_id and not user.password_hash %}
+                <div class="mb-4 px-4 py-3 rounded-xl bg-indigo-900/20 border border-indigo-800 flex items-center justify-between gap-3">
+                    <div>
+                        <p class="text-sm text-indigo-200 font-medium">Discord-only account</p>
+                        <p class="text-xs text-indigo-400 mt-0.5">You don't have a password yet. Set one to enable username/password login and password reset.</p>
+                    </div>
+                    <a href="/set-password" class="shrink-0 text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg transition">Set Password</a>
+                </div>
+                {% endif %}
                 <label class="block text-sm text-slate-300 font-medium mb-1.5">Email Address</label>
                 <input name="email" type="email" class="input-field w-full px-3 py-2 rounded-lg text-sm"
                     placeholder="you@example.com (for password reset)"

@@ -1,6 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Dashboard – Balance Tracker{% endblock %}
 {% block content %}
+{% if session.get('discord_new_user') %}
+<div class="mb-4 px-5 py-3.5 rounded-2xl bg-indigo-900/30 border border-indigo-700 flex items-center justify-between gap-4">
+    <div>
+        <p class="text-sm font-medium text-indigo-200">👋 Welcome! Your account was created via Discord.</p>
+        <p class="text-xs text-indigo-400 mt-0.5">Set a password so you can also log in with your username, and use password reset.</p>
+    </div>
+    <a href="/set-password" class="shrink-0 text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg transition">Set Password</a>
+</div>
+{% endif %}
 
 {% with messages = get_flashed_messages(with_categories=true) %}
 {% if messages %}{% for cat, msg in messages %}

@@ -809,6 +809,7 @@ def discord_oauth_callback():
         if user:
             conn.execute('UPDATE users SET discord_id=? WHERE id=?', (discord_id, user['id']))
             conn.commit()
+            session.permanent = True
             session['user_id'] = user['id']
             conn.close()
             flash(f'Discord linked to your account {user["username"]}.', 'success')
@@ -828,7 +829,9 @@ def discord_oauth_callback():
     conn.commit()
     user = conn.execute('SELECT * FROM users WHERE discord_id=?', (discord_id,)).fetchone()
     conn.close()
+    session.permanent = True
     session['user_id'] = user['id']
+    session['discord_new_user'] = True  # prompt to set password
     flash(f'Welcome {username}! Account created via Discord.', 'success')
     return redirect(url_for('dashboard'))
 
@@ -838,6 +841,11 @@ def forgot_password():
         identifier = request.form.get('identifier','').strip()
         conn = get_db()
         user = conn.execute('SELECT * FROM users WHERE email=? OR username=?', (identifier, identifier)).fetchone()
+        # Discord-only account with no password — tell them to log in via Discord then set password
+        if user and user['discord_id'] and not user['password_hash']:
+            conn.close()
+            flash('This account was created with Discord. Log in with Discord, then go to Settings to set a password.', 'error')
+            return redirect(url_for('forgot_password'))
         if user and user['email']:
             import secrets as _sec
             token = _sec.token_urlsafe(32)
@@ -932,6 +940,36 @@ def timezone_reauth():
     conn.commit(); conn.close()
     print(f"[Reauth] Token refreshed for user {target_uid}, expires {tok_exp}")
     return jsonify({'success': True, 'expires': tok_exp, 'message': f'Token refreshed, expires {tok_exp}'})
+
+
+@app.route('/set-password', methods=['GET', 'POST'])
+@login_required
+def set_password():
+    """Allow Discord-only accounts (no password) to set a password."""
+    user = get_current_user()
+    if request.method == 'POST':
+        pw  = request.form.get('password', '')
+        pw2 = request.form.get('confirm_password', '')
+        import re as _re
+        if len(pw) < 8:
+            flash('Password must be at least 8 characters.', 'error')
+            return render_template('set_password.html', user=user)
+        if not _re.search(r'[A-Z]', pw):
+            flash('Password must contain at least one uppercase letter.', 'error')
+            return render_template('set_password.html', user=user)
+        if not _re.search(r'[0-9]', pw):
+            flash('Password must contain at least one number.', 'error')
+            return render_template('set_password.html', user=user)
+        if pw != pw2:
+            flash('Passwords do not match.', 'error')
+            return render_template('set_password.html', user=user)
+        conn = get_db()
+        conn.execute('UPDATE users SET password_hash=? WHERE id=?', (hash_password(pw), user['id']))
+        conn.commit(); conn.close()
+        session.pop('discord_new_user', None)
+        flash('Password set! You can now log in with your username and password.', 'success')
+        return redirect(url_for('dashboard'))
+    return render_template('set_password.html', user=user)
 
 @app.route('/logout')
 def logout():
