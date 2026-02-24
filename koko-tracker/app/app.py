@@ -82,6 +82,12 @@ def init_db():
             logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_history_card_time ON balance_history(card_id, recorded_at);
+        CREATE TABLE IF NOT EXISTS discord_link_codes (
+            discord_id TEXT PRIMARY KEY,
+            discord_username TEXT,
+            code TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        );
     ''')
     # Migrations
     for sql in [
@@ -93,6 +99,10 @@ def init_db():
         'ALTER TABLE timezone_sessions ADD COLUMN last_poll_at TEXT',
         'ALTER TABLE timezone_sessions ADD COLUMN last_poll_status TEXT',
         'ALTER TABLE users ADD COLUMN show_overview INTEGER DEFAULT 1',
+        'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
+        'ALTER TABLE users ADD COLUMN discord_id TEXT',
+        'ALTER TABLE users ADD COLUMN leaderboard_opt_in INTEGER DEFAULT 0',
+        'ALTER TABLE cards ADD COLUMN leaderboard_public INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
     ]:
         try: conn.execute(sql)
@@ -401,11 +411,16 @@ def settings():
         show_overview = 1 if request.form.get('show_overview') else 0
         discord_webhook = request.form.get('discord_webhook', '').strip()
         conn = get_db()
-        conn.execute('UPDATE users SET timezone_name=?, show_overview=?, discord_webhook=? WHERE id=?', (tz, show_overview, discord_webhook, user['id']))
+        leaderboard_opt = 1 if request.form.get('leaderboard_opt_in') else 0
+        conn.execute('UPDATE users SET timezone_name=?, show_overview=?, discord_webhook=?, leaderboard_opt_in=? WHERE id=?', 
+                    (tz, show_overview, discord_webhook, leaderboard_opt, user['id']))
         conn.commit(); conn.close()
         flash('Settings saved.', 'success')
         return redirect(url_for('settings'))
-    return render_template('settings.html', user=user)
+    conn = get_db()
+    cards = conn.execute('SELECT * FROM cards WHERE user_id=? AND active=1 ORDER BY card_type, created_at', (user['id'],)).fetchall()
+    conn.close()
+    return render_template('settings.html', user=user, cards=cards)
 
 # ─── Routes: Dashboard ────────────────────────────────────────────────────────
 @app.route('/dashboard')
@@ -658,6 +673,64 @@ def test_webhook():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/discord/link', methods=['POST'])
+@login_required
+def discord_link():
+    user = get_current_user()
+    code = request.form.get('link_code','').strip().upper()
+    if not code:
+        flash('Enter a link code from Discord /link command.', 'error')
+        return redirect(url_for('settings'))
+    conn = get_db()
+    row = conn.execute('SELECT * FROM discord_link_codes WHERE code=?', (code,)).fetchone()
+    if not row:
+        conn.close(); flash('Invalid code.', 'error'); return redirect(url_for('settings'))
+    if row['expires_at'] < datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'):
+        conn.close(); flash('Code expired - use /link in Discord again.', 'error'); return redirect(url_for('settings'))
+    existing = conn.execute('SELECT id FROM users WHERE discord_id=?', (row['discord_id'],)).fetchone()
+    if existing and existing['id'] != user['id']:
+        conn.close(); flash('That Discord account is already linked.', 'error'); return redirect(url_for('settings'))
+    conn.execute('UPDATE users SET discord_id=? WHERE id=?', (row['discord_id'], user['id']))
+    conn.execute('DELETE FROM discord_link_codes WHERE discord_id=?', (row['discord_id'],))
+    conn.commit(); conn.close()
+    flash(f'Discord linked: {row["discord_username"]}', 'success')
+    return redirect(url_for('settings'))
+
+@app.route('/discord/unlink', methods=['POST'])
+@login_required
+def discord_unlink():
+    user = get_current_user()
+    conn = get_db()
+    conn.execute('UPDATE users SET discord_id=NULL WHERE id=?', (user['id'],))
+    conn.commit(); conn.close()
+    flash('Discord account unlinked.', 'success')
+    return redirect(url_for('settings'))
+
+@app.route('/cards/<int:card_id>/leaderboard', methods=['POST'])
+@login_required
+def toggle_leaderboard(card_id):
+    user = get_current_user()
+    val = 1 if request.form.get('leaderboard_public') == '1' else 0
+    conn = get_db()
+    conn.execute('UPDATE cards SET leaderboard_public=? WHERE id=? AND user_id=?', (val, card_id, user['id']))
+    conn.commit(); conn.close()
+    return jsonify({'success': True, 'leaderboard_public': val})
+
+@app.route('/api/leaderboard')
+def api_leaderboard():
+    conn = get_db()
+    rows = conn.execute(
+        'SELECT c.id, c.card_label, c.card_number, c.card_type, c.tier, u.username, '
+        'h.cash_balance, h.cash_bonus, h.points, h.recorded_at '
+        'FROM cards c JOIN users u ON c.user_id=u.id '
+        'LEFT JOIN balance_history h ON h.id=(SELECT id FROM balance_history WHERE card_id=c.id ORDER BY recorded_at DESC LIMIT 1) '
+        'WHERE c.active=1 AND c.leaderboard_public=1 AND u.leaderboard_opt_in=1 '
+        'ORDER BY (COALESCE(h.cash_balance,0)+COALESCE(h.cash_bonus,0)) DESC LIMIT 20'
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
 @admin_required
@@ -680,7 +753,7 @@ def admin():
     tz_statuses = {ts['user_id']: tz_session_status(ts) for ts in tz_sessions}
     return render_template('admin.html', users=users, cards=cards,
                           tz_sessions=tz_sessions, tz_statuses=tz_statuses,
-                          user=get_current_user(), now=datetime.utcnow())
+                          user=get_current_user(), admin_username=ADMIN_USERNAME)
 
 @app.route('/admin/make-admin/<int:user_id>', methods=['POST'])
 @admin_required
@@ -689,6 +762,34 @@ def make_admin(user_id):
     conn.execute('UPDATE users SET is_admin=1 WHERE id=?', (user_id,))
     conn.commit(); conn.close()
     flash('User promoted to admin.', 'success')
+    return redirect(url_for('admin'))
+
+@app.route('/admin/remove-admin/<int:user_id>', methods=['POST'])
+@admin_required
+def remove_admin(user_id):
+    current = get_current_user()
+    conn = get_db()
+    target = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+    if not target:
+        conn.close(); flash('User not found.', 'error'); return redirect(url_for('admin'))
+    is_root = (target['id'] == 1) or (ADMIN_USERNAME and target['username'] == ADMIN_USERNAME)
+    if is_root:
+        conn.close(); flash('Cannot remove admin from root user.', 'error'); return redirect(url_for('admin'))
+    if target['id'] == current['id']:
+        conn.close(); flash('Cannot demote yourself.', 'error'); return redirect(url_for('admin'))
+    conn.execute('UPDATE users SET is_admin=0 WHERE id=?', (user_id,))
+    conn.commit(); conn.close()
+    flash(f'Admin removed from {target["username"]}.', 'success')
+    return redirect(url_for('admin'))
+
+@app.route('/admin/cards/<int:card_id>/leaderboard', methods=['POST'])
+@admin_required
+def admin_toggle_leaderboard(card_id):
+    val = 1 if request.form.get('leaderboard_public') == '1' else 0
+    conn = get_db()
+    conn.execute('UPDATE cards SET leaderboard_public=? WHERE id=?', (val, card_id))
+    conn.commit(); conn.close()
+    flash('Card leaderboard visibility updated.', 'success')
     return redirect(url_for('admin'))
 
 # ─── Routes: API ──────────────────────────────────────────────────────────────
@@ -773,7 +874,23 @@ def resolve_qr():
 def resolve_qr_old():
     return resolve_qr()
 
+def start_discord_bot():
+    bot_token = os.environ.get('DISCORD_BOT_TOKEN', '')
+    if not bot_token:
+        print("[Bot] DISCORD_BOT_TOKEN not set - Discord bot disabled.")
+        return
+    try:
+        import subprocess, sys
+        subprocess.Popen(
+            [sys.executable, os.path.join(os.path.dirname(__file__), 'bot.py')],
+            env=os.environ.copy()
+        )
+        print("[Bot] Discord bot process started.")
+    except Exception as e:
+        print(f"[Bot] Failed to start: {e}")
+
 if __name__ == '__main__':
     init_db()
     threading.Thread(target=poll_cards, daemon=True).start()
+    start_discord_bot()
     app.run(host='0.0.0.0', port=5000, debug=False)

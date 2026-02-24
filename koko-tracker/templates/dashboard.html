@@ -59,7 +59,7 @@
     </button>
     <div id="overview-panel" class="hidden border-t border-slate-700/50 px-5 py-4">
         <div id="overview-loading" class="flex items-center justify-center py-8 text-slate-500 text-sm">Loading...</div>
-        <canvas id="overview-chart" class="hidden" height="80"></canvas>
+        <div style="position:relative;height:200px;" id="overview-canvas-wrap" class="hidden"><canvas id="overview-chart"></canvas></div>
         <div id="overview-empty" class="hidden text-center py-8 text-slate-500 text-sm">No data yet — check back after the first poll.</div>
     </div>
 </div>
@@ -324,21 +324,36 @@ async function loadOverview() {
         const total = series.reduce((s, c) => s + (c.data.length ? c.data[c.data.length-1].total : 0), 0);
         document.getElementById('overview-summary').textContent = `Total $${total.toFixed(2)} · ${series.length} card(s)`;
 
+        document.getElementById('overview-canvas-wrap').classList.remove('hidden');
         const canvas = document.getElementById('overview-chart');
-        canvas.classList.remove('hidden');
         if (overviewChart) overviewChart.destroy();
 
-        // Build unified timeline
+        // Build shared label set from all series timestamps
+        const allTimes = [...new Set(series.flatMap(s => s.data.map(d => d.t)))].sort();
+        const sharedLabels = allTimes.map(t => {
+            const d = new Date(t.replace(' ','T') + 'Z');
+            return d.toLocaleString('en-AU', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+        });
+
         overviewChart = new Chart(canvas.getContext('2d'), {
             type: 'line',
             data: {
-                datasets: series.filter(s => s.data.length > 0).map((s, i) => ({
-                    label: s.label,
-                    data: s.data.map(d => ({ x: d.t.replace('T',' '), y: d.total })),
-                    borderColor: COLORS[i % COLORS.length],
-                    backgroundColor: COLORS[i % COLORS.length] + '15',
-                    tension: 0.3, fill: false, pointRadius: 2, borderWidth: 2,
-                }))
+                labels: sharedLabels,
+                datasets: series.filter(s => s.data.length > 0).map((s, i) => {
+                    // Map each series data to the shared label index
+                    const timeMap = {};
+                    s.data.forEach(d => { timeMap[d.t] = d.total; });
+                    const values = allTimes.map(t => timeMap[t] !== undefined ? timeMap[t] : null);
+                    return {
+                        label: s.label,
+                        data: values,
+                        borderColor: COLORS[i % COLORS.length],
+                        backgroundColor: COLORS[i % COLORS.length] + '18',
+                        tension: 0.3, fill: false,
+                        pointRadius: allTimes.length > 60 ? 0 : 2,
+                        borderWidth: 2, spanGaps: true,
+                    };
+                })
             },
             options: {
                 responsive: true, maintainAspectRatio: false,
@@ -347,11 +362,11 @@ async function loadOverview() {
                     legend: { labels: { color: '#64748b', boxWidth: 10, font: { size: 11 } } },
                     tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
                                titleColor: '#e2e8f0', bodyColor: '#94a3b8',
-                               callbacks: { label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}` } }
+                               callbacks: { label: ctx => `${ctx.dataset.label}: $${(ctx.parsed.y||0).toFixed(2)}` } }
                 },
                 scales: {
-                    x: { type: 'category', ticks: { color: '#475569', maxTicksLimit: 6, font: { size: 10 } }, grid: { color: '#1e293b' } },
-                    y: { ticks: { color: '#475569', callback: v => '$'+v.toFixed(0), font: { size: 10 } }, grid: { color: '#1e293b' } }
+                    x: { ticks: { color: '#475569', maxTicksLimit: 7, font: { size: 10 }, maxRotation: 0 }, grid: { color: '#1e293b' } },
+                    y: { ticks: { color: '#475569', callback: v => '$'+(v||0).toFixed(0), font: { size: 10 } }, grid: { color: '#1e293b' } }
                 }
             }
         });

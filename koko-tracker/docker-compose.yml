@@ -6,16 +6,17 @@ services:
     container_name: koko-tracker
     restart: unless-stopped
     ports:
-      - "5055:5000"        # Change 5055 to whatever port you want on TrueNAS
+      - "5055:5000"
     volumes:
-      - koko-data:/data   # Persistent SQLite database
+      - koko-data:/data
     environment:
-      - POLL_INTERVAL=60   # How often to poll (seconds). Default: 60
+      - POLL_INTERVAL=60
       - SECRET_KEY=change_me_to_something_random_and_long_please
-      # Optional: set a custom DB path
-      # - DB_PATH=/data/koko.db
       - APP_URL=https://card.z2hs.au
-      - ADMIN_USERNAME=admin  # Set this to auto-grant admin to that username
+      - ADMIN_USERNAME=admin          # Auto-grant admin to this username on startup
+      # ── Discord Bot (optional) ─────────────────────────────────────────────
+      - DISCORD_BOT_TOKEN=           # Get from discord.com/developers/applications
+      - DISCORD_GUILD_ID=            # Your server ID (right-click server → Copy ID)
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 30s
