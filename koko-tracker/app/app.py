@@ -232,37 +232,46 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
     # Tenant ID is the UUID prefix in the localStorage key (NOT the client ID)
     tenant = TZ_TENANT_ID
     policy = TZ_B2C_POLICY
-    endpoints = [
-        f'https://identity.teeg.cloud/{tenant}/{policy}/oauth2/v2.0/token',
-        f'https://identity.teeg.cloud/tfp/{tenant}/{policy}/oauth2/v2.0/token',
-        f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
+    # login.microsoftonline.com works (HTTP 400 = right URL, wrong params)
+    # Need to try different scope formats for B2C
+    attempts = [
+        # (endpoint, scope)
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
+         f'openid offline_access https://identity.teeg.cloud/{cid}/guest.read'),
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
+         f'openid offline_access {cid}/.default'),
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
+         f'{cid}/.default offline_access'),
+        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
+         'offline_access'),
+        # B2C-specific endpoint with policy
+        (f'https://login.microsoftonline.com/{tenant}/B2C_1A_signupsignin/oauth2/v2.0/token',
+         f'openid offline_access https://identity.teeg.cloud/{cid}/guest.read'),
+        (f'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+         f'openid offline_access {cid}/.default'),
     ]
-    scopes = [
-        f'openid profile offline_access https://identity.teeg.cloud/{cid}/guest.read',
-        f'openid offline_access {cid}',
-        'openid offline_access',
-    ]
-    for endpoint in endpoints:
-        for scope in scopes[:1]:  # try first scope only per endpoint to reduce noise
-            try:
-                resp = requests.post(endpoint, data={
-                    'grant_type': 'refresh_token',
-                    'client_id': cid,
-                    'refresh_token': refresh_token,
-                    'scope': scope,
-                }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
-                print(f"[Timezone] MS refresh {endpoint.split('/')[3][:8]}/{policy[:15]}: HTTP {resp.status_code}")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    new_token   = data.get('access_token') or data.get('id_token')
-                    new_refresh = data.get('refresh_token', refresh_token)
-                    expires_in  = int(data.get('expires_in', 840))
-                    print(f"[Timezone] MS refresh SUCCESS via {endpoint.split('/')[3]}, expires {expires_in}s")
-                    return new_token, new_refresh, expires_in
-                else:
-                    print(f"[Timezone] MS refresh failed: {resp.text[:150]}")
-            except Exception as e:
-                print(f"[Timezone] MS refresh error: {e}")
+    for endpoint, scope in attempts:
+        try:
+            resp = requests.post(endpoint, data={
+                'grant_type': 'refresh_token',
+                'client_id': cid,
+                'refresh_token': refresh_token,
+                'scope': scope,
+            }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
+            label = endpoint.split('/')[3][:20] + '|' + scope[:25]
+            print(f"[Timezone] MS refresh {label}: HTTP {resp.status_code}")
+            if resp.status_code == 200:
+                data = resp.json()
+                new_token   = data.get('access_token') or data.get('id_token')
+                new_refresh = data.get('refresh_token', refresh_token)
+                expires_in  = int(data.get('expires_in', 840))
+                print(f"[Timezone] MS refresh SUCCESS, expires {expires_in}s")
+                return new_token, new_refresh, expires_in
+            else:
+                err = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
+                print(f"[Timezone] MS refresh fail: {err.get('error','')}: {err.get('error_description','')[:100]}")
+        except Exception as e:
+            print(f"[Timezone] MS refresh error: {e}")
     return None, None, None
 
 def tz_refresh_token(cookies_dict):
@@ -450,6 +459,8 @@ def tz_session_status(tzs):
     # No polls yet (freshly connected) or last poll was recent — show connected
     return 'connected'
 
+
+# ─── Discord Webhook ──────────────────────────────────────────────────────────
 def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
     try:
         diff = new_total - prev_total
@@ -476,26 +487,6 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
     except Exception as e:
         print(f"[Discord] Webhook error: {e}")
 
-def fetch_timezone_history(bearer_token, card_no, cookies_dict=None):
-    try:
-        resp = requests.get(f'{TEEG_API}/guest/cards/AU/{card_no}/transactions', timeout=15, headers={
-            'Authorization': f'Bearer {bearer_token}',
-            'Accept': 'application/json',
-            'Origin': 'https://portal.timezonegames.com',
-            'Referer': 'https://portal.timezonegames.com/',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }, cookies=cookies_dict or {})
-        if resp.status_code == 200:
-            print(f"[Timezone] History API: Fetched transaction history for card {card_no}")
-            return resp.json()
-        print(f"[Timezone] History API error: HTTP {resp.status_code} - {resp.text[:200]}")
-    except Exception as e:
-        print(f"[Timezone] History API error: {e}")
-        return None
-
-
-# ─── Discord Webhook ──────────────────────────────────────────────────────────
-
 # ─── Poller ───────────────────────────────────────────────────────────────────
 def log_poll(card_id, success, message=''):
     try:
@@ -509,7 +500,48 @@ def log_poll(card_id, success, message=''):
         conn.commit(); conn.close()
     except: pass
 
+def startup_refresh_tz_tokens():
+    """On startup, immediately refresh any expired Timezone bearer tokens using refresh tokens."""
+    print("[Startup] Checking for expired Timezone tokens...")
+    try:
+        conn = get_db()
+        sessions = conn.execute('SELECT * FROM timezone_sessions WHERE refresh_token IS NOT NULL').fetchall()
+        conn.close()
+        now = datetime.utcnow()
+        for tzs in sessions:
+            needs_refresh = False
+            if not tzs['token_expires_at']:
+                needs_refresh = True
+            else:
+                try:
+                    exp = datetime.strptime(tzs['token_expires_at'], '%Y-%m-%d %H:%M:%S')
+                    if (exp - now).total_seconds() < 300:  # expired or expiring within 5 min
+                        needs_refresh = True
+                except:
+                    needs_refresh = True
+
+            if needs_refresh:
+                print(f"[Startup] Refreshing token for user {tzs['user_id']}...")
+                new_tok, new_rt, expires_in = tz_refresh_ms_token(tzs['refresh_token'], tzs['ms_client_id'])
+                if new_tok:
+                    tok_exp = (now + timedelta(seconds=expires_in or 840)).strftime('%Y-%m-%d %H:%M:%S')
+                    conn = get_db()
+                    upd = 'bearer_token=?, token_expires_at=?, last_poll_status=?, updated_at=CURRENT_TIMESTAMP'
+                    params = [new_tok, tok_exp, 'ok']
+                    if new_rt:
+                        upd += ', refresh_token=?'
+                        params.append(new_rt)
+                    params.append(tzs['user_id'])
+                    conn.execute(f'UPDATE timezone_sessions SET {upd} WHERE user_id=?', params)
+                    conn.commit(); conn.close()
+                    print(f"[Startup] Token refreshed for user {tzs['user_id']}, expires {tok_exp}")
+                else:
+                    print(f"[Startup] Could not refresh token for user {tzs['user_id']} - MS refresh failed")
+    except Exception as e:
+        print(f"[Startup] Token refresh error: {e}")
+
 def poll_cards():
+    startup_refresh_tz_tokens()
     print(f"[Poller] Started. Default: {DEFAULT_POLL_INTERVAL}s Timezone: {TIMEZONE_POLL_INTERVAL}s")
     last_poll = {}  # card_id -> last poll timestamp
 
@@ -906,28 +938,6 @@ def delete_card(card_id):
     conn.commit(); conn.close(); flash('Card removed.', 'success')
     return redirect(url_for('dashboard'))
 
-# @app.route('/cards/<int:card_id>/tap-history', methods=['GET'])
-# @login_required
-# def get_tap_history(card_id):
-#     user = get_current_user()
-#     conn = get_db()
-#     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
-#     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
-#     if card['card_type'] != 'timezone':
-#         conn.close(); return jsonify({'error': 'Not a Timezone card'}), 400
-#     tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
-#     conn.close()
-#     if not tzs or not tzs['bearer_token']:
-#         return jsonify({'error': 'No Timezone session'}), 400
-#     guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
-#     if not guest:
-#         return jsonify({'error': 'Could not fetch Timezone data'}), 400
-#     for c in guest.get('cards', []):
-#         if str(c.get('number')) == str(card['card_number']):
-#             history = fetch_timezone_history(tzs['bearer_token'], str(c.get('number')), json.loads(tzs['cookies_json'] or '{}'))
-#             return jsonify({'success': True, 'history': history})
-#     return jsonify({'error': 'Card number not found in Timezone session'})
-
 @app.route('/cards/<int:card_id>/poll-interval', methods=['POST'])
 @login_required
 def update_poll_interval(card_id):
@@ -966,15 +976,13 @@ def force_poll(card_id):
                 card_num = str(card['card_number']).strip() if card['card_number'] else ''
                 for c in guest.get('cards', []):
                     api_num = str(c.get('number', '')).strip()
-                    history = fetch_timezone_history(tzs['bearer_token'], api_num, json.loads(tzs['cookies_json'] or '{}'))
                     if api_num == card_num or (card_num and card_num in api_num) or (api_num and api_num in card_num):
                         data = {
                             'cash_balance': float(c.get('cashBalance') or 0),
                             'cash_bonus':   float(c.get('bonusBalance') or 0),
                             'points':       int(c.get('eTickets') or c.get('tickets') or 0),
                             'card_name':    card['card_label'],
-                            'tier':         c.get('tier', ''),
-                            'history':      history if history else []
+                            'tier':         c.get('tier', '')
                         }
                         break
                 if not data:
@@ -1512,7 +1520,6 @@ def api_history(card_id):
 def api_stats(card_id):
     user = get_current_user()
     conn = get_db()
-    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
     latest = conn.execute('SELECT * FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1', (card_id,)).fetchone()
@@ -1520,12 +1527,11 @@ def api_stats(card_id):
     since_24h = (datetime.utcnow()-timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
     first_24h = conn.execute('SELECT cash_balance,cash_bonus FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC LIMIT 1',
         (card_id, since_24h)).fetchone()
-    history = fetch_timezone_history(tzs['bearer_token'], str(card['card_number']), json.loads(tzs['cookies_json'] or '{}')) if (card['card_type']=='timezone' and tzs) else None
     conn.close()
     spent_24h = None
     if first_24h and latest:
         spent_24h = round(((first_24h['cash_balance'] or 0)+(first_24h['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
-    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type'], 'history': history or []})
+    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type']})
 
 @app.route('/api/dashboard/overview')
 @login_required
