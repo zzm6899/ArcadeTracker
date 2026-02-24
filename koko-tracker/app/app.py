@@ -903,14 +903,23 @@ def import_transactions(card_id):
     if not transactions:
         return jsonify({'error': 'No transactions found or API unavailable'}), 400
 
+    # Log first transaction so we can see the real field names
+    if transactions:
+        print(f"[ImportTx] Sample transaction keys: {list(transactions[0].keys())}")
+        print(f"[ImportTx] Sample transaction: {dict(transactions[0])}")
+
     conn = get_db()
     imported = 0
     for tx in transactions:
         # Map transaction fields — Timezone API fields may vary
-        tx_time = tx.get('transactionDate') or tx.get('date') or tx.get('createdAt') or tx.get('timestamp')
-        balance  = tx.get('cashBalance') or tx.get('balance') or tx.get('remainingBalance')
-        bonus    = tx.get('bonusBalance') or tx.get('remainingBonus') or 0
-        points   = tx.get('eTickets') or tx.get('tickets') or tx.get('remainingTickets') or 0
+        tx_time = (tx.get('transactionDate') or tx.get('date') or tx.get('createdAt') or
+                   tx.get('timestamp') or tx.get('created') or tx.get('processedAt'))
+        balance  = (tx.get('cashBalance') or tx.get('balance') or tx.get('remainingBalance') or
+                    tx.get('cash') or tx.get('closingCashBalance') or tx.get('afterCashBalance'))
+        bonus    = (tx.get('bonusBalance') or tx.get('remainingBonus') or tx.get('closingBonusBalance') or
+                    tx.get('afterBonusBalance') or 0)
+        points   = (tx.get('eTickets') or tx.get('tickets') or tx.get('remainingTickets') or
+                    tx.get('closingETickets') or tx.get('afterETickets') or 0)
         if tx_time and balance is not None:
             # Normalise timestamp
             try:
