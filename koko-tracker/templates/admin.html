@@ -18,58 +18,74 @@
 <!-- Users -->
 <div class="card rounded-2xl p-5 mb-5">
     <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">👥 Users</h2>
-    <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-            <thead>
-                <tr class="text-xs text-slate-500 uppercase tracking-wider border-b border-slate-800">
-                    <th class="text-left pb-2 pr-4">Username</th>
-                    <th class="text-left pb-2 pr-4">Role</th>
-                    <th class="text-left pb-2 pr-4">Discord</th>
-                    <th class="text-left pb-2 pr-4">TZ Session</th>
-                    <th class="text-left pb-2 pr-4">LB Opt-in</th>
-                    <th class="text-left pb-2 pr-4">Joined</th>
-                    <th class="text-left pb-2">Actions</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-800/50">
-            {% for u in users %}
-            {% set is_root = (u.id == 1) or (u.username == admin_username) %}
-            <tr class="text-slate-300">
-                <td class="py-2.5 pr-4 font-medium text-white">{{ u.username }}{% if is_root %} <span class="text-xs text-slate-600">(root)</span>{% endif %}</td>
-                <td class="py-2.5 pr-4">
-                    {% if u.is_admin %}<span class="text-xs bg-indigo-900/50 text-indigo-300 border border-indigo-800 px-2 py-0.5 rounded-full">Admin</span>
-                    {% else %}<span class="text-xs text-slate-600">User</span>{% endif %}
-                </td>
-                <td class="py-2.5 pr-4 text-xs text-slate-500">{{ '✓ '+u.discord_id[:8]+'...' if u.discord_id else '—' }}</td>
-                <td class="py-2.5 pr-4">
-                    {% set st = tz_statuses.get(u.id, 'disconnected') %}
-                    <span class="text-xs px-2 py-0.5 rounded-full {% if st == 'connected' %}bg-green-900/40 text-green-400{% elif st in ['stale','error'] %}bg-red-900/40 text-red-400{% else %}bg-slate-800 text-slate-500{% endif %}">{{ st }}</span>
-                </td>
-                <td class="py-2.5 pr-4">
-                    <span class="text-xs {% if u.leaderboard_opt_in %}text-green-400{% else %}text-slate-600{% endif %}">
-                        {{ '✓ Yes' if u.leaderboard_opt_in else '— No' }}
-                    </span>
-                </td>
-                <td class="py-2.5 pr-4 text-xs text-slate-600">{{ u.created_at[:10] }}</td>
-                <td class="py-2.5 flex items-center gap-2">
-                    {% if not u.is_admin %}
-                    <form method="POST" action="/admin/make-admin/{{ u.id }}">
-                        <button class="text-xs text-indigo-400 hover:text-indigo-300 transition px-2 py-1 border border-indigo-900 rounded-lg">+ Admin</button>
-                    </form>
-                    {% elif not is_root %}
-                    <form method="POST" action="/admin/remove-admin/{{ u.id }}" onsubmit="return confirm('Remove admin from {{ u.username }}?')">
-                        <button class="text-xs text-red-400 hover:text-red-300 transition px-2 py-1 border border-red-900 rounded-lg">- Admin</button>
-                    </form>
-                    {% endif %}
-                </td>
-            </tr>
-            {% endfor %}
-            </tbody>
-        </table>
+    <div class="space-y-3">
+    {% for u in users %}
+    {% set is_root = (u.id == 1) or (u.username == admin_username) %}
+    {% set st = tz_statuses.get(u.id, 'disconnected') %}
+    <div class="bg-slate-800/40 rounded-xl p-4 border border-slate-700/50">
+        <div class="flex items-start justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-3 flex-wrap">
+                <div>
+                    <div class="flex items-center gap-2 mb-0.5">
+                        <span class="font-medium text-white">{{ u.username }}</span>
+                        {% if is_root %}<span class="text-xs text-slate-600 border border-slate-700 px-1.5 py-0.5 rounded">root</span>{% endif %}
+                        {% if u.is_admin %}<span class="text-xs bg-indigo-900/50 text-indigo-300 border border-indigo-800 px-2 py-0.5 rounded-full">Admin</span>{% endif %}
+                    </div>
+                    <div class="flex items-center gap-3 text-xs text-slate-500 flex-wrap">
+                        <span class="{% if st == 'connected' %}text-green-400{% elif st in ['error','stale'] %}text-red-400{% endif %}">TZ: {{ st }}</span>
+                        <span>Discord: {{ '✓ linked' if u.discord_id else '— none' }}</span>
+                        <span>Joined: {{ u.created_at[:10] }}</span>
+                    </div>
+                </div>
+
+                <!-- Leaderboard opt-in toggle -->
+                <form method="POST" action="/admin/users/{{ u.id }}/leaderboard" class="flex items-center gap-2">
+                    <input type="hidden" name="leaderboard_opt_in" value="{{ '0' if u.leaderboard_opt_in else '1' }}">
+                    <button class="text-xs px-2.5 py-1 rounded-lg border transition
+                        {% if u.leaderboard_opt_in %}bg-green-900/30 text-green-400 border-green-900 hover:bg-slate-800{% else %}border-slate-700 text-slate-500 hover:border-green-900 hover:text-green-400{% endif %}">
+                        🏆 {{ 'LB: On' if u.leaderboard_opt_in else 'LB: Off' }}
+                    </button>
+                </form>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex items-center gap-2 flex-wrap">
+                <!-- Rename -->
+                <button onclick="toggleRename({{ u.id }})" class="text-xs text-slate-400 hover:text-white px-2 py-1 border border-slate-700 rounded-lg transition">✏️ Rename</button>
+
+                <!-- Admin toggle -->
+                {% if not u.is_admin %}
+                <form method="POST" action="/admin/make-admin/{{ u.id }}">
+                    <button class="text-xs text-indigo-400 px-2 py-1 border border-indigo-900 rounded-lg hover:bg-indigo-900/30 transition">+ Admin</button>
+                </form>
+                {% elif not is_root %}
+                <form method="POST" action="/admin/remove-admin/{{ u.id }}" onsubmit="return confirm('Remove admin from {{ u.username }}?')">
+                    <button class="text-xs text-orange-400 px-2 py-1 border border-orange-900 rounded-lg hover:bg-orange-900/20 transition">− Admin</button>
+                </form>
+                {% endif %}
+
+                <!-- Delete user -->
+                {% if not is_root and u.id != current_user.id %}
+                <form method="POST" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Delete {{ u.username }}? This cannot be undone.')">
+                    <button class="text-xs text-red-400 px-2 py-1 border border-red-900 rounded-lg hover:bg-red-900/20 transition">🗑 Delete</button>
+                </form>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Rename form (hidden) -->
+        <form method="POST" action="/admin/users/{{ u.id }}/rename" id="rename-form-{{ u.id }}" class="hidden mt-3 flex items-center gap-2">
+            <input name="new_username" type="text" value="{{ u.username }}"
+                class="input-field flex-1 px-3 py-1.5 rounded-lg text-sm" placeholder="New username">
+            <button type="submit" class="text-xs text-white btn-primary px-3 py-1.5 rounded-lg">Save</button>
+            <button type="button" onclick="toggleRename({{ u.id }})" class="text-xs text-slate-500 px-2 py-1.5">Cancel</button>
+        </form>
+    </div>
+    {% endfor %}
     </div>
 </div>
 
-<!-- All Cards with leaderboard control -->
+<!-- All Cards -->
 <div class="card rounded-2xl p-5 mb-5">
     <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">🃏 All Cards</h2>
     <div class="overflow-x-auto">
@@ -77,34 +93,37 @@
             <thead>
                 <tr class="text-xs text-slate-500 uppercase tracking-wider border-b border-slate-800">
                     <th class="text-left pb-2 pr-3">User</th>
-                    <th class="text-left pb-2 pr-3">Type / Tier</th>
+                    <th class="text-left pb-2 pr-3">Type</th>
                     <th class="text-left pb-2 pr-3">Label</th>
                     <th class="text-left pb-2 pr-3">Balance</th>
                     <th class="text-left pb-2 pr-3">Bonus</th>
                     <th class="text-left pb-2 pr-3">Points</th>
                     <th class="text-left pb-2 pr-3">Poll</th>
-                    <th class="text-left pb-2 pr-3">Last Updated</th>
+                    <th class="text-left pb-2 pr-3">Updated</th>
                     <th class="text-left pb-2">Leaderboard</th>
                 </tr>
             </thead>
             <tbody class="divide-y divide-slate-800/50">
             {% for card in cards %}
             <tr class="text-slate-300 hover:bg-slate-800/20">
-                <td class="py-2.5 pr-3 text-xs font-medium text-white">{{ card.username }}</td>
-                <td class="py-2.5 pr-3">
-                    <span class="text-xs px-1.5 py-0.5 rounded {% if card.card_type == 'timezone' %}bg-yellow-900/40 text-yellow-400{% else %}bg-purple-900/40 text-purple-400{% endif %}">{{ card.card_type }}</span>
+                <td class="py-2 pr-3 text-xs font-medium text-white">{{ card.username }}</td>
+                <td class="py-2 pr-3">
+                    <span class="text-xs px-1.5 py-0.5 rounded {% if card.card_type == 'timezone' %}bg-yellow-900/40 text-yellow-400{% else %}bg-purple-900/40 text-purple-400{% endif %}">
+                        {{ card.card_type }}
+                    </span>
                     {% if card.tier %}<span class="text-xs text-slate-500 ml-1">{{ card.tier }}</span>{% endif %}
                 </td>
-                <td class="py-2.5 pr-3 text-sm">{{ card.card_label or card.card_number }}</td>
-                <td class="py-2.5 pr-3 text-green-400 font-medium text-xs">${{ "%.2f"|format(card.cash_balance or 0) }}</td>
-                <td class="py-2.5 pr-3 text-yellow-400 text-xs">${{ "%.2f"|format(card.cash_bonus or 0) }}</td>
-                <td class="py-2.5 pr-3 text-orange-400 text-xs">{{ card.points or 0 }}</td>
-                <td class="py-2.5 pr-3 text-xs text-slate-500">{{ card.poll_interval or 60 }}s</td>
-                <td class="py-2.5 pr-3 text-xs text-slate-500">{{ card.last_updated[:16] if card.last_updated else 'Never' }}</td>
-                <td class="py-2.5">
-                    <form method="POST" action="/admin/cards/{{ card.id }}/leaderboard" class="inline">
+                <td class="py-2 pr-3 text-sm text-slate-300">{{ card.card_label or card.card_number }}</td>
+                <td class="py-2 pr-3 text-green-400 text-xs font-medium">${{ "%.2f"|format(card.cash_balance or 0) }}</td>
+                <td class="py-2 pr-3 text-yellow-400 text-xs">${{ "%.2f"|format(card.cash_bonus or 0) }}</td>
+                <td class="py-2 pr-3 text-orange-400 text-xs">{{ card.points or 0 }}</td>
+                <td class="py-2 pr-3 text-slate-500 text-xs">{{ card.poll_interval or 60 }}s</td>
+                <td class="py-2 pr-3 text-slate-500 text-xs">{{ card.last_updated[:16] if card.last_updated else 'Never' }}</td>
+                <td class="py-2">
+                    <form method="POST" action="/admin/cards/{{ card.id }}/leaderboard">
                         <input type="hidden" name="leaderboard_public" value="{{ '0' if card.leaderboard_public else '1' }}">
-                        <button class="text-xs px-2 py-1 rounded-lg border transition {% if card.leaderboard_public %}bg-green-900/30 text-green-400 border-green-900 hover:bg-red-900/30 hover:text-red-400 hover:border-red-900{% else %}border-slate-700 text-slate-500 hover:border-green-900 hover:text-green-400{% endif %}">
+                        <button class="text-xs px-2 py-1 rounded-lg border transition
+                            {% if card.leaderboard_public %}bg-green-900/30 text-green-400 border-green-900{% else %}border-slate-700 text-slate-600 hover:text-green-400 hover:border-green-900{% endif %}">
                             {{ '✓ Public' if card.leaderboard_public else '— Private' }}
                         </button>
                     </form>
@@ -127,15 +146,22 @@
         <div>
             <div class="flex items-center gap-2 mb-1">
                 <span class="font-medium text-white text-sm">{{ ts.username }}</span>
-                <span class="text-xs px-2 py-0.5 rounded-full {% if st == 'connected' %}bg-green-900/40 text-green-400{% elif st in ['stale','error'] %}bg-red-900/40 text-red-400{% else %}bg-slate-700 text-slate-400{% endif %}">{{ st }}</span>
+                <span class="text-xs px-2 py-0.5 rounded-full
+                    {% if st == 'connected' %}bg-green-900/40 text-green-400
+                    {% elif st in ['stale','error'] %}bg-red-900/40 text-red-400
+                    {% else %}bg-slate-700 text-slate-400{% endif %}">{{ st }}</span>
             </div>
             <div class="text-xs text-slate-500">
-                Token expires: <span class="text-slate-400">{{ ts.token_expires_at or 'Unknown' }}</span> ·
-                Last poll: <span class="{% if ts.last_poll_status == 'ok' %}text-green-400{% elif ts.last_poll_status %}text-red-400{% else %}text-slate-400{% endif %}">{{ ts.last_poll_at or 'Never' }}{% if ts.last_poll_status %} ({{ ts.last_poll_status }}){% endif %}</span>
+                Token: <span class="text-slate-400">{{ ts.token_expires_at or '?' }}</span> ·
+                Last poll: <span class="{% if ts.last_poll_status == 'ok' %}text-green-400{% elif ts.last_poll_status %}text-red-400{% else %}text-slate-400{% endif %}">
+                    {{ ts.last_poll_at or 'Never' }}{% if ts.last_poll_status %} ({{ ts.last_poll_status }}){% endif %}
+                </span>
             </div>
         </div>
-        {% if st in ['stale', 'error'] %}
-        <span class="text-xs text-red-300 bg-red-900/20 border border-red-900 rounded-lg px-2 py-1">⚠️ {{ 'API error' if st == 'error' else 'Stale' }}</span>
+        {% if st in ['stale','error'] %}
+        <span class="text-xs text-red-300 bg-red-900/20 border border-red-900 rounded-lg px-2 py-1">
+            ⚠️ {{ 'API error — needs reconnect' if st == 'error' else 'Stale — check token' }}
+        </span>
         {% endif %}
     </div>
     {% endfor %}
@@ -143,4 +169,11 @@
 </div>
 {% endif %}
 
+<script>
+function toggleRename(uid) {
+    const f = document.getElementById('rename-form-' + uid);
+    f.classList.toggle('hidden');
+    if (!f.classList.contains('hidden')) f.querySelector('input').focus();
+}
+</script>
 {% endblock %}

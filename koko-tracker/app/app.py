@@ -103,6 +103,7 @@ def init_db():
         'ALTER TABLE users ADD COLUMN discord_id TEXT',
         'ALTER TABLE users ADD COLUMN leaderboard_opt_in INTEGER DEFAULT 0',
         'ALTER TABLE cards ADD COLUMN leaderboard_public INTEGER DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN discord_cmd_privacy TEXT',
         'ALTER TABLE users ADD COLUMN discord_webhook TEXT',
     ]:
         try: conn.execute(sql)
@@ -751,9 +752,10 @@ def admin():
     ''').fetchall()
     conn.close()
     tz_statuses = {ts['user_id']: tz_session_status(ts) for ts in tz_sessions}
+    current = get_current_user()
     return render_template('admin.html', users=users, cards=cards,
                           tz_sessions=tz_sessions, tz_statuses=tz_statuses,
-                          user=get_current_user(), admin_username=ADMIN_USERNAME)
+                          user=current, current_user=current, admin_username=ADMIN_USERNAME)
 
 @app.route('/admin/make-admin/<int:user_id>', methods=['POST'])
 @admin_required
@@ -780,6 +782,53 @@ def remove_admin(user_id):
     conn.execute('UPDATE users SET is_admin=0 WHERE id=?', (user_id,))
     conn.commit(); conn.close()
     flash(f'Admin removed from {target["username"]}.', 'success')
+    return redirect(url_for('admin'))
+
+@app.route('/admin/users/<int:user_id>/rename', methods=['POST'])
+@admin_required
+def admin_rename_user(user_id):
+    new_username = request.form.get('new_username', '').strip()
+    if not new_username:
+        flash('Username cannot be empty.', 'error'); return redirect(url_for('admin'))
+    conn = get_db()
+    try:
+        conn.execute('UPDATE users SET username=? WHERE id=?', (new_username, user_id))
+        conn.commit(); flash(f'Username updated to {new_username}.', 'success')
+    except sqlite3.IntegrityError:
+        flash('Username already taken.', 'error')
+    finally:
+        conn.close()
+    return redirect(url_for('admin'))
+
+@app.route('/admin/users/<int:user_id>/delete', methods=['POST'])
+@admin_required
+def admin_delete_user(user_id):
+    current = get_current_user()
+    if user_id == current['id']:
+        flash('Cannot delete your own account.', 'error'); return redirect(url_for('admin'))
+    conn = get_db()
+    target = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+    if not target:
+        conn.close(); flash('User not found.', 'error'); return redirect(url_for('admin'))
+    is_root = (target['id'] == 1) or (ADMIN_USERNAME and target['username'] == ADMIN_USERNAME)
+    if is_root:
+        conn.close(); flash('Cannot delete root admin.', 'error'); return redirect(url_for('admin'))
+    # Soft-delete all cards, delete sessions, then user
+    conn.execute('UPDATE cards SET active=0 WHERE user_id=?', (user_id,))
+    conn.execute('DELETE FROM timezone_sessions WHERE user_id=?', (user_id,))
+    conn.execute('DELETE FROM users WHERE id=?', (user_id,))
+    conn.commit(); conn.close()
+    flash(f'User {target["username"]} deleted.', 'success')
+    return redirect(url_for('admin'))
+
+@app.route('/admin/users/<int:user_id>/leaderboard', methods=['POST'])
+@admin_required
+def admin_user_leaderboard(user_id):
+    val = 1 if request.form.get('leaderboard_opt_in') == '1' else 0
+    conn = get_db()
+    conn.execute('UPDATE users SET leaderboard_opt_in=? WHERE id=?', (val, user_id))
+    conn.commit(); conn.close()
+    flash('Leaderboard opt-in updated.', 'success')
     return redirect(url_for('admin'))
 
 @app.route('/admin/cards/<int:card_id>/leaderboard', methods=['POST'])
