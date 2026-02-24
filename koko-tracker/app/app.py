@@ -276,18 +276,24 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
         (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
          f'openid offline_access {cid}/.default'),
     ]
-    # azp (authorized party) is the client that must be used for refresh — ca0e4868
-    # aud (resource) is what we're accessing — 6f72c275
+    # Token is encrypted by identity.teeg.cloud (zip=Deflate, opaque)
+    # Must refresh against identity.teeg.cloud, NOT login.microsoftonline.com
     attempts = [
-        # client_id must be the azp value, not the aud
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
-         f'openid offline_access {TZ_RESOURCE}/.default'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
-         f'openid offline_access'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
-         f'{TZ_RESOURCE}/.default'),
+        # identity.teeg.cloud — the actual issuer
         (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
          f'openid offline_access {TZ_RESOURCE}/.default'),
+        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
+         'openid offline_access'),
+        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
+         f'{TZ_RESOURCE}/.default'),
+        # With B2C-style policy path
+        (f'https://identity.teeg.cloud/{tenant}/B2C_1A_signupsignin/oauth2/v2.0/token', cid,
+         f'openid offline_access {TZ_RESOURCE}/.default'),
+        (f'https://identity.teeg.cloud/{tenant}/B2C_1A_SignUpOrSignIn/oauth2/v2.0/token', cid,
+         f'openid offline_access {TZ_RESOURCE}/.default'),
+        # Try resource param instead of scope
+        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
+         f'openid offline_access https://identity.teeg.cloud/{TZ_RESOURCE}/guest.read'),
     ]
     for endpoint, client_id, scope in attempts:
         try:
@@ -296,6 +302,7 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
                 'client_id': client_id,
                 'refresh_token': refresh_token,
                 'scope': scope,
+                'resource': TZ_RESOURCE,  # some Azure endpoints use resource instead of scope
             }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
             label = endpoint.split('/')[3][:20] + '|' + scope[:30]
             print(f"[Timezone] MS refresh {label}: HTTP {resp.status_code}")
@@ -1521,6 +1528,15 @@ def timezone_debug():
     return jsonify(result)
 
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
+
+@app.route('/admin/logs')
+@login_required
+def admin_logs():
+    user = get_current_user()
+    if not user or not user['is_admin']:
+        return jsonify({'error': 'Admin only'}), 403
+    return jsonify({'lines': list(_log_buffer)})
+
 @app.route('/admin')
 @admin_required
 def admin():
