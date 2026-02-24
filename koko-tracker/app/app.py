@@ -258,15 +258,11 @@ TZ_CLIENT_ID  = '6f72c275-51b9-463b-8411-3b04936ce189'  # aud claim in bearer to
 TZ_B2C_POLICY = ''  # no B2C policy — standard Azure AD v2
 
 def tz_refresh_ms_token(refresh_token, ms_client_id=None):
-    """Use Microsoft B2C refresh token to get a new access token for teeg.cloud."""
-    cid = ms_client_id or TZ_CLIENT_ID
-    # Tenant ID is the UUID prefix in the localStorage key (NOT the client ID)
-    tenant = TZ_TENANT_ID
-    policy = TZ_B2C_POLICY
-    # login.microsoftonline.com works (HTTP 400 = right URL, wrong params)
-    # Need to try different scope formats for B2C
+    """Use Microsoft Azure AD refresh token to get a new access token for teeg.cloud."""
+    cid        = TZ_CLIENT_ID   # aud claim from bearer token
+    tenant     = TZ_TENANT_ID   # iss claim from bearer token
+    stored_cid = ms_client_id or cid  # fallback: whatever was stored in DB
     attempts = [
-        # (endpoint, scope)
         (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
          f'openid offline_access {cid}/.default'),
         (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
