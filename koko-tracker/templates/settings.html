@@ -68,6 +68,11 @@
                 </label>
                 <input name="discord_webhook" type="url" class="input-field w-full px-3 py-2 rounded-lg text-sm" placeholder="https://discord.com/api/webhooks/..." value="{{ user.discord_webhook or '' }}">
                 <p class="text-xs text-slate-600 mt-1">Posts when any card balance changes</p>
+                <button type="button" onclick="testWebhook()"
+                    class="mt-2 text-xs text-indigo-400 hover:text-indigo-300 border border-indigo-900 px-3 py-1.5 rounded-lg transition">
+                    🔔 Send test message
+                </button>
+                <span id="webhook-test-result" class="text-xs ml-2 hidden"></span>
             </div>
 
             <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">Save Settings</button>
@@ -137,5 +142,23 @@ document.querySelectorAll('.card-lb-toggle').forEach(function(cb) {
         await fetch('/cards/' + cardId + '/leaderboard', { method: 'POST', body: form });
     });
 });
+</script>
+<script>
+async function testWebhook() {
+    const url = document.querySelector('[name=discord_webhook]').value.trim();
+    const result = document.getElementById('webhook-test-result');
+    if (!url) { result.textContent = '⚠️ Enter a webhook URL first'; result.className = 'text-xs ml-2 text-yellow-400'; result.classList.remove('hidden'); return; }
+    result.textContent = 'Sending…'; result.className = 'text-xs ml-2 text-slate-400'; result.classList.remove('hidden');
+    try {
+        const r = await fetch('/settings/test-webhook', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({url})
+        });
+        const d = await r.json();
+        if (d.success) { result.textContent = '✓ Sent!'; result.className = 'text-xs ml-2 text-green-400'; }
+        else { result.textContent = '✗ ' + (d.error || 'Failed'); result.className = 'text-xs ml-2 text-red-400'; }
+    } catch(e) { result.textContent = '✗ Error'; result.className = 'text-xs ml-2 text-red-400'; }
+    setTimeout(() => result.classList.add('hidden'), 4000);
+}
 </script>
 {% endblock %}
