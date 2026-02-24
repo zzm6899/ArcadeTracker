@@ -12,6 +12,9 @@ def inject_discord():
     invite = f'https://discord.com/oauth2/authorize?client_id={DISCORD_CLIENT_ID}' if DISCORD_CLIENT_ID else None
     return dict(discord_invite=invite)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = True  # requires HTTPS
 
 DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
 DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 60))
@@ -566,17 +569,32 @@ def index():
 @app.route('/register', methods=['GET','POST'])
 def register():
     if request.method == 'POST':
-        u, p = request.form['username'].strip(), request.form['password']
+        u = request.form.get('username','').strip()
+        p = request.form.get('password','')
+        c = request.form.get('confirm_password','')
+        email = request.form.get('email','').strip() or None
         if not u or not p:
             flash('Username and password required.', 'error')
             return render_template('register.html')
+        if len(p) < 8:
+            flash('Password must be at least 8 characters.', 'error')
+            return render_template('register.html')
+        import re as _re
+        if not _re.search(r'[A-Z]', p):
+            flash('Password must contain at least one uppercase letter.', 'error')
+            return render_template('register.html')
+        if not _re.search(r'[0-9]', p):
+            flash('Password must contain at least one number.', 'error')
+            return render_template('register.html')
+        if p != c:
+            flash('Passwords do not match.', 'error')
+            return render_template('register.html')
         conn = get_db()
         try:
-            # First user becomes admin, or if username matches ADMIN_USERNAME env
             count = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
             is_admin = 1 if (count == 0 or (ADMIN_USERNAME and u == ADMIN_USERNAME)) else 0
-            conn.execute('INSERT INTO users (username,password_hash,is_admin) VALUES (?,?,?)',
-                        (u, hash_password(p), is_admin))
+            conn.execute('INSERT INTO users (username,password_hash,email,is_admin) VALUES (?,?,?,?)',
+                        (u, hash_password(p), email, is_admin))
             conn.commit(); flash('Account created! Please log in.', 'success')
             return redirect(url_for('login'))
         except sqlite3.IntegrityError: flash('Username already taken.', 'error')
@@ -591,6 +609,7 @@ def login():
         user = conn.execute('SELECT * FROM users WHERE username=? AND password_hash=?', (u, hash_password(p))).fetchone()
         conn.close()
         if user:
+            session.permanent = True
             session['user_id'] = user['id']; return redirect(url_for('dashboard'))
         flash('Invalid credentials.', 'error')
     return render_template('login.html')
@@ -657,6 +676,7 @@ def discord_oauth_callback():
     # Check if discord_id already linked to an account
     user = conn.execute('SELECT * FROM users WHERE discord_id=?', (discord_id,)).fetchone()
     if user:
+        session.permanent = True
         session['user_id'] = user['id']
         conn.close()
         return redirect(url_for('dashboard'))
@@ -877,7 +897,27 @@ def force_poll(card_id):
                 if not data:
                     error_msg = f"Card number {card_num!r} not found in Timezone session (found: {[str(c.get('number')) for c in guest.get('cards',[])]})"
             else:
-                error_msg = 'Timezone session returned no cards — token may be expired'
+                # No cards returned — try forcing a token refresh then retry once
+                print(f"[ForcePoll] No cards from Timezone for user {user['id']}, forcing token refresh...")
+                if tzs.get('refresh_token'):
+                    new_tok, new_rt, _ = tz_refresh_ms_token(tzs['refresh_token'], tzs.get('ms_client_id'))
+                    if new_tok:
+                        guest2 = fetch_timezone_guest(new_tok, json.loads(tzs['cookies_json'] or '{}'), user_id=user['id'])
+                        if guest2 and guest2.get('cards'):
+                            card_num = str(card['card_number']).strip() if card['card_number'] else ''
+                            for c in guest2.get('cards', []):
+                                api_num = str(c.get('number', '')).strip()
+                                if api_num == card_num or (card_num and card_num in api_num) or (api_num and api_num in card_num):
+                                    data = {
+                                        'cash_balance': float(c.get('cashBalance') or 0),
+                                        'cash_bonus':   float(c.get('bonusBalance') or 0),
+                                        'points':       int(c.get('eTickets') or c.get('tickets') or 0),
+                                        'card_name':    card['card_label'],
+                                        'tier':         c.get('tier', '')
+                                    }
+                                    break
+                if not data:
+                    error_msg = 'Timezone session returned no cards — please reconnect'
         except Exception as e:
             error_msg = str(e)
 
@@ -1227,6 +1267,36 @@ def import_transactions(card_id):
     conn.commit(); conn.close()
     print(f"[ImportTx] Imported {imported}, skipped {skipped} zero-balance rows")
     return jsonify({'success': True, 'imported': imported, 'skipped': skipped, 'total': len(transactions)})
+
+
+@app.route('/admin/timezone-debug')
+@login_required
+def timezone_debug():
+    user = get_current_user()
+    if not user or not user['is_admin']:
+        return jsonify({'error': 'Admin only'}), 403
+    conn = get_db()
+    sessions = conn.execute('''
+        SELECT ts.*, u.username FROM timezone_sessions ts
+        JOIN users u ON u.id = ts.user_id
+    ''').fetchall()
+    conn.close()
+    result = []
+    for s in sessions:
+        result.append({
+            'username': s['username'],
+            'user_id': s['user_id'],
+            'has_bearer': bool(s['bearer_token']),
+            'has_refresh_token': bool(s['refresh_token']),
+            'has_ms_client_id': bool(s['ms_client_id']),
+            'ms_client_id': s['ms_client_id'],
+            'token_expires_at': s['token_expires_at'],
+            'session_expires_at': s['session_expires_at'],
+            'last_poll_at': s['last_poll_at'],
+            'last_poll_status': s['last_poll_status'],
+            'refresh_token_preview': s['refresh_token'][:20] + '...' if s['refresh_token'] else None,
+        })
+    return jsonify(result)
 
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
