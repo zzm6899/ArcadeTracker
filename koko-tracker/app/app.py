@@ -221,14 +221,21 @@ TZ_HEADERS = {
     'x-app-version': '20210722',
 }
 
+# Timezone MS B2C constants (extracted from localStorage key structure)
+TZ_TENANT_ID  = 'ff9115a9-091c-4a41-8248-bebd73fbe7eb'  # from localStorage key prefix
+TZ_CLIENT_ID  = 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # clientId field in localStorage
+TZ_B2C_POLICY = 'B2C_1A_signupsignin'
+
 def tz_refresh_ms_token(refresh_token, ms_client_id=None):
-    """Use Microsoft Identity refresh token to get a new access token for teeg.cloud."""
-    cid = ms_client_id or 'ca0e4868-177b-49d2-8c63-f1044e3edc63'
-    # Try multiple known B2C policy endpoints
+    """Use Microsoft B2C refresh token to get a new access token for teeg.cloud."""
+    cid = ms_client_id or TZ_CLIENT_ID
+    # Tenant ID is the UUID prefix in the localStorage key (NOT the client ID)
+    tenant = TZ_TENANT_ID
+    policy = TZ_B2C_POLICY
     endpoints = [
-        f'https://identity.teeg.cloud/{cid}/B2C_1A_signupsignin/oauth2/v2.0/token',
-        f'https://identity.teeg.cloud/{cid}/B2C_1A_SignUpOrSignIn/oauth2/v2.0/token',
-        f'https://identity.teeg.cloud/tfp/{cid}/B2C_1A_signupsignin/oauth2/v2.0/token',
+        f'https://identity.teeg.cloud/{tenant}/{policy}/oauth2/v2.0/token',
+        f'https://identity.teeg.cloud/tfp/{tenant}/{policy}/oauth2/v2.0/token',
+        f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token',
     ]
     scopes = [
         f'openid profile offline_access https://identity.teeg.cloud/{cid}/guest.read',
@@ -236,7 +243,7 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
         'openid offline_access',
     ]
     for endpoint in endpoints:
-        for scope in scopes:
+        for scope in scopes[:1]:  # try first scope only per endpoint to reduce noise
             try:
                 resp = requests.post(endpoint, data={
                     'grant_type': 'refresh_token',
@@ -244,16 +251,16 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
                     'refresh_token': refresh_token,
                     'scope': scope,
                 }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
-                print(f"[Timezone] MS refresh {endpoint.split('/')[-3]}/{scope[:30]}: HTTP {resp.status_code}")
+                print(f"[Timezone] MS refresh {endpoint.split('/')[3][:8]}/{policy[:15]}: HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     data = resp.json()
                     new_token   = data.get('access_token') or data.get('id_token')
                     new_refresh = data.get('refresh_token', refresh_token)
                     expires_in  = int(data.get('expires_in', 840))
-                    print(f"[Timezone] MS refresh SUCCESS, token expires in {expires_in}s")
+                    print(f"[Timezone] MS refresh SUCCESS via {endpoint.split('/')[3]}, expires {expires_in}s")
                     return new_token, new_refresh, expires_in
                 else:
-                    print(f"[Timezone] MS refresh body: {resp.text[:200]}")
+                    print(f"[Timezone] MS refresh failed: {resp.text[:150]}")
             except Exception as e:
                 print(f"[Timezone] MS refresh error: {e}")
     return None, None, None
