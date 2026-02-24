@@ -1,6 +1,6 @@
-# 🎮 Arcade Card Tracker
+# 🎮 Koko Tracker
 
-Self-hosted app to track your **Koko Amusement / Timezone** game card balance history over time, with graphs for day/week/month trends.
+Self-hosted app to track your **Koko Amusement** game card balance history over time, with graphs for day/week/month trends.
 
 ## Features
 
