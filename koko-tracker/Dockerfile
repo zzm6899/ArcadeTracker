@@ -5,14 +5,13 @@ WORKDIR /koko
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download jsQR at build time
+# Download jsQR at build time so it's served locally (no CDN dependency)
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /koko/static/js && \
     curl -sL https://unpkg.com/jsqr@1.4.0/dist/jsQR.js -o /koko/static/js/jsQR.js
 
 COPY app/ ./app/
 COPY templates/ ./templates/
-COPY static/ ./static/
 
 RUN mkdir -p /data
 
