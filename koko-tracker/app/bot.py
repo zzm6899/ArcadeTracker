@@ -181,6 +181,11 @@ class BalanceBot(discord.Client):
         self._status_idx = 0
 
     async def setup_hook(self):
+        # Allow bot to be used in DMs and group chats (user-installable app)
+        self.tree.allowed_installs = discord.app_commands.AppInstallationType(guild=True, user=True)
+        self.tree.allowed_contexts = discord.app_commands.AppCommandContext(
+            guild=True, dm_channel=True, private_channel=True
+        )
         guild = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
         if guild:
             self.tree.copy_global_to(guild=guild)
@@ -351,8 +356,15 @@ async def cmd_refresh(interaction: discord.Interaction):
     await interaction.followup.send(f"✅ Refreshed {refreshed}/{len(cards)} card(s). Use `/cards` to see updated balances.", ephemeral=ephem)
 
 
-@bot.tree.command(name="leaderboard", description="Public card balance leaderboard")
+@bot.tree.command(name="leaderboard", description="Public card balance leaderboard (server only)")
 async def cmd_leaderboard(interaction: discord.Interaction):
+    # Leaderboard requires a guild context to be meaningful
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "🏆 The leaderboard only works inside a server — invite me to a Discord server to use it!",
+            ephemeral=True
+        )
+        return
     user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
     ephem = is_ephemeral(user, 'leaderboard', default=False)
     rows = await asyncio.get_event_loop().run_in_executor(None, db_get_leaderboard)
@@ -398,6 +410,236 @@ async def cmd_privacy(interaction: discord.Interaction, command: str, public: bo
         ephemeral=True
     )
 
+
+
+
+# ─── Add Card ─────────────────────────────────────────────────────────────────
+
+def db_add_koko_card(user_id, token, label, cash_balance, cash_bonus, points, card_name):
+    import sqlite3 as _sq
+    conn = get_db()
+    try:
+        existing = conn.execute(
+            "SELECT id, active FROM cards WHERE user_id=? AND card_token=?", (user_id, token)
+        ).fetchone()
+        if existing:
+            if existing['active']:
+                conn.close()
+                return False, "Card already tracked."
+            conn.execute("UPDATE cards SET active=1, card_label=? WHERE id=?", (label or card_name or token, existing['id']))
+            cid = existing['id']
+        else:
+            conn.execute(
+                "INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,poll_interval) VALUES (?,?,?,?,?,?)",
+                (user_id, 'koko', token, label or card_name or token, card_name, 60)
+            )
+            cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        conn.execute(
+            "INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name) VALUES (?,?,?,?,?)",
+            (cid, cash_balance, cash_bonus, points, card_name)
+        )
+        conn.commit()
+        return True, cid
+    except _sq.IntegrityError as e:
+        return False, str(e)
+    finally:
+        conn.close()
+
+
+class AddKokoModal(discord.ui.Modal, title="Add Koko Card"):
+    token = discord.ui.TextInput(
+        label="Card Token",
+        placeholder="e.g. 1ag9ukYM  (from the card QR URL)",
+        min_length=4, max_length=64, required=True
+    )
+    nickname = discord.ui.TextInput(
+        label="Nickname (optional)",
+        placeholder="e.g. My Main Card",
+        required=False, max_length=50
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
+        if not user:
+            await interaction.followup.send("❌ Use `/link` first to connect your account.", ephemeral=True)
+            return
+
+        token_val = self.token.value.strip()
+        label_val = self.nickname.value.strip()
+
+        sys.path.insert(0, os.path.dirname(__file__))
+        from app import fetch_koko_balance
+
+        await interaction.followup.send("⏳ Fetching card data...", ephemeral=True)
+
+        try:
+            data = await asyncio.get_event_loop().run_in_executor(None, fetch_koko_balance, token_val)
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Error fetching card: {e}")
+            return
+
+        if not data or all(v is None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
+            await interaction.edit_original_response(content="❌ Could not fetch data for that token. Check the token and try again.")
+            return
+
+        cash = data.get('cash_balance') or 0
+        bonus = data.get('cash_bonus') or 0
+        points = data.get('points') or 0
+        card_name = data.get('card_name') or token_val
+        total = cash + bonus
+
+        ok, result = await asyncio.get_event_loop().run_in_executor(
+            None, db_add_koko_card, user['id'], token_val, label_val, cash, bonus, points, card_name
+        )
+
+        if not ok:
+            await interaction.edit_original_response(content=f"❌ {result}")
+            return
+
+        embed = discord.Embed(title="✅ Koko Card Added!", color=0x22c55e)
+        embed.add_field(name="🎮 Card", value=label_val or card_name, inline=False)
+        embed.add_field(name="💰 Balance", value=f"${cash:.2f}", inline=True)
+        embed.add_field(name="🎁 Bonus", value=f"${bonus:.2f}", inline=True)
+        embed.add_field(name="⭐ Points", value=f"{points:,}", inline=True)
+        embed.add_field(name="💵 Total", value=f"**${total:.2f}**", inline=False)
+        embed.set_footer(text="Card is now being tracked. Use /cards to view it.")
+        await interaction.edit_original_response(content=None, embed=embed)
+
+
+class TimezoneCardSelectView(discord.ui.View):
+    """Shown after validating a Timezone session — lets user pick which card to track."""
+    def __init__(self, user_id, cards_data, timeout=120):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.cards_data = cards_data
+        # Build select options
+        options = []
+        for c in cards_data[:25]:  # Discord max 25 options
+            num = str(c.get('number', ''))
+            tier = c.get('tier', '')
+            balance = (c.get('cashBalance') or 0) + (c.get('bonusBalance') or 0)
+            label = f"{tier+' · ' if tier else ''}${balance:.2f} credits"
+            options.append(discord.SelectOption(label=f"Card {num[-8:]}", description=label, value=num))
+        select = discord.ui.Select(placeholder="Choose a card to track…", options=options)
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        chosen_num = interaction.data['values'][0]
+        card_data = next((c for c in self.cards_data if str(c.get('number','')) == chosen_num), None)
+        if not card_data:
+            await interaction.followup.send("❌ Card not found.", ephemeral=True); return
+
+        conn = get_db()
+        token = f"tz_{chosen_num}"
+        tier = card_data.get('tier', '')
+        label = tier + ' ' + chosen_num[-6:] if tier else chosen_num[-6:]
+        cash = card_data.get('cashBalance', 0)
+        bonus = card_data.get('bonusBalance', 0)
+        points = card_data.get('eTickets', card_data.get('tickets', 0))
+
+        try:
+            existing = conn.execute("SELECT id, active FROM cards WHERE user_id=? AND card_token=?", (self.user_id, token)).fetchone()
+            if existing:
+                if existing['active']:
+                    await interaction.followup.send("⚠️ That card is already being tracked.", ephemeral=True)
+                    conn.close(); return
+                conn.execute("UPDATE cards SET active=1, card_label=?, tier=? WHERE id=?", (label, tier, existing['id']))
+                cid = existing['id']
+            else:
+                conn.execute(
+                    "INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,tier,poll_interval) VALUES (?,'timezone',?,?,?,?,?)",
+                    (self.user_id, token, label, chosen_num, tier, 900)
+                )
+                cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+            conn.execute("INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,tier) VALUES (?,?,?,?,?)",
+                (cid, cash, bonus, points, tier))
+            conn.commit()
+        finally:
+            conn.close()
+
+        embed = discord.Embed(title="✅ Timezone Card Added!", color=0xfbbf24)
+        if tier:
+            embed.add_field(name="🎖 Tier", value=f"{tier_emoji(tier)} {tier}", inline=True)
+        embed.add_field(name="💳 Card", value=f"...{chosen_num[-6:]}", inline=True)
+        embed.add_field(name="💰 Credits", value=f"${cash:.2f}", inline=True)
+        embed.add_field(name="🎁 Bonus", value=f"${bonus:.2f}", inline=True)
+        embed.add_field(name="🎫 e-Tickets", value=f"{points:,}", inline=True)
+        embed.set_footer(text="Card is now being tracked. Use /cards to view it.")
+        self.stop()
+        await interaction.edit_original_response(content=None, embed=embed, view=None)
+
+
+@bot.tree.command(name="addcard", description="Add a new card to track")
+@app_commands.describe(card_type="Koko (QR token) or Timezone (uses your linked session)")
+@app_commands.choices(card_type=[
+    app_commands.Choice(name="🎮 Koko — enter card token", value="koko"),
+    app_commands.Choice(name="🕹️ Timezone — pick from your account", value="timezone"),
+])
+async def cmd_addcard(interaction: discord.Interaction, card_type: str):
+    user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
+    if not user:
+        await interaction.response.send_message("❌ Use `/link` first to connect your account.", ephemeral=True)
+        return
+
+    if card_type == "koko":
+        await interaction.response.send_modal(AddKokoModal())
+
+    elif card_type == "timezone":
+        await interaction.response.defer(ephemeral=True)
+        # Check for active Timezone session
+        conn = get_db()
+        tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+        conn.close()
+
+        if not tzs or not tzs['bearer_token']:
+            await interaction.followup.send(
+                f"❌ No Timezone session found.\n\nConnect your Timezone account at {APP_URL}/timezone/start, then try again.",
+                ephemeral=True
+            )
+            return
+
+        sys.path.insert(0, os.path.dirname(__file__))
+        from app import fetch_timezone_guest
+        import json as _json
+
+        await interaction.followup.send("⏳ Fetching your Timezone cards...", ephemeral=True)
+
+        try:
+            guest = await asyncio.get_event_loop().run_in_executor(
+                None, fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
+            )
+        except Exception as e:
+            await interaction.edit_original_response(content=f"❌ Error connecting to Timezone: {e}")
+            return
+
+        if not guest or not guest.get('cards'):
+            await interaction.edit_original_response(
+                content="❌ Could not fetch Timezone cards. Your session may have expired — reconnect at the website."
+            )
+            return
+
+        tz_cards = guest.get('cards', [])
+        # Filter out already-tracked active cards
+        conn = get_db()
+        tracked = {r['card_number'] for r in conn.execute(
+            "SELECT card_number FROM cards WHERE user_id=? AND active=1 AND card_type='timezone'", (user['id'],)
+        ).fetchall()}
+        conn.close()
+
+        untracked = [c for c in tz_cards if str(c.get('number','')) not in tracked]
+
+        if not untracked:
+            await interaction.edit_original_response(content="✅ All your Timezone cards are already being tracked!")
+            return
+
+        view = TimezoneCardSelectView(user['id'], untracked)
+        await interaction.edit_original_response(
+            content=f"Found **{len(untracked)}** untracked card(s). Select one to add:",
+            view=view
+        )
 
 # ─── Run ──────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':

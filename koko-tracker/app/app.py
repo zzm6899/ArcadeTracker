@@ -224,15 +224,27 @@ def tz_session_status(tzs):
     """Return status string for a timezone session."""
     if not tzs or not tzs['bearer_token']:
         return 'disconnected'
-    now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-    if tzs['session_expires_at'] and tzs['session_expires_at'] < now:
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    now_dt  = datetime.utcnow()
+    # Expired session cookie
+    if tzs['session_expires_at'] and tzs['session_expires_at'] < now_str:
         return 'expired'
-    if tzs['last_poll_status'] == 'error':
-        return 'error'
+    # Check last poll
     if tzs['last_poll_at']:
-        last = datetime.strptime(tzs['last_poll_at'], '%Y-%m-%d %H:%M:%S')
-        if (datetime.utcnow() - last).total_seconds() > TIMEZONE_POLL_INTERVAL * 3:
-            return 'stale'
+        try:
+            last = datetime.strptime(tzs['last_poll_at'], '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            last = None
+        if last:
+            age = (now_dt - last).total_seconds()
+            # Only call it 'error' if the LAST poll errored AND it happened recently
+            # (i.e. not just an old stale error from before a reconnect)
+            if tzs['last_poll_status'] == 'error' and age < TIMEZONE_POLL_INTERVAL * 6:
+                return 'error'
+            # Stale: no successful poll in 3x the poll interval
+            if age > TIMEZONE_POLL_INTERVAL * 3:
+                return 'stale'
+    # No polls yet (freshly connected) or last poll was recent — show connected
     return 'connected'
 
 
