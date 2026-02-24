@@ -75,6 +75,13 @@
                 <span id="webhook-test-result" class="text-xs ml-2 hidden"></span>
             </div>
 
+            <div class="border-t border-slate-800 pt-4">
+                <label class="block text-sm text-slate-300 font-medium mb-1.5">Email Address</label>
+                <input name="email" type="email" class="input-field w-full px-3 py-2 rounded-lg text-sm"
+                    placeholder="you@example.com (for password reset)"
+                    value="{{ user.email or '' }}">
+                <p class="text-xs text-slate-600 mt-1">Used for password reset only</p>
+            </div>
             <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">Save Settings</button>
         </form>
     </div>
