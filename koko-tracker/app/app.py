@@ -450,8 +450,6 @@ def tz_session_status(tzs):
     # No polls yet (freshly connected) or last poll was recent — show connected
     return 'connected'
 
-
-# ─── Discord Webhook ──────────────────────────────────────────────────────────
 def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
     try:
         diff = new_total - prev_total
@@ -477,6 +475,26 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
         requests.post(webhook_url, json=payload, timeout=5)
     except Exception as e:
         print(f"[Discord] Webhook error: {e}")
+
+def fetch_timezone_history(bearer_token, card_no, cookies_dict=None):
+    try:
+        resp = requests.get(f'{TEEG_API}/guest/cards/AU/{card_no}/transactions', timeout=15, headers={
+            'Authorization': f'Bearer {bearer_token}',
+            'Accept': 'application/json',
+            'Origin': 'https://portal.timezonegames.com',
+            'Referer': 'https://portal.timezonegames.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }, cookies=cookies_dict or {})
+        if resp.status_code == 200:
+            print(f"[Timezone] History API: Fetched transaction history for card {card_no}")
+            return resp.json()
+        print(f"[Timezone] History API error: HTTP {resp.status_code} - {resp.text[:200]}")
+    except Exception as e:
+        print(f"[Timezone] History API error: {e}")
+        return None
+
+
+# ─── Discord Webhook ──────────────────────────────────────────────────────────
 
 # ─── Poller ───────────────────────────────────────────────────────────────────
 def log_poll(card_id, success, message=''):
@@ -888,6 +906,28 @@ def delete_card(card_id):
     conn.commit(); conn.close(); flash('Card removed.', 'success')
     return redirect(url_for('dashboard'))
 
+# @app.route('/cards/<int:card_id>/tap-history', methods=['GET'])
+# @login_required
+# def get_tap_history(card_id):
+#     user = get_current_user()
+#     conn = get_db()
+#     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
+#     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
+#     if card['card_type'] != 'timezone':
+#         conn.close(); return jsonify({'error': 'Not a Timezone card'}), 400
+#     tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+#     conn.close()
+#     if not tzs or not tzs['bearer_token']:
+#         return jsonify({'error': 'No Timezone session'}), 400
+#     guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
+#     if not guest:
+#         return jsonify({'error': 'Could not fetch Timezone data'}), 400
+#     for c in guest.get('cards', []):
+#         if str(c.get('number')) == str(card['card_number']):
+#             history = fetch_timezone_history(tzs['bearer_token'], str(c.get('number')), json.loads(tzs['cookies_json'] or '{}'))
+#             return jsonify({'success': True, 'history': history})
+#     return jsonify({'error': 'Card number not found in Timezone session'})
+
 @app.route('/cards/<int:card_id>/poll-interval', methods=['POST'])
 @login_required
 def update_poll_interval(card_id):
@@ -926,13 +966,15 @@ def force_poll(card_id):
                 card_num = str(card['card_number']).strip() if card['card_number'] else ''
                 for c in guest.get('cards', []):
                     api_num = str(c.get('number', '')).strip()
+                    history = fetch_timezone_history(tzs['bearer_token'], api_num, json.loads(tzs['cookies_json'] or '{}'))
                     if api_num == card_num or (card_num and card_num in api_num) or (api_num and api_num in card_num):
                         data = {
                             'cash_balance': float(c.get('cashBalance') or 0),
                             'cash_bonus':   float(c.get('bonusBalance') or 0),
                             'points':       int(c.get('eTickets') or c.get('tickets') or 0),
                             'card_name':    card['card_label'],
-                            'tier':         c.get('tier', '')
+                            'tier':         c.get('tier', ''),
+                            'history':      history if history else []
                         }
                         break
                 if not data:
@@ -1470,6 +1512,7 @@ def api_history(card_id):
 def api_stats(card_id):
     user = get_current_user()
     conn = get_db()
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
     latest = conn.execute('SELECT * FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1', (card_id,)).fetchone()
@@ -1477,11 +1520,12 @@ def api_stats(card_id):
     since_24h = (datetime.utcnow()-timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
     first_24h = conn.execute('SELECT cash_balance,cash_bonus FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC LIMIT 1',
         (card_id, since_24h)).fetchone()
+    history = fetch_timezone_history(tzs['bearer_token'], str(card['card_number']), json.loads(tzs['cookies_json'] or '{}')) if (card['card_type']=='timezone' and tzs) else None
     conn.close()
     spent_24h = None
     if first_24h and latest:
         spent_24h = round(((first_24h['cash_balance'] or 0)+(first_24h['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
-    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type']})
+    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type'], 'history': history or []})
 
 @app.route('/api/dashboard/overview')
 @login_required
