@@ -254,8 +254,6 @@ def tz_session_status(tzs):
     # No polls yet (freshly connected) or last poll was recent — show connected
     return 'connected'
 
-
-# ─── Discord Webhook ──────────────────────────────────────────────────────────
 def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
     try:
         diff = new_total - prev_total
@@ -281,6 +279,26 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
         requests.post(webhook_url, json=payload, timeout=5)
     except Exception as e:
         print(f"[Discord] Webhook error: {e}")
+
+def fetch_timezone_history(bearer_token, card_no, cookies_dict=None):
+    try:
+        resp = requests.get(f'{TEEG_API}/guest/cards/AU/{card_no}/transactions', timeout=15, headers={
+            'Authorization': f'Bearer {bearer_token}',
+            'Accept': 'application/json',
+            'Origin': 'https://portal.timezonegames.com',
+            'Referer': 'https://portal.timezonegames.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }, cookies=cookies_dict or {})
+        if resp.status_code == 200:
+            print(f"[Timezone] History API: Fetched transaction history for card {card_no}")
+            return resp.json()
+        print(f"[Timezone] History API error: HTTP {resp.status_code} - {resp.text[:200]}")
+    except Exception as e:
+        print(f"[Timezone] History API error: {e}")
+        return None
+
+
+# ─── Discord Webhook ──────────────────────────────────────────────────────────
 
 # ─── Poller ───────────────────────────────────────────────────────────────────
 def log_poll(card_id, success, message=''):
@@ -330,8 +348,10 @@ def poll_cards():
                     if tzs and tzs['bearer_token']:
                         cookies = json.loads(tzs['cookies_json'] or '{}')
                         guest = fetch_timezone_guest(tzs['bearer_token'], cookies)
+                        print(f"[Poller] Fetched Timezone guest for user {card['user_id']}: {guest.get('givenName','')} with {len(guest.get('cards',[]))} cards")
                         if guest:
                             for c in guest.get('cards', []):
+                                history = fetch_timezone_history(tzs['bearer_token'],c.get('number'), cookies)
                                 if str(c.get('number')) == str(card['card_number']):
                                     data = {
                                         'cash_balance': c.get('cashBalance', 0),
@@ -339,6 +359,7 @@ def poll_cards():
                                         'points': c.get('eTickets', c.get('tickets', 0)),
                                         'card_name': card['card_label'],
                                         'tier': c.get('tier', ''),
+                                        'history': history if history else []
                                     }
                                     break
                             # Update poll status
