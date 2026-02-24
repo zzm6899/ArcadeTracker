@@ -956,7 +956,8 @@ def import_transactions(card_id):
                 )
                 imported += 1
     conn.commit(); conn.close()
-    return jsonify({'success': True, 'imported': imported, 'total': len(transactions)})
+    sample = dict(transactions[0]) if transactions else {}
+    return jsonify({'success': True, 'imported': imported, 'total': len(transactions), 'sample_fields': list(sample.keys()), 'sample': sample})
 
 # ─── Routes: Admin ────────────────────────────────────────────────────────────
 @app.route('/admin')
