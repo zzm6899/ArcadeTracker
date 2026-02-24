@@ -358,7 +358,6 @@ def poll_cards():
                                         'points': c.get('eTickets', c.get('tickets', 0)),
                                         'card_name': card['card_label'],
                                         'tier': c.get('tier', ''),
-                                        'history': history if history else []
                                     }
                                     break
                             # Update poll status
@@ -514,27 +513,27 @@ def delete_card(card_id):
     conn.commit(); conn.close(); flash('Card removed.', 'success')
     return redirect(url_for('dashboard'))
 
-@app.route('/cards/<int:card_id>/tap-history', methods=['GET'])
-@login_required
-def get_tap_history(card_id):
-    user = get_current_user()
-    conn = get_db()
-    card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
-    if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
-    if card['card_type'] != 'timezone':
-        conn.close(); return jsonify({'error': 'Not a Timezone card'}), 400
-    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
-    conn.close()
-    if not tzs or not tzs['bearer_token']:
-        return jsonify({'error': 'No Timezone session'}), 400
-    guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
-    if not guest:
-        return jsonify({'error': 'Could not fetch Timezone data'}), 400
-    for c in guest.get('cards', []):
-        if str(c.get('number')) == str(card['card_number']):
-            history = fetch_timezone_history(tzs['bearer_token'], str(c.get('number')), json.loads(tzs['cookies_json'] or '{}'))
-            return jsonify({'success': True, 'history': history})
-    return jsonify({'error': 'Card number not found in Timezone session'})
+# @app.route('/cards/<int:card_id>/tap-history', methods=['GET'])
+# @login_required
+# def get_tap_history(card_id):
+#     user = get_current_user()
+#     conn = get_db()
+#     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
+#     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
+#     if card['card_type'] != 'timezone':
+#         conn.close(); return jsonify({'error': 'Not a Timezone card'}), 400
+#     tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+#     conn.close()
+#     if not tzs or not tzs['bearer_token']:
+#         return jsonify({'error': 'No Timezone session'}), 400
+#     guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
+#     if not guest:
+#         return jsonify({'error': 'Could not fetch Timezone data'}), 400
+#     for c in guest.get('cards', []):
+#         if str(c.get('number')) == str(card['card_number']):
+#             history = fetch_timezone_history(tzs['bearer_token'], str(c.get('number')), json.loads(tzs['cookies_json'] or '{}'))
+#             return jsonify({'success': True, 'history': history})
+#     return jsonify({'error': 'Card number not found in Timezone session'})
 
 @app.route('/cards/<int:card_id>/poll-interval', methods=['POST'])
 @login_required
@@ -972,6 +971,7 @@ def api_history(card_id):
 def api_stats(card_id):
     user = get_current_user()
     conn = get_db()
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
     if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
     latest = conn.execute('SELECT * FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1', (card_id,)).fetchone()
@@ -979,11 +979,12 @@ def api_stats(card_id):
     since_24h = (datetime.utcnow()-timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
     first_24h = conn.execute('SELECT cash_balance,cash_bonus FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC LIMIT 1',
         (card_id, since_24h)).fetchone()
+    history = fetch_timezone_history(tzs['bearer_token'], str(card['card_number']), json.loads(tzs['cookies_json'] or '{}')) if (card['card_type']=='timezone' and tzs) else None
     conn.close()
     spent_24h = None
     if first_24h and latest:
         spent_24h = round(((first_24h['cash_balance'] or 0)+(first_24h['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
-    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type']})
+    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type'], 'history': history or []})
 
 @app.route('/api/dashboard/overview')
 @login_required
