@@ -351,7 +351,6 @@ def poll_cards():
                         print(f"[Poller] Fetched Timezone guest for user {card['user_id']}: {guest.get('givenName','')} with {len(guest.get('cards',[]))} cards")
                         if guest:
                             for c in guest.get('cards', []):
-                                history = fetch_timezone_history(tzs['bearer_token'],c.get('number'), cookies)
                                 if str(c.get('number')) == str(card['card_number']):
                                     data = {
                                         'cash_balance': c.get('cashBalance', 0),
@@ -515,6 +514,28 @@ def delete_card(card_id):
     conn.commit(); conn.close(); flash('Card removed.', 'success')
     return redirect(url_for('dashboard'))
 
+@app.route('/cards/<int:card_id>/tap-history', methods=['GET'])
+@login_required
+def get_tap_history(card_id):
+    user = get_current_user()
+    conn = get_db()
+    card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
+    if not card: conn.close(); return jsonify({'error': 'Not found'}), 404
+    if card['card_type'] != 'timezone':
+        conn.close(); return jsonify({'error': 'Not a Timezone card'}), 400
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+    conn.close()
+    if not tzs or not tzs['bearer_token']:
+        return jsonify({'error': 'No Timezone session'}), 400
+    guest = fetch_timezone_guest(tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}'))
+    if not guest:
+        return jsonify({'error': 'Could not fetch Timezone data'}), 400
+    for c in guest.get('cards', []):
+        if str(c.get('number')) == str(card['card_number']):
+            history = fetch_timezone_history(tzs['bearer_token'], str(c.get('number')), json.loads(tzs['cookies_json'] or '{}'))
+            return jsonify({'success': True, 'history': history})
+    return jsonify({'error': 'Card number not found in Timezone session'})
+
 @app.route('/cards/<int:card_id>/poll-interval', methods=['POST'])
 @login_required
 def update_poll_interval(card_id):
@@ -553,13 +574,15 @@ def force_poll(card_id):
                 card_num = str(card['card_number']).strip() if card['card_number'] else ''
                 for c in guest.get('cards', []):
                     api_num = str(c.get('number', '')).strip()
+                    history = fetch_timezone_history(tzs['bearer_token'], api_num, json.loads(tzs['cookies_json'] or '{}'))
                     if api_num == card_num or (card_num and card_num in api_num) or (api_num and api_num in card_num):
                         data = {
                             'cash_balance': float(c.get('cashBalance') or 0),
                             'cash_bonus':   float(c.get('bonusBalance') or 0),
                             'points':       int(c.get('eTickets') or c.get('tickets') or 0),
                             'card_name':    card['card_label'],
-                            'tier':         c.get('tier', '')
+                            'tier':         c.get('tier', ''),
+                            'history':      history if history else []
                         }
                         break
                 if not data:
