@@ -266,34 +266,49 @@ def fetch_timezone_transactions(card_number, bearer_token, cookies_dict=None):
     headers = {**TZ_HEADERS, 'Authorization': f'Bearer {bearer_token}'}
     all_transactions = []
     try:
-        # Try paginated fetch - grab up to 500 transactions
-        for page in range(1, 11):  # 10 pages max
-            url = f'{TEEG_API}/guest/cards/AU/{card_number}/transactions?page={page}&pageSize=50'
+        # Try several URL patterns - we're not sure which the API uses
+        url_attempts = [
+            f'{TEEG_API}/guest/cards/AU/{card_number}/transactions',
+            f'{TEEG_API}/guest/cards/{card_number}/transactions',
+            f'{TEEG_API}/guest/transactions?cardNumber={card_number}',
+        ]
+        working_url = None
+        for url in url_attempts:
             resp = requests.get(url, headers=headers, cookies=cookies, timeout=15)
-            print(f"[Timezone] transactions page {page}: HTTP {resp.status_code}")
-            if resp.status_code == 401 and cookies:
-                # Try without page param on first attempt
-                resp = requests.get(
-                    f'{TEEG_API}/guest/cards/AU/{card_number}/transactions',
-                    headers=headers, cookies=cookies, timeout=15
-                )
-            if resp.status_code != 200:
+            print(f"[Timezone] TX probe {url}: HTTP {resp.status_code} — {resp.text[:200]}")
+            if resp.status_code == 200:
+                working_url = url
+                data = resp.json()
+                if isinstance(data, list):
+                    all_transactions.extend(data)
+                else:
+                    items = data.get('transactions') or data.get('items') or data.get('data') or []
+                    all_transactions.extend(items)
                 break
-            data = resp.json()
-            # Handle both array and object responses
-            if isinstance(data, list):
-                items = data
-            else:
-                items = data.get('transactions') or data.get('items') or data.get('data') or []
-                if isinstance(data, dict) and 'amount' in data:
-                    items = [data]  # single transaction
-            if not items:
-                break
-            all_transactions.extend(items)
-            # Stop if we got less than a full page (no more pages)
-            if len(items) < 50:
-                break
+
+        if not working_url:
+            print(f"[Timezone] No working transaction URL found for card {card_number}")
+            return []
+
+        # If first page worked, try paginated fetches
+        if all_transactions and len(all_transactions) >= 20:
+            for page in range(2, 11):
+                url = f'{working_url}?page={page}&pageSize=50'
+                resp = requests.get(url, headers=headers, cookies=cookies, timeout=15)
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                items = data if isinstance(data, list) else (data.get('transactions') or data.get('items') or data.get('data') or [])
+                if not items:
+                    break
+                all_transactions.extend(items)
+                if len(items) < 50:
+                    break
+
         print(f"[Timezone] Got {len(all_transactions)} transactions for card {card_number}")
+        if all_transactions:
+            print(f"[ImportTx] Sample keys: {list(all_transactions[0].keys())}")
+            print(f"[ImportTx] Sample: {dict(all_transactions[0])}")
         return all_transactions
     except Exception as e:
         print(f"[Timezone] Transaction fetch error: {e}"); return []
