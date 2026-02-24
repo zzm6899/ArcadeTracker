@@ -223,31 +223,40 @@ TZ_HEADERS = {
 
 def tz_refresh_ms_token(refresh_token, ms_client_id=None):
     """Use Microsoft Identity refresh token to get a new access token for teeg.cloud."""
-    # Timezone uses Microsoft B2C identity - refresh_token lets us get a new bearer
-    cid = ms_client_id or 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # known Timezone clientId
-    try:
-        resp = requests.post(
-            'https://identity.teeg.cloud/ca0e4868-177b-49d2-8c63-f1044e3edc63/B2C_1A_signupsignin/oauth2/v2.0/token',
-            data={
-                'grant_type': 'refresh_token',
-                'client_id': cid,
-                'refresh_token': refresh_token,
-                'scope': f'openid profile offline_access https://identity.teeg.cloud/{cid}/guest.read',
-            },
-            headers={'Content-Type': 'application/x-www-form-urlencoded'},
-            timeout=15
-        )
-        print(f"[Timezone] MS token refresh: HTTP {resp.status_code}")
-        if resp.status_code == 200:
-            data = resp.json()
-            new_token     = data.get('access_token') or data.get('id_token')
-            new_refresh   = data.get('refresh_token', refresh_token)
-            expires_in    = int(data.get('expires_in', 840))
-            return new_token, new_refresh, expires_in
-        print(f"[Timezone] MS refresh failed: {resp.text[:300]}")
-        return None, None, None
-    except Exception as e:
-        print(f"[Timezone] MS refresh error: {e}"); return None, None, None
+    cid = ms_client_id or 'ca0e4868-177b-49d2-8c63-f1044e3edc63'
+    # Try multiple known B2C policy endpoints
+    endpoints = [
+        f'https://identity.teeg.cloud/{cid}/B2C_1A_signupsignin/oauth2/v2.0/token',
+        f'https://identity.teeg.cloud/{cid}/B2C_1A_SignUpOrSignIn/oauth2/v2.0/token',
+        f'https://identity.teeg.cloud/tfp/{cid}/B2C_1A_signupsignin/oauth2/v2.0/token',
+    ]
+    scopes = [
+        f'openid profile offline_access https://identity.teeg.cloud/{cid}/guest.read',
+        f'openid offline_access {cid}',
+        'openid offline_access',
+    ]
+    for endpoint in endpoints:
+        for scope in scopes:
+            try:
+                resp = requests.post(endpoint, data={
+                    'grant_type': 'refresh_token',
+                    'client_id': cid,
+                    'refresh_token': refresh_token,
+                    'scope': scope,
+                }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
+                print(f"[Timezone] MS refresh {endpoint.split('/')[-3]}/{scope[:30]}: HTTP {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    new_token   = data.get('access_token') or data.get('id_token')
+                    new_refresh = data.get('refresh_token', refresh_token)
+                    expires_in  = int(data.get('expires_in', 840))
+                    print(f"[Timezone] MS refresh SUCCESS, token expires in {expires_in}s")
+                    return new_token, new_refresh, expires_in
+                else:
+                    print(f"[Timezone] MS refresh body: {resp.text[:200]}")
+            except Exception as e:
+                print(f"[Timezone] MS refresh error: {e}")
+    return None, None, None
 
 def tz_refresh_token(cookies_dict):
     """Use session cookies to get a fresh bearer token."""
@@ -509,7 +518,32 @@ def poll_cards():
                     conn.close()
                     if tzs and tzs['bearer_token']:
                         cookies = json.loads(tzs['cookies_json'] or '{}')
-                        guest = fetch_timezone_guest(tzs['bearer_token'], cookies, user_id=card['user_id'])
+                        # Proactively refresh token if it expires within 3 minutes
+                        bearer = tzs['bearer_token']
+                        if tzs['token_expires_at']:
+                            try:
+                                exp = datetime.strptime(tzs['token_expires_at'], '%Y-%m-%d %H:%M:%S')
+                                secs_left = (exp - datetime.utcnow()).total_seconds()
+                                if secs_left < 180 and tzs['refresh_token']:
+                                    print(f"[Poller] Token expires in {secs_left:.0f}s for user {card['user_id']}, pre-refreshing...")
+                                    new_tok, new_rt, _ = tz_refresh_ms_token(tzs['refresh_token'], tzs['ms_client_id'])
+                                    if new_tok:
+                                        bearer = new_tok
+                                        now2 = datetime.utcnow()
+                                        tok_exp2 = (now2 + timedelta(minutes=14)).strftime('%Y-%m-%d %H:%M:%S')
+                                        conn2 = get_db()
+                                        upd = 'bearer_token=?, token_expires_at=?, last_poll_status=?, updated_at=CURRENT_TIMESTAMP'
+                                        prms = [new_tok, tok_exp2, 'ok']
+                                        if new_rt:
+                                            upd += ', refresh_token=?'
+                                            prms.append(new_rt)
+                                        prms.append(card['user_id'])
+                                        conn2.execute(f'UPDATE timezone_sessions SET {upd} WHERE user_id=?', prms)
+                                        conn2.commit(); conn2.close()
+                                        print(f"[Poller] Pre-refresh success for user {card['user_id']}")
+                            except Exception as pre_e:
+                                print(f"[Poller] Pre-refresh error: {pre_e}")
+                        guest = fetch_timezone_guest(bearer, cookies, user_id=card['user_id'])
                         if guest:
                             for c in guest.get('cards', []):
                                 if str(c.get('number')) == str(card['card_number']):
