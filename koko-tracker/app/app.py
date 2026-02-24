@@ -252,74 +252,35 @@ TZ_HEADERS = {
     'x-app-version': '20210722',
 }
 
-# Timezone Azure AD constants (decoded from bearer token claims)
-TZ_TENANT_ID  = 'af21e056-0a21-4d83-b5dd-44c439fa8f30'  # iss claim
-TZ_CLIENT_ID  = 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # azp claim — the app that requested the token
-TZ_RESOURCE   = '6f72c275-51b9-463b-8411-3b04936ce189'  # aud claim — the API resource
+# Timezone B2C constants — verified from browser network tab
+TZ_TOKEN_URL  = 'https://identity.teeg.cloud/guests.teeg.cloud/b2c_1a_signupsignin/oauth2/v2.0/token'
+TZ_CLIENT_ID  = 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # azp claim
+TZ_SCOPE      = 'https://guests.teeg.cloud/api/all-apis openid profile offline_access'
 
 def tz_refresh_ms_token(refresh_token, ms_client_id=None):
-    """Use Microsoft Azure AD refresh token to get a new access token for teeg.cloud."""
-    cid        = TZ_CLIENT_ID   # aud claim from bearer token
-    tenant     = TZ_TENANT_ID   # iss claim from bearer token
-    stored_cid = ms_client_id or cid  # fallback: whatever was stored in DB
-    attempts = [
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
-         f'openid offline_access {cid}/.default'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
-         'openid offline_access'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
-         f'{cid}/.default'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', cid,
-         f'openid offline_access https://identity.teeg.cloud/{cid}/user_impersonation'),
-        (f'https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token', stored_cid,
-         f'openid offline_access {stored_cid}/.default'),
-        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
-         f'openid offline_access {cid}/.default'),
-    ]
-    # Token is encrypted by identity.teeg.cloud (zip=Deflate, opaque)
-    # Must refresh against identity.teeg.cloud, NOT login.microsoftonline.com
-    attempts = [
-        # identity.teeg.cloud — the actual issuer
-        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
-         f'openid offline_access {TZ_RESOURCE}/.default'),
-        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
-         'openid offline_access'),
-        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
-         f'{TZ_RESOURCE}/.default'),
-        # With B2C-style policy path
-        (f'https://identity.teeg.cloud/{tenant}/B2C_1A_signupsignin/oauth2/v2.0/token', cid,
-         f'openid offline_access {TZ_RESOURCE}/.default'),
-        (f'https://identity.teeg.cloud/{tenant}/B2C_1A_SignUpOrSignIn/oauth2/v2.0/token', cid,
-         f'openid offline_access {TZ_RESOURCE}/.default'),
-        # Try resource param instead of scope
-        (f'https://identity.teeg.cloud/{tenant}/oauth2/v2.0/token', cid,
-         f'openid offline_access https://identity.teeg.cloud/{TZ_RESOURCE}/guest.read'),
-    ]
-    for endpoint, client_id, scope in attempts:
-        try:
-            resp = requests.post(endpoint, data={
-                'grant_type': 'refresh_token',
-                'client_id': client_id,
-                'refresh_token': refresh_token,
-                'scope': scope,
-                'resource': TZ_RESOURCE,  # some Azure endpoints use resource instead of scope
-            }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
-            label = endpoint.split('/')[3][:20] + '|' + scope[:30]
-            print(f"[Timezone] MS refresh {label}: HTTP {resp.status_code}")
-            if resp.status_code == 200:
-                data = resp.json()
-                new_token   = data.get('access_token') or data.get('id_token')
-                new_refresh = data.get('refresh_token', refresh_token)
-                expires_in  = int(data.get('expires_in', 840))
-                print(f"[Timezone] MS refresh SUCCESS, expires {expires_in}s")
-                return new_token, new_refresh, expires_in
-            else:
-                err = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
-                print(f"[Timezone] MS refresh fail: {err.get('error','')}: {err.get('error_description','')[:120]}")
-        except Exception as e:
-            print(f"[Timezone] MS refresh error: {e}")
-    return None, None, None
-
+    """Refresh Timezone bearer token — endpoint verified from browser network tab."""
+    try:
+        resp = requests.post(TZ_TOKEN_URL, data={
+            'grant_type': 'refresh_token',
+            'client_id': TZ_CLIENT_ID,
+            'scope': TZ_SCOPE,
+            'refresh_token': refresh_token,
+        }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
+        print(f"[Timezone] MS refresh: HTTP {resp.status_code}")
+        if resp.status_code == 200:
+            data = resp.json()
+            new_token   = data.get('access_token')
+            new_refresh = data.get('refresh_token', refresh_token)
+            expires_in  = int(data.get('expires_in', 840))
+            print(f"[Timezone] MS refresh SUCCESS, expires {expires_in}s")
+            return new_token, new_refresh, expires_in
+        else:
+            err = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
+            print(f"[Timezone] MS refresh fail: {err.get('error','')}: {err.get('error_description','')[:150]}")
+            return None, None, None
+    except Exception as e:
+        print(f"[Timezone] MS refresh error: {e}")
+        return None, None, None
 def tz_refresh_token(cookies_dict):
     """Use session cookies to get a fresh bearer token."""
     try:
