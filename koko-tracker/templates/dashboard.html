@@ -1,557 +1,482 @@
 {% extends "base.html" %}
 {% block title %}Dashboard – Balance Tracker{% endblock %}
 {% block content %}
+
 {% if session.get('discord_new_user') %}
-<div class="mb-4 px-5 py-3.5 rounded-2xl bg-indigo-900/30 border border-indigo-700 flex items-center justify-between gap-4">
-    <div>
-        <p class="text-sm font-medium text-indigo-200">👋 Welcome! Your account was created via Discord.</p>
-        <p class="text-xs text-indigo-400 mt-0.5">Set a password so you can also log in with your username, and use password reset.</p>
-    </div>
-    <a href="/set-password" class="shrink-0 text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-3 py-1.5 rounded-lg transition">Set Password</a>
+<div class="mb-5 px-5 py-4 rounded-2xl flex items-center justify-between gap-4"
+     style="background:rgba(99,102,241,0.07);border:1px solid rgba(99,102,241,0.2)">
+  <div>
+    <p class="text-sm font-semibold" style="color:#c7d2fe">👋 Welcome! Account created via Discord.</p>
+    <p class="text-xs mt-0.5 text-muted">Set a password to also log in with your username.</p>
+  </div>
+  <a href="/set-password" class="btn-primary shrink-0 text-xs px-3 py-1.5 rounded-lg">Set Password</a>
 </div>
 {% endif %}
 
 {% with messages = get_flashed_messages(with_categories=true) %}
 {% if messages %}{% for cat, msg in messages %}
-<div class="mb-4 px-4 py-3 rounded-xl text-sm {% if cat == 'success' %}bg-green-900/30 border border-green-700 text-green-300{% else %}bg-red-900/30 border border-red-700 text-red-300{% endif %}">{{ msg }}</div>
+<div class="flash-{{ cat }} rounded-xl px-4 py-3 text-sm mb-4">{{ msg }}</div>
 {% endfor %}{% endif %}{% endwith %}
 
-<!-- Header -->
+<!-- ── Header ── -->
 <div class="flex items-start justify-between mb-6 flex-wrap gap-3">
-    <div>
-        <h1 class="text-2xl font-bold text-white">My Cards</h1>
-        <p class="text-slate-500 text-sm mt-0.5">Balances update per-card interval</p>
-    </div>
-    <div class="flex gap-2 flex-wrap items-center">
-        {% if user.is_admin %}<a href="/admin" class="px-3 py-1.5 rounded-lg text-xs border border-indigo-800 text-indigo-400 hover:bg-indigo-900/30 transition">⚙️ Admin</a>{% endif %}
+  <div>
+    <h1 class="font-display font-bold text-2xl gradient-text">My Cards</h1>
+    <p class="text-xs mt-0.5 text-muted">Balances update per-card interval</p>
+  </div>
+  <div class="flex gap-2 flex-wrap items-center">
+    {% if user.is_admin %}
+    <a href="/admin" class="btn-ghost text-xs px-3 py-1.5 rounded-lg gap-1.5">
+      <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>
+      Admin
+    </a>
+    {% endif %}
 
-        {% if tz_status == 'connected' %}
-        <div class="flex items-center gap-2 px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-xs">
-            <span class="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
-            <span class="text-slate-300">Timezone</span>
-            <form method="POST" action="/timezone/disconnect" class="inline">
-                <button class="text-slate-500 hover:text-red-400 transition ml-0.5">✕</button>
-            </form>
-        </div>
-        {% elif tz_status in ['stale','error','expired','needs_reconnect'] %}
-        <a href="/timezone/start" class="flex items-center gap-2 px-3 py-1.5 bg-red-900/20 border border-red-800 rounded-lg text-xs text-red-400 hover:bg-red-900/40 transition">
-            <span class="w-1.5 h-1.5 bg-red-400 rounded-full"></span>
-            {% if tz_status == 'needs_reconnect' %}⚠️ Timezone — Reconnect Required
-            {% else %}Timezone {{ tz_status|title }} — Reconnect{% endif %}
-        </a>
-        {% else %}
-        <a href="/timezone/start" class="px-3 py-1.5 rounded-lg text-xs border border-yellow-800 text-yellow-500 hover:bg-yellow-900/30 transition">🕹️ Connect Timezone</a>
-        {% endif %}
-
-        <button onclick="document.getElementById('add-koko-modal').classList.remove('hidden'); setTimeout(startScanner,100)"
-            class="btn-primary px-4 py-1.5 rounded-lg text-sm font-medium text-white">+ Add Koko</button>
+    {% if tz_status == 'connected' %}
+    <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
+         style="background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.2)">
+      <span class="pulse-green"></span>
+      <span style="color:#86efac">Timezone</span>
+      <form method="POST" action="/timezone/disconnect" class="inline">
+        <button class="ml-1 text-muted hover:text-danger transition">✕</button>
+      </form>
     </div>
+    {% elif tz_status in ['stale','error','expired','needs_reconnect'] %}
+    <a href="/timezone/start" class="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition"
+       style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.22);color:#f87171">
+      <span class="pulse-red"></span>
+      {% if tz_status == 'needs_reconnect' %}⚠️ Reconnect Required
+      {% else %}Timezone {{ tz_status|title }} — Reconnect{% endif %}
+    </a>
+    {% else %}
+    <a href="/timezone/start" class="btn-ghost text-xs px-3 py-1.5 rounded-lg"
+       style="color:#fbbf24;border-color:rgba(245,158,11,0.28)">🕹️ Connect Timezone</a>
+    {% endif %}
+
+    <button onclick="document.getElementById('add-koko-modal').classList.remove('hidden'); setTimeout(startScanner,100)"
+      class="btn-primary px-4 py-1.5 rounded-lg text-sm">+ Add Koko</button>
+  </div>
 </div>
 
-<!-- Balance Overview (toggleable via settings) -->
+<!-- ── Overview Chart ── -->
 {% if user.show_overview != 0 %}
-<div class="card rounded-2xl mb-6 overflow-hidden" id="overview-card">
-    <button onclick="toggleOverview()" class="w-full flex items-center justify-between px-5 py-3.5 hover:bg-slate-800/40 transition text-left">
-        <div class="flex items-center gap-3">
-            <span class="text-slate-300 text-sm font-medium">📊 Balance Overview</span>
-            <span id="overview-summary" class="text-xs text-slate-500"></span>
-        </div>
-        <div class="flex items-center gap-2">
-            <div class="flex gap-1 bg-slate-800 rounded-lg p-0.5">
-                {% for p, label in [('day','24h'),('week','7d'),('month','30d')] %}
-                <button onclick="event.stopPropagation(); setOverviewPeriod('{{ p }}')"
-                    class="period-btn text-xs px-2.5 py-1 rounded-md transition {% if p == 'day' %}bg-indigo-600 text-white{% else %}text-slate-400 hover:text-white{% endif %}"
-                    data-period="{{ p }}">{{ label }}</button>
-                {% endfor %}
-            </div>
-            <span id="overview-chevron" class="text-slate-500 text-xs">▼</span>
-        </div>
-    </button>
-    <div id="overview-panel" class="hidden border-t border-slate-700/50 px-5 py-4">
-        <div id="overview-loading" class="flex items-center justify-center py-8 text-slate-500 text-sm">Loading...</div>
-        <div style="position:relative;height:200px;" id="overview-canvas-wrap" class="hidden"><canvas id="overview-chart"></canvas></div>
-        <div id="overview-empty" class="hidden text-center py-8 text-slate-500 text-sm">No data yet — check back after the first poll.</div>
+<div class="card rounded-2xl mb-5 overflow-hidden" id="overview-card">
+  <button onclick="toggleOverview()"
+    class="w-full flex items-center justify-between px-5 py-3.5 transition-colors text-left hover:bg-white/[0.02]"
+    style="border:none;background:none;cursor:pointer">
+    <div class="flex items-center gap-3">
+      <span class="text-sm font-semibold">📊 Balance Overview</span>
+      <span id="overview-summary" class="text-xs text-muted"></span>
     </div>
+    <div class="flex items-center gap-2">
+      <div class="flex gap-0.5 rounded-lg p-0.5" style="background:rgba(6,10,18,0.7);border:1px solid var(--border)">
+        {% for p, label in [('day','24h'),('week','7d'),('month','30d')] %}
+        <button onclick="event.stopPropagation(); setOverviewPeriod('{{ p }}')"
+          class="period-btn {% if p == 'day' %}active{% endif %}" data-period="{{ p }}">{{ label }}</button>
+        {% endfor %}
+      </div>
+      <span id="overview-chevron" class="text-xs text-muted">▼</span>
+    </div>
+  </button>
+  <div id="overview-panel" class="hidden px-5 pb-5" style="border-top:1px solid var(--border)">
+    <div id="overview-loading" class="flex items-center justify-center py-8 text-sm text-muted">Loading...</div>
+    <div style="position:relative;height:200px;" id="overview-canvas-wrap" class="hidden pt-4"><canvas id="overview-chart"></canvas></div>
+    <div id="overview-empty" class="hidden text-center py-8 text-sm text-muted">No data yet — check back after the first poll.</div>
+  </div>
 </div>
 {% endif %}
 
 {% if cards %}
 {% set koko_cards = cards | selectattr('card_type', 'equalto', 'koko') | list %}
-{% set tz_cards = cards | selectattr('card_type', 'equalto', 'timezone') | list %}
+{% set tz_cards   = cards | selectattr('card_type', 'equalto', 'timezone') | list %}
 
-{% macro tier_badge(tier) %}
-{% if tier %}
-<span class="text-xs px-2 py-0.5 rounded-full font-medium
-    {% if tier == 'Platinum' %}bg-purple-900/60 text-purple-300 border border-purple-700
-    {% elif tier == 'Gold' %}bg-yellow-900/60 text-yellow-300 border border-yellow-700
-    {% elif tier == 'Silver' %}bg-slate-600/60 text-slate-300 border border-slate-500
-    {% else %}bg-orange-900/60 text-orange-300 border border-orange-700{% endif %}">
-    ★ {{ tier }}
-</span>
-{% endif %}
-{% endmacro %}
+{# Tier badge macro #}
+{% macro tier_badge(tier) %}{% if tier %}<span class="badge text-[9px] {% if tier=='Platinum' %}tier-platinum{% elif tier=='Gold' %}tier-gold{% elif tier=='Silver' %}tier-silver{% else %}tier-bronze{% endif %}">★ {{ tier }}</span>{% endif %}{% endmacro %}
 
+<!-- ── Koko Cards ── -->
 {% if koko_cards %}
-<div class="mb-6">
-    <div class="flex items-center gap-2 mb-3">
-        <span class="text-xs font-semibold uppercase tracking-widest text-purple-400">🎮 Koko</span>
-        <div class="flex-1 h-px bg-slate-800"></div>
-    </div>
-    <div class="grid gap-3 md:grid-cols-2">
-    {% for card in koko_cards %}
-    <div class="card rounded-xl p-4 hover:border-purple-800 transition cursor-pointer group relative"
-         onclick="window.location='/cards/{{ card.id }}'">
-        <div class="flex items-start justify-between mb-3">
-            <div>
-                <p class="text-xs text-purple-400 font-medium uppercase tracking-wider mb-0.5">Koko Card</p>
-                <h2 class="font-bold text-white">{{ card.card_label or card.card_number or card.card_token }}</h2>
-                {% if card.card_number and card.card_label %}<p class="text-slate-600 text-xs font-mono">{{ card.card_number }}</p>{% endif %}
-            </div>
-            <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
-                class="opacity-0 group-hover:opacity-100 text-xs text-slate-500 hover:text-white px-2 py-1 border border-slate-700 rounded-lg transition">
-                ↻
-            </button>
+<div class="mb-5">
+  <div class="flex items-center gap-3 mb-3">
+    <span class="text-[10px] font-bold uppercase tracking-widest" style="color:#a78bfa">🎮 Koko</span>
+    <div class="flex-1 h-px" style="background:var(--border)"></div>
+  </div>
+  <div class="grid gap-3 md:grid-cols-2">
+  {% for card in koko_cards %}
+  <div class="card rounded-xl p-4 cursor-pointer group relative transition-all duration-200 hover:border-purple-900/60"
+       style="transition:border-color 0.18s,box-shadow 0.18s"
+       onmouseenter="this.style.boxShadow='0 0 20px rgba(99,102,241,0.14)'"
+       onmouseleave="this.style.boxShadow=''"
+       onclick="window.location='/cards/{{ card.id }}'">
+    <div class="flex items-start justify-between mb-3">
+      <div>
+        <div class="flex items-center gap-1.5 mb-0.5">
+          <span class="text-[9px] font-bold uppercase tracking-wider" style="color:#a78bfa">Koko Card</span>
+          {{ tier_badge(card.tier) }}
         </div>
-        <div class="grid grid-cols-3 gap-2 mb-3">
-            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
-                <p class="text-xs text-slate-500 mb-0.5">Balance</p>
-                <p class="font-bold text-green-400 text-sm">${{ "%.2f"|format(card.cash_balance or 0) }}</p>
-            </div>
-            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
-                <p class="text-xs text-slate-500 mb-0.5">Bonus</p>
-                <p class="font-bold text-yellow-400 text-sm">${{ "%.2f"|format(card.cash_bonus or 0) }}</p>
-            </div>
-            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
-                <p class="text-xs text-slate-500 mb-0.5">Points</p>
-                <p class="font-bold text-purple-400 text-sm">{{ card.points or 0 }}</p>
-            </div>
-        </div>
-        <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5">
-                <span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
-                <span class="text-xs text-slate-600" data-card-ts="{{ card.id }}">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
-            </div>
-            <div class="flex items-center gap-1.5" onclick="event.stopPropagation()">
-                <select onchange="updateInterval({{ card.id }}, this.value)"
-                    class="text-xs bg-slate-800 text-slate-400 border border-slate-700 rounded-lg px-2 py-1">
-                    {% for val, lbl in [(60,'1 min'),(300,'5 min'),(900,'15 min'),(3600,'1 hr'),(86400,'Daily')] %}
-                    <option value="{{ val }}" {% if (card.poll_interval or 60) == val %}selected{% endif %}>{{ lbl }}</option>
-                    {% endfor %}
-                </select>
-                <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-slate-500 hover:text-purple-400 px-2 py-1 border border-slate-700 rounded-lg transition">View</a>
-                <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
-                    <button onclick="return confirm('Remove card?')" class="text-xs text-slate-600 hover:text-red-400 px-2 py-1 border border-slate-700 rounded-lg transition">✕</button>
-                </form>
-            </div>
-        </div>
+        <h2 class="font-semibold text-sm">{{ card.card_label or card.card_number or card.card_token }}</h2>
+        {% if card.card_number and card.card_label %}
+        <p class="font-mono text-[10px] mt-0.5 text-faint">{{ card.card_number }}</p>
+        {% endif %}
+      </div>
+      <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
+        class="btn-ghost opacity-0 group-hover:opacity-100 text-xs px-2 py-1 rounded-lg">↻</button>
     </div>
-    {% endfor %}
+    <div class="grid grid-cols-3 gap-2 mb-3">
+      <div class="stat-box"><div class="label">Balance</div><div class="value" style="color:#4ade80">${{ "%.2f"|format(card.cash_balance or 0) }}</div></div>
+      <div class="stat-box"><div class="label">Bonus</div><div class="value" style="color:#fbbf24">${{ "%.2f"|format(card.cash_bonus or 0) }}</div></div>
+      <div class="stat-box"><div class="label">Points</div><div class="value" style="color:#c4b5fd">{{ card.points or 0 }}</div></div>
     </div>
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-1.5">
+        <span class="pulse-green"></span>
+        <span class="font-mono text-[10px] text-muted" data-card-ts="{{ card.id }}">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
+      </div>
+      <div class="flex items-center gap-1" onclick="event.stopPropagation()">
+        <select onchange="updateInterval({{ card.id }}, this.value)"
+          class="text-[10px] px-2 py-1 rounded-lg font-mono"
+          style="background:rgba(6,10,18,0.7);border:1px solid var(--border);color:var(--text-muted)">
+          {% for val, lbl in [(60,'1 min'),(300,'5 min'),(900,'15 min'),(3600,'1 hr'),(86400,'Daily')] %}
+          <option value="{{ val }}" {% if (card.poll_interval or 60) == val %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+        <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="btn-ghost text-[10px] px-2 py-1 rounded-lg">View</a>
+        <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
+          <button onclick="return confirm('Remove card?')" class="btn-ghost text-[10px] px-2 py-1 rounded-lg text-faint hover:text-danger">✕</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  </div>
 </div>
 {% endif %}
 
+<!-- ── Timezone Cards ── -->
 {% if tz_cards %}
-<div class="mb-6">
-    <div class="flex items-center gap-2 mb-3">
-        <span class="text-xs font-semibold uppercase tracking-widest text-yellow-500">🕹️ Timezone</span>
-        <div class="flex-1 h-px bg-slate-800"></div>
-        {% if tz_session %}
-        <span class="text-xs text-slate-600">Last poll: {{ tz_session.last_poll_at[:16] if tz_session.last_poll_at else 'Never' }}</span>
-        {% if tz_status in ['stale','error','needs_reconnect'] %}
-        {% if tz_status == 'needs_reconnect' %}
-        <a href="/timezone/start" class="text-xs text-red-400 hover:text-red-300 border border-red-900/50 hover:border-red-700 rounded-lg px-2 py-0.5 transition">
-            ⚠️ Reconnect Required
-        </a>
-        {% else %}
-        <button id="tz-reauth-btn" onclick="tzReauth(this)"
-            class="text-xs text-red-400 hover:text-red-300 border border-red-900/50 hover:border-red-700 rounded-lg px-2 py-0.5 transition">
-            ⚠️ {{ tz_status }} — 🔄 Refresh
-        </button>
-        {% endif %}
-        {% endif %}
-        {% endif %}
-    </div>
-    <div class="grid gap-3 md:grid-cols-2">
-    {% for card in tz_cards %}
-    <div class="card rounded-xl p-4 hover:border-yellow-800 transition cursor-pointer group relative"
-         onclick="window.location='/cards/{{ card.id }}'">
-        <div class="flex items-start justify-between mb-3">
-            <div>
-                <div class="flex items-center gap-2 mb-0.5">
-                    <p class="text-xs text-yellow-500 font-medium uppercase tracking-wider">Timezone</p>
-                    {{ tier_badge(card.tier) }}
-                </div>
-                <h2 class="font-bold text-white">{{ card.card_label or card.card_number }}</h2>
-                <p class="text-slate-600 text-xs font-mono">{{ card.card_number }}</p>
-            </div>
-            <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
-                class="opacity-0 group-hover:opacity-100 text-xs text-slate-500 hover:text-white px-2 py-1 border border-slate-700 rounded-lg transition">
-                ↻
-            </button>
+<div class="mb-5">
+  <div class="flex items-center gap-3 mb-3">
+    <span class="text-[10px] font-bold uppercase tracking-widest" style="color:#fbbf24">🕹️ Timezone</span>
+    <div class="flex-1 h-px" style="background:var(--border)"></div>
+    {% if tz_session %}
+    <span class="text-[10px] text-faint">Last poll: {{ tz_session.last_poll_at[:16] if tz_session.last_poll_at else 'Never' }}</span>
+    {% if tz_status in ['stale','error','needs_reconnect'] %}
+    {% if tz_status == 'needs_reconnect' %}
+    <a href="/timezone/start" class="text-[10px] px-2 py-0.5 rounded-lg transition"
+       style="color:#f87171;border:1px solid rgba(239,68,68,0.28)">⚠️ Reconnect</a>
+    {% else %}
+    <button id="tz-reauth-btn" onclick="tzReauth(this)"
+      class="btn-ghost text-[10px] px-2 py-0.5 rounded-lg"
+      style="color:#f87171;border-color:rgba(239,68,68,0.28)">⚠️ {{ tz_status }} — 🔄</button>
+    {% endif %}
+    {% endif %}
+    {% endif %}
+  </div>
+  <div class="grid gap-3 md:grid-cols-2">
+  {% for card in tz_cards %}
+  <div class="card rounded-xl p-4 cursor-pointer group relative transition-all"
+       style="transition:border-color 0.18s,box-shadow 0.18s"
+       onmouseenter="this.style.boxShadow='0 0 20px rgba(245,158,11,0.1)'"
+       onmouseleave="this.style.boxShadow=''"
+       onclick="window.location='/cards/{{ card.id }}'">
+    <div class="flex items-start justify-between mb-3">
+      <div>
+        <div class="flex items-center gap-1.5 mb-0.5">
+          <span class="text-[9px] font-bold uppercase tracking-wider" style="color:#fbbf24">Timezone</span>
+          {{ tier_badge(card.tier) }}
         </div>
-        <div class="grid grid-cols-3 gap-2 mb-3">
-            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
-                <p class="text-xs text-slate-500 mb-0.5">Credits</p>
-                <p class="font-bold text-green-400 text-sm">${{ "%.2f"|format(card.cash_balance or 0) }}</p>
-            </div>
-            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
-                <p class="text-xs text-slate-500 mb-0.5">Bonus</p>
-                <p class="font-bold text-yellow-400 text-sm">${{ "%.2f"|format(card.cash_bonus or 0) }}</p>
-            </div>
-            <div class="bg-slate-800/80 rounded-lg p-2.5 text-center">
-                <p class="text-xs text-slate-500 mb-0.5">e-Tickets</p>
-                <p class="font-bold text-orange-400 text-sm">{{ card.points or 0 }}</p>
-            </div>
-        </div>
-        <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5">
-                <span class="w-1.5 h-1.5 rounded-full {% if tz_status == 'connected' %}bg-yellow-500 animate-pulse{% elif tz_status in ['error','needs_reconnect'] %}bg-red-500{% else %}bg-slate-600{% endif %}"></span>
-                <span class="text-xs {% if tz_status in ['error','needs_reconnect'] %}text-red-500{% else %}text-slate-600{% endif %}">
-                    {{ card.last_updated[:16] if card.last_updated else 'Pending...' }}
-                </span>
-            </div>
-            <div class="flex items-center gap-1.5" onclick="event.stopPropagation()">
-                <select onchange="updateInterval({{ card.id }}, this.value)"
-                    class="text-xs bg-slate-800 text-slate-400 border border-slate-700 rounded-lg px-2 py-1">
-                    {% for val, lbl in [(300,'5 min'),(900,'15 min'),(1800,'30 min'),(3600,'1 hr'),(86400,'Daily')] %}
-                    <option value="{{ val }}" {% if (card.poll_interval or 900) == val %}selected{% endif %}>{{ lbl }}</option>
-                    {% endfor %}
-                </select>
-                <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="text-xs text-slate-500 hover:text-yellow-400 px-2 py-1 border border-slate-700 rounded-lg transition">View</a>
-                <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
-                    <button onclick="return confirm('Remove card?')" class="text-xs text-slate-600 hover:text-red-400 px-2 py-1 border border-slate-700 rounded-lg transition">✕</button>
-                </form>
-            </div>
-        </div>
+        <h2 class="font-semibold text-sm">{{ card.card_label or card.card_number }}</h2>
+        <p class="font-mono text-[10px] mt-0.5 text-faint">{{ card.card_number }}</p>
+      </div>
+      <button onclick="event.stopPropagation(); forcePoll({{ card.id }}, this)"
+        class="btn-ghost opacity-0 group-hover:opacity-100 text-xs px-2 py-1 rounded-lg">↻</button>
     </div>
-    {% endfor %}
+    <div class="grid grid-cols-3 gap-2 mb-3">
+      <div class="stat-box"><div class="label">Credits</div><div class="value" style="color:#4ade80">${{ "%.2f"|format(card.cash_balance or 0) }}</div></div>
+      <div class="stat-box"><div class="label">Bonus</div><div class="value" style="color:#fbbf24">${{ "%.2f"|format(card.cash_bonus or 0) }}</div></div>
+      <div class="stat-box"><div class="label">e-Tickets</div><div class="value" style="color:#fb923c">{{ card.points or 0 }}</div></div>
     </div>
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-1.5">
+        <span class="{% if tz_status == 'connected' %}pulse-yellow{% elif tz_status in ['error','needs_reconnect'] %}pulse-red{% else %}pulse-red{% endif %}"></span>
+        <span class="font-mono text-[10px] {% if tz_status in ['error','needs_reconnect'] %}text-danger{% else %}text-muted{% endif %}">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
+      </div>
+      <div class="flex items-center gap-1" onclick="event.stopPropagation()">
+        <select onchange="updateInterval({{ card.id }}, this.value)"
+          class="text-[10px] px-2 py-1 rounded-lg font-mono"
+          style="background:rgba(6,10,18,0.7);border:1px solid var(--border);color:var(--text-muted)">
+          {% for val, lbl in [(300,'5 min'),(900,'15 min'),(1800,'30 min'),(3600,'1 hr'),(86400,'Daily')] %}
+          <option value="{{ val }}" {% if (card.poll_interval or 900) == val %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+        <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="btn-ghost text-[10px] px-2 py-1 rounded-lg">View</a>
+        <form method="POST" action="/cards/{{ card.id }}/delete" onclick="event.stopPropagation()">
+          <button onclick="return confirm('Remove card?')" class="btn-ghost text-[10px] px-2 py-1 rounded-lg text-faint hover:text-danger">✕</button>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  </div>
 </div>
 {% endif %}
 
 {% else %}
+<!-- Empty state -->
 <div class="card rounded-2xl p-16 text-center">
-    <div class="text-5xl mb-4">🎮</div>
-    <h2 class="text-lg font-bold text-white mb-2">No cards yet</h2>
-    <p class="text-slate-500 text-sm mb-6">Add a Koko card by scanning its QR code, or connect your Timezone account</p>
-    <div class="flex gap-3 justify-center flex-wrap">
-        <button onclick="document.getElementById('add-koko-modal').classList.remove('hidden'); setTimeout(startScanner,100)"
-            class="btn-primary px-5 py-2 rounded-lg text-sm font-medium text-white">+ Add Koko Card</button>
-        <a href="/timezone/start" class="px-5 py-2 rounded-lg text-sm font-medium border border-yellow-800 text-yellow-500 hover:bg-yellow-900/30 transition">🕹️ Connect Timezone</a>
-    </div>
+  <div class="text-5xl mb-4">🎮</div>
+  <h2 class="font-display font-bold text-lg mb-2">No cards yet</h2>
+  <p class="text-sm text-muted mb-6">Add a Koko card by scanning its QR code, or connect your Timezone account</p>
+  <div class="flex gap-3 justify-center flex-wrap">
+    <button onclick="document.getElementById('add-koko-modal').classList.remove('hidden'); setTimeout(startScanner,100)"
+      class="btn-primary px-5 py-2.5 rounded-xl text-sm">+ Add Koko Card</button>
+    <a href="/timezone/start" class="btn-ghost px-5 py-2.5 rounded-xl text-sm"
+       style="color:#fbbf24;border-color:rgba(245,158,11,0.28)">🕹️ Connect Timezone</a>
+  </div>
 </div>
 {% endif %}
 
-<!-- Add Koko Modal -->
-<div id="add-koko-modal" class="hidden fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-    <div class="card rounded-2xl p-6 w-full max-w-sm">
-        <div class="flex items-center justify-between mb-4">
-            <h2 class="text-base font-bold text-white">Add Koko Card</h2>
-            <button onclick="closeModal()" class="text-slate-500 hover:text-white transition">✕</button>
-        </div>
-        <div class="flex gap-1 mb-4 bg-slate-800 rounded-xl p-1">
-            <button onclick="setTab('scan')" id="tab-scan" class="flex-1 py-2 rounded-lg text-sm font-medium transition tab-active">📷 Scan QR</button>
-            <button onclick="setTab('manual')" id="tab-manual" class="flex-1 py-2 rounded-lg text-sm font-medium transition text-slate-400">✏️ Manual</button>
-        </div>
-
-        <!-- Scan tab -->
-        <div id="tab-content-scan">
-            <div class="relative bg-black rounded-xl overflow-hidden mb-3" style="height:220px;">
-                <video id="scanner-video" class="w-full h-full object-cover" playsinline muted></video>
-                <canvas id="scanner-canvas" class="hidden"></canvas>
-                <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <div class="w-40 h-40 relative">
-                        <div class="absolute top-0 left-0 w-5 h-5 border-t-4 border-l-4 border-indigo-400 rounded-tl"></div>
-                        <div class="absolute top-0 right-0 w-5 h-5 border-t-4 border-r-4 border-indigo-400 rounded-tr"></div>
-                        <div class="absolute bottom-0 left-0 w-5 h-5 border-b-4 border-l-4 border-indigo-400 rounded-bl"></div>
-                        <div class="absolute bottom-0 right-0 w-5 h-5 border-b-4 border-r-4 border-indigo-400 rounded-br"></div>
-                    </div>
-                </div>
-                <p id="scanner-status" class="absolute bottom-2 left-0 right-0 text-center text-xs text-white/50">Point at QR code on card</p>
-            </div>
-            <div id="scan-result" class="hidden bg-green-900/20 border border-green-800 rounded-xl p-3 mb-3">
-                <p class="text-xs text-green-400 mb-0.5">✅ Card found!</p>
-                <p class="font-mono text-white text-xs" id="scan-token-display"></p>
-                <p class="text-xs text-slate-400 mt-0.5" id="scan-balance-display"></p>
-            </div>
-            <div id="scan-error" class="hidden bg-red-900/20 border border-red-800 rounded-xl p-3 mb-3 text-xs text-red-300"></div>
-            <input id="scan-label" type="text" class="input-field w-full px-3 py-2 rounded-lg text-sm mb-2" placeholder="Nickname (optional)">
-            <button onclick="addScannedCard()" id="scan-add-btn" disabled
-                class="w-full py-2.5 rounded-lg text-sm font-medium text-slate-500 bg-slate-800 cursor-not-allowed transition">Scan a card first</button>
-        </div>
-
-        <!-- Manual tab -->
-        <div id="tab-content-manual" class="hidden">
-            <form method="POST" action="/cards/add" class="space-y-3">
-                <div>
-                    <label class="block text-xs text-slate-400 mb-1">Card Token <span class="text-red-400">*</span></label>
-                    <input name="card_token" type="text" required class="input-field w-full px-3 py-2 rounded-lg text-sm font-mono" placeholder="e.g. 1ag9ukYM">
-                    <p class="text-xs text-slate-600 mt-1">...BalanceMobile.aspx?i=<span class="text-yellow-500">TOKEN</span></p>
-                </div>
-                <input name="card_label" type="text" class="input-field w-full px-3 py-2 rounded-lg text-sm" placeholder="Nickname (optional)">
-                <select name="poll_interval" class="input-field w-full px-3 py-2 rounded-lg text-sm">
-                    <option value="60">Every 1 minute</option>
-                    <option value="300">Every 5 minutes</option>
-                    <option value="900">Every 15 minutes</option>
-                    <option value="3600">Hourly</option>
-                    <option value="86400">Daily</option>
-                </select>
-                <div class="flex gap-2 pt-1">
-                    <button type="button" onclick="closeModal()" class="flex-1 py-2 rounded-lg text-sm border border-slate-700 text-slate-400">Cancel</button>
-                    <button type="submit" class="flex-1 btn-primary py-2 rounded-lg text-sm font-medium text-white">Add Card</button>
-                </div>
-            </form>
-        </div>
+<!-- ── Add Koko Modal ── -->
+<div id="add-koko-modal" class="modal-overlay hidden">
+  <div class="modal-box p-6">
+    <div class="flex items-center justify-between mb-5">
+      <h2 class="font-display font-bold text-base">Add Koko Card</h2>
+      <button onclick="closeModal()" class="btn-ghost p-1.5 rounded-lg">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+      </button>
     </div>
+    <div class="flex gap-1 mb-5 rounded-xl p-1" style="background:rgba(6,10,18,0.7);border:1px solid var(--border)">
+      <button onclick="setTab('scan')" id="tab-scan" class="flex-1 py-2 rounded-lg text-sm font-semibold transition tab-active">📷 Scan QR</button>
+      <button onclick="setTab('manual')" id="tab-manual" class="flex-1 py-2 rounded-lg text-sm font-semibold transition text-muted">✏️ Manual</button>
+    </div>
+
+    <div id="tab-content-scan">
+      <div class="relative rounded-xl overflow-hidden mb-3" style="height:220px;background:#000">
+        <video id="scanner-video" class="w-full h-full object-cover" playsinline muted></video>
+        <canvas id="scanner-canvas" class="hidden"></canvas>
+        <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div class="w-40 h-40 relative">
+            <div class="absolute top-0 left-0 w-5 h-5 border-t-[3px] border-l-[3px] rounded-tl" style="border-color:var(--primary)"></div>
+            <div class="absolute top-0 right-0 w-5 h-5 border-t-[3px] border-r-[3px] rounded-tr" style="border-color:var(--primary)"></div>
+            <div class="absolute bottom-0 left-0 w-5 h-5 border-b-[3px] border-l-[3px] rounded-bl" style="border-color:var(--primary)"></div>
+            <div class="absolute bottom-0 right-0 w-5 h-5 border-b-[3px] border-r-[3px] rounded-br" style="border-color:var(--primary)"></div>
+          </div>
+        </div>
+        <p id="scanner-status" class="absolute bottom-2 left-0 right-0 text-center text-xs" style="color:rgba(255,255,255,0.35)">Point at QR code on card</p>
+      </div>
+      <div id="scan-result" class="hidden rounded-xl p-3 mb-3"
+           style="background:rgba(34,197,94,0.07);border:1px solid rgba(34,197,94,0.22)">
+        <p class="text-xs font-semibold mb-0.5" style="color:#4ade80">✅ Card found!</p>
+        <p class="font-mono text-xs" id="scan-token-display"></p>
+        <p class="text-xs mt-0.5 text-muted" id="scan-balance-display"></p>
+      </div>
+      <div id="scan-error" class="hidden rounded-xl p-3 mb-3 text-xs"
+           style="background:rgba(239,68,68,0.07);border:1px solid rgba(239,68,68,0.22);color:#f87171"></div>
+      <input id="scan-label" type="text" class="input-field w-full px-3 py-2.5 rounded-xl text-sm mb-3" placeholder="Nickname (optional)">
+      <button onclick="addScannedCard()" id="scan-add-btn" disabled
+        class="w-full py-2.5 rounded-xl text-sm font-semibold transition"
+        style="background:var(--bg-raised);color:var(--text-muted);border:1px solid var(--border);cursor:not-allowed">
+        Scan a card first
+      </button>
+    </div>
+
+    <div id="tab-content-manual" class="hidden">
+      <form method="POST" action="/cards/add" class="space-y-3">
+        <div>
+          <label class="block text-xs font-semibold uppercase tracking-wider mb-2 text-muted">Card Token <span class="text-danger">*</span></label>
+          <input name="card_token" type="text" required class="input-field w-full px-3 py-2.5 rounded-xl text-sm font-mono" placeholder="e.g. 1ag9ukYM">
+          <p class="text-[10px] mt-1 text-faint">...BalanceMobile.aspx?i=<span style="color:#fbbf24">TOKEN</span></p>
+        </div>
+        <input name="card_label" type="text" class="input-field w-full px-3 py-2.5 rounded-xl text-sm" placeholder="Nickname (optional)">
+        <select name="poll_interval" class="input-field w-full px-3 py-2.5 rounded-xl text-sm">
+          <option value="60">Every 1 minute</option>
+          <option value="300">Every 5 minutes</option>
+          <option value="900">Every 15 minutes</option>
+          <option value="3600">Hourly</option>
+          <option value="86400">Daily</option>
+        </select>
+        <div class="flex gap-2 pt-1">
+          <button type="button" onclick="closeModal()" class="flex-1 btn-ghost py-2.5 rounded-xl text-sm">Cancel</button>
+          <button type="submit" class="flex-1 btn-primary py-2.5 rounded-xl text-sm">Add Card</button>
+        </div>
+      </form>
+    </div>
+  </div>
 </div>
 
 <script src="/static/js/jsQR.js"></script>
-<style>.tab-active { background: #4f46e5; color: white; }</style>
 <script>
-// ── Overview graph ────────────────────────────────────────────────────────────
+// ── Overview ──────────────────────────────────────────────────────────────────
 let overviewChart = null, overviewOpen = false, overviewPeriod = 'day';
 const COLORS = ['#818cf8','#fbbf24','#34d399','#f87171','#a78bfa','#38bdf8'];
 
 function toggleOverview() {
-    overviewOpen = !overviewOpen;
-    document.getElementById('overview-panel').classList.toggle('hidden', !overviewOpen);
-    document.getElementById('overview-chevron').textContent = overviewOpen ? '▲' : '▼';
-    if (overviewOpen && !overviewChart) loadOverview();
+  overviewOpen = !overviewOpen;
+  document.getElementById('overview-panel').classList.toggle('hidden', !overviewOpen);
+  document.getElementById('overview-chevron').textContent = overviewOpen ? '▲' : '▼';
+  if (overviewOpen && !overviewChart) loadOverview();
 }
-
 function setOverviewPeriod(p) {
-    overviewPeriod = p;
-    document.querySelectorAll('.period-btn').forEach(b => {
-        const active = b.dataset.period === p;
-        b.className = 'period-btn text-xs px-2.5 py-1 rounded-md transition ' + (active ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-white');
-    });
-    if (overviewOpen) loadOverview();
+  overviewPeriod = p;
+  document.querySelectorAll('.period-btn').forEach(b => b.classList.toggle('active', b.dataset.period === p));
+  if (overviewOpen) loadOverview();
 }
-
 async function loadOverview() {
-    document.getElementById('overview-loading').classList.remove('hidden');
-    document.getElementById('overview-chart').classList.add('hidden');
-    document.getElementById('overview-empty').classList.add('hidden');
-    try {
-        const resp = await fetch(`/api/dashboard/overview?period=${overviewPeriod}`);
-        const series = await resp.json();
-        document.getElementById('overview-loading').classList.add('hidden');
-
-        const hasData = series.some(s => s.data.length > 1);
-        if (!hasData) { document.getElementById('overview-empty').classList.remove('hidden'); return; }
-
-        const total = series.reduce((s, c) => s + (c.data.length ? c.data[c.data.length-1].total : 0), 0);
-        document.getElementById('overview-summary').textContent = `Total $${total.toFixed(2)} · ${series.length} card(s)`;
-
-        document.getElementById('overview-canvas-wrap').classList.remove('hidden');
-        const canvas = document.getElementById('overview-chart');
-        if (overviewChart) overviewChart.destroy();
-
-        // Build shared label set from all series timestamps
-        const allTimes = [...new Set(series.flatMap(s => s.data.map(d => d.t)))].sort();
-        const sharedLabels = allTimes.map(t => {
-            const d = new Date(t.replace(' ','T') + 'Z');
-            return d.toLocaleString('en-AU', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
-        });
-
-        overviewChart = new Chart(canvas.getContext('2d'), {
-            type: 'line',
-            data: {
-                labels: sharedLabels,
-                datasets: series.filter(s => s.data.length > 0).map((s, i) => {
-                    // Map each series data to the shared label index
-                    const timeMap = {};
-                    s.data.forEach(d => { timeMap[d.t] = d.total; });
-                    const values = allTimes.map(t => timeMap[t] !== undefined ? timeMap[t] : null);
-                    return {
-                        label: s.label,
-                        data: values,
-                        borderColor: COLORS[i % COLORS.length],
-                        backgroundColor: COLORS[i % COLORS.length] + '18',
-                        tension: 0.3, fill: false,
-                        pointRadius: allTimes.length > 60 ? 0 : 2,
-                        borderWidth: 2, spanGaps: true,
-                    };
-                })
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                interaction: { mode: 'index', intersect: false },
-                plugins: {
-                    legend: { labels: { color: '#64748b', boxWidth: 10, font: { size: 11 } } },
-                    tooltip: { backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
-                               titleColor: '#e2e8f0', bodyColor: '#94a3b8',
-                               callbacks: { label: ctx => `${ctx.dataset.label}: $${(ctx.parsed.y||0).toFixed(2)}` } }
-                },
-                scales: {
-                    x: { ticks: { color: '#475569', maxTicksLimit: 7, font: { size: 10 }, maxRotation: 0 }, grid: { color: '#1e293b' } },
-                    y: { ticks: { color: '#475569', callback: v => '$'+(v||0).toFixed(0), font: { size: 10 } }, grid: { color: '#1e293b' } }
-                }
-            }
-        });
-    } catch(e) {
-        document.getElementById('overview-loading').textContent = 'Failed to load chart';
-        console.error(e);
-    }
-}
-
-// ── Poll interval ─────────────────────────────────────────────────────────────
-async function updateInterval(cardId, interval) {
-    const form = new FormData();
-    form.append('poll_interval', interval);
-    await fetch(`/cards/${cardId}/poll-interval`, { method: 'POST', body: form });
-}
-
-// ── Force poll ────────────────────────────────────────────────────────────────
-async function tzReauth(btn) {
-    const orig = btn.textContent;
-    btn.textContent = '⟳ Refreshing...'; btn.disabled = true;
-    try {
-        const r = await fetch('/api/timezone/reauth', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
-        const d = await r.json();
-        if (d.success) {
-            btn.textContent = '✅ Refreshed!';
-            btn.className = 'text-xs text-green-400 border border-green-900/50 rounded-lg px-2 py-0.5';
-            setTimeout(() => location.reload(), 1500);
-        } else if (d.needs_reconnect) {
-            btn.textContent = '⚠️ Session expired — reconnecting...';
-            setTimeout(() => window.location.href = '/timezone/start', 1500);
-        } else {
-            btn.textContent = '❌ ' + (d.error || 'Failed — reconnect via bookmarklet');
-            btn.style.maxWidth = '280px';
-            setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 4000);
+  document.getElementById('overview-loading').classList.remove('hidden');
+  document.getElementById('overview-canvas-wrap').classList.add('hidden');
+  document.getElementById('overview-empty').classList.add('hidden');
+  try {
+    const resp = await fetch(`/api/dashboard/overview?period=${overviewPeriod}`);
+    const series = await resp.json();
+    document.getElementById('overview-loading').classList.add('hidden');
+    const hasData = series.some(s => s.data.length > 1);
+    if (!hasData) { document.getElementById('overview-empty').classList.remove('hidden'); return; }
+    const total = series.reduce((s,c) => s + (c.data.length ? c.data[c.data.length-1].total : 0), 0);
+    document.getElementById('overview-summary').textContent = `Total $${total.toFixed(2)} · ${series.length} card(s)`;
+    document.getElementById('overview-canvas-wrap').classList.remove('hidden');
+    const canvas = document.getElementById('overview-chart');
+    if (overviewChart) overviewChart.destroy();
+    const allTimes = [...new Set(series.flatMap(s => s.data.map(d => d.t)))].sort();
+    const sharedLabels = allTimes.map(t => {
+      const d = new Date(t.replace(' ','T')+'Z');
+      return d.toLocaleString('en-AU',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+    });
+    overviewChart = new Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: sharedLabels,
+        datasets: series.filter(s => s.data.length>0).map((s,i) => {
+          const tm = {}; s.data.forEach(d => { tm[d.t] = d.total; });
+          return { label:s.label, data:allTimes.map(t=>tm[t]??null),
+            borderColor:COLORS[i%COLORS.length], backgroundColor:COLORS[i%COLORS.length]+'18',
+            tension:0.3, fill:false, pointRadius:allTimes.length>60?0:2, borderWidth:2, spanGaps:true };
+        })
+      },
+      options: { responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+        plugins: {
+          legend: { labels:{color:'#5f7089',boxWidth:10,font:{size:11}} },
+          tooltip: { backgroundColor:'#0c1221', borderColor:'rgba(99,102,241,0.2)', borderWidth:1,
+            titleColor:'#dde4ef', bodyColor:'#5f7089',
+            callbacks:{label:ctx=>`${ctx.dataset.label}: $${(ctx.parsed.y||0).toFixed(2)}`} }
+        },
+        scales: {
+          x: { ticks:{color:'#3d526b',maxTicksLimit:7,font:{size:10},maxRotation:0}, grid:{color:'rgba(255,255,255,0.03)'} },
+          y: { ticks:{color:'#3d526b',callback:v=>'$'+(v||0).toFixed(0),font:{size:10}}, grid:{color:'rgba(255,255,255,0.03)'} }
         }
-    } catch(e) { btn.textContent = orig; btn.disabled = false; }
+      }
+    });
+  } catch(e) { document.getElementById('overview-loading').textContent = 'Failed to load chart'; }
+}
+
+async function updateInterval(cardId, interval) {
+  const form = new FormData(); form.append('poll_interval', interval);
+  await fetch(`/cards/${cardId}/poll-interval`, {method:'POST',body:form});
+}
+
+async function tzReauth(btn) {
+  const orig = btn.textContent; btn.textContent = '⟳'; btn.disabled = true;
+  try {
+    const r = await fetch('/api/timezone/reauth',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    const d = await r.json();
+    if (d.success) { btn.textContent='✅'; setTimeout(()=>location.reload(),1500); }
+    else if (d.needs_reconnect) { btn.textContent='⚠️'; setTimeout(()=>window.location.href='/timezone/start',1500); }
+    else { btn.textContent='❌'; setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},3000); }
+  } catch(e) { btn.textContent=orig; btn.disabled=false; }
 }
 
 async function forcePoll(cardId, btn) {
-    const orig = btn.textContent;
-    btn.textContent = '⟳'; btn.disabled = true;
-    try {
-        const resp = await fetch(`/cards/${cardId}/force-poll`, { method: 'POST' });
-        const r = await resp.json();
-        if (r.success) {
-            btn.textContent = '✓';
-            // Update timestamp using data-card-ts attribute
-            const tsEl = document.querySelector(`[data-card-ts="${cardId}"]`);
-            if (tsEl && r.last_updated) tsEl.textContent = r.last_updated;
-            // Update balances if returned
-            if (r.data) {
-                const cardEl = btn.closest('[class*="card"], [class*="rounded"]');
-                if (cardEl) {
-                    const balEl = cardEl.querySelector('.text-green-400');
-                    const bonEl = cardEl.querySelector('.text-yellow-400');
-                    if (balEl) balEl.textContent = '$' + (r.data.cash_balance || 0).toFixed(2);
-                    if (bonEl) bonEl.textContent = '$' + (r.data.cash_bonus || 0).toFixed(2);
-                }
-            }
-        } else {
-            btn.textContent = '✗';
-        }
-        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
-    } catch(e) { btn.textContent = orig; btn.disabled = false; }
+  const orig = btn.textContent; btn.textContent='⟳'; btn.disabled=true;
+  try {
+    const resp = await fetch(`/cards/${cardId}/force-poll`,{method:'POST'});
+    const r = await resp.json();
+    if (r.success) {
+      btn.textContent='✓';
+      const ts = document.querySelector(`[data-card-ts="${cardId}"]`);
+      if (ts && r.last_updated) ts.textContent = r.last_updated;
+    } else { btn.textContent='✗'; }
+    setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},2500);
+  } catch(e) { btn.textContent=orig; btn.disabled=false; }
 }
 
 // ── QR Scanner ────────────────────────────────────────────────────────────────
-let scannerStream = null, scannerInterval = null, scannedToken = null;
-
+let scannerStream=null, scannerInterval=null, scannedToken=null;
 function closeModal() {
-    document.getElementById('add-koko-modal').classList.add('hidden');
-    stopScanner();
-    document.getElementById('scan-result').classList.add('hidden');
-    document.getElementById('scan-error').classList.add('hidden');
-    scannedToken = null;
+  document.getElementById('add-koko-modal').classList.add('hidden'); stopScanner();
+  document.getElementById('scan-result').classList.add('hidden');
+  document.getElementById('scan-error').classList.add('hidden'); scannedToken=null;
 }
 function setTab(tab) {
-    ['scan','manual'].forEach(t => {
-        document.getElementById(`tab-content-${t}`).classList.toggle('hidden', t !== tab);
-        document.getElementById(`tab-${t}`).className = `flex-1 py-2 rounded-lg text-sm font-medium transition ${t === tab ? 'tab-active' : 'text-slate-400'}`;
-    });
-    if (tab === 'scan') startScanner(); else stopScanner();
+  ['scan','manual'].forEach(t => {
+    document.getElementById(`tab-content-${t}`).classList.toggle('hidden', t!==tab);
+    const btn = document.getElementById(`tab-${t}`);
+    btn.classList.toggle('tab-active', t===tab);
+    btn.style.color = t===tab ? '' : 'var(--text-muted)';
+  });
+  if (tab==='scan') startScanner(); else stopScanner();
 }
 function startScanner() {
-    if (scannerStream) return;
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
-        .then(stream => {
-            scannerStream = stream;
-            const v = document.getElementById('scanner-video');
-            v.srcObject = stream; v.play();
-            scannerInterval = setInterval(scanFrame, 250);
-        }).catch(() => {
-            document.getElementById('scanner-status').textContent = 'Camera denied — use manual tab';
-        });
+  if (scannerStream) return;
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false})
+    .then(stream => {
+      scannerStream=stream;
+      const v=document.getElementById('scanner-video'); v.srcObject=stream; v.play();
+      scannerInterval=setInterval(scanFrame,250);
+    }).catch(()=>{ document.getElementById('scanner-status').textContent='Camera denied — use manual tab'; });
 }
 function stopScanner() {
-    clearInterval(scannerInterval); scannerInterval = null;
-    if (scannerStream) { scannerStream.getTracks().forEach(t => t.stop()); scannerStream = null; }
+  clearInterval(scannerInterval); scannerInterval=null;
+  if (scannerStream) { scannerStream.getTracks().forEach(t=>t.stop()); scannerStream=null; }
 }
 function scanFrame() {
-    const v = document.getElementById('scanner-video');
-    if (v.readyState !== v.HAVE_ENOUGH_DATA) return;
-    const c = document.getElementById('scanner-canvas');
-    c.width = v.videoWidth; c.height = v.videoHeight;
-    const ctx = c.getContext('2d'); ctx.drawImage(v, 0, 0);
-    const code = jsQR(ctx.getImageData(0, 0, c.width, c.height).data, c.width, c.height);
-    if (code && code.data) {
-        const url = code.data;
-        if (url.toLowerCase().includes('icardinc.net') || url.toLowerCase().includes('kokoamusement') || url.toLowerCase().includes('balancemobile')) {
-            stopScanner();
-            document.getElementById('scanner-status').textContent = 'Found! Fetching...';
-            resolveQR(url);
-        }
+  const v=document.getElementById('scanner-video');
+  if (v.readyState!==v.HAVE_ENOUGH_DATA) return;
+  const c=document.getElementById('scanner-canvas'); c.width=v.videoWidth; c.height=v.videoHeight;
+  const ctx=c.getContext('2d'); ctx.drawImage(v,0,0);
+  const code=jsQR(ctx.getImageData(0,0,c.width,c.height).data,c.width,c.height);
+  if (code&&code.data) {
+    const url=code.data;
+    if (url.toLowerCase().includes('icardinc.net')||url.toLowerCase().includes('kokoamusement')||url.toLowerCase().includes('balancemobile')) {
+      stopScanner(); document.getElementById('scanner-status').textContent='Found! Fetching...'; resolveQR(url);
     }
+  }
 }
 async function resolveQR(url) {
-    document.getElementById('scan-error').classList.add('hidden');
-    try {
-        const resp = await fetch('/api/cards/resolve-qr', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url}) });
-        const r = await resp.json();
-        if (r.success) {
-            scannedToken = r.token;
-            document.getElementById('scan-token-display').textContent = r.token;
-            const b = r.balance;
-            document.getElementById('scan-balance-display').textContent =
-                `$${(b.cash_balance||0).toFixed(2)} + $${(b.cash_bonus||0).toFixed(2)} bonus · ${b.points||0} pts`;
-            document.getElementById('scan-result').classList.remove('hidden');
-            const btn = document.getElementById('scan-add-btn');
-            btn.disabled = false;
-            btn.className = 'w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white transition';
-            btn.textContent = '+ Add Card';
-        } else {
-            document.getElementById('scan-error').textContent = r.error || 'Could not read card';
-            document.getElementById('scan-error').classList.remove('hidden');
-            setTimeout(startScanner, 2000);
-        }
-    } catch(e) {
-        document.getElementById('scan-error').textContent = e.message;
-        document.getElementById('scan-error').classList.remove('hidden');
-        setTimeout(startScanner, 2000);
+  document.getElementById('scan-error').classList.add('hidden');
+  try {
+    const resp=await fetch('/api/cards/resolve-qr',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+    const r=await resp.json();
+    if (r.success) {
+      scannedToken=r.token;
+      document.getElementById('scan-token-display').textContent=r.token;
+      const b=r.balance;
+      document.getElementById('scan-balance-display').textContent=`$${(b.cash_balance||0).toFixed(2)} + $${(b.cash_bonus||0).toFixed(2)} bonus · ${b.points||0} pts`;
+      document.getElementById('scan-result').classList.remove('hidden');
+      const btn=document.getElementById('scan-add-btn');
+      btn.disabled=false;
+      btn.className='w-full btn-primary py-2.5 rounded-xl text-sm font-semibold transition';
+      btn.style.cssText='';
+      btn.textContent='+ Add Card';
+    } else {
+      document.getElementById('scan-error').textContent=r.error||'Could not read card';
+      document.getElementById('scan-error').classList.remove('hidden');
+      setTimeout(startScanner,2000);
     }
+  } catch(e) { document.getElementById('scan-error').textContent=e.message; document.getElementById('scan-error').classList.remove('hidden'); setTimeout(startScanner,2000); }
 }
 function addScannedCard() {
-    if (!scannedToken) return;
-    const form = document.createElement('form');
-    form.method = 'POST'; form.action = '/cards/add';
-    [['card_token', scannedToken], ['card_label', document.getElementById('scan-label').value.trim()], ['poll_interval','60']].forEach(([n,v]) => {
-        const i = document.createElement('input'); i.type='hidden'; i.name=n; i.value=v;
-        form.appendChild(i);
-    });
-    document.body.appendChild(form); form.submit();
+  if (!scannedToken) return;
+  const form=document.createElement('form'); form.method='POST'; form.action='/cards/add';
+  [['card_token',scannedToken],['card_label',document.getElementById('scan-label').value.trim()],['poll_interval','60']].forEach(([n,v])=>{
+    const i=document.createElement('input'); i.type='hidden'; i.name=n; i.value=v; form.appendChild(i);
+  });
+  document.body.appendChild(form); form.submit();
 }
-
-// Load Chart.js only when needed
 function ensureChartJS(cb) {
-    if (typeof Chart !== 'undefined') return cb();
-    const s = document.createElement('script');
-    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js';
-    s.onload = cb;
-    document.head.appendChild(s);
+  if (typeof Chart!=='undefined') return cb();
+  const s=document.createElement('script');
+  s.src='https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js'; s.onload=cb;
+  document.head.appendChild(s);
 }
-
-// Override toggleOverview to lazy-load Chart.js
-const _toggleOverview = toggleOverview;
-window.toggleOverview = function() {
-    ensureChartJS(_toggleOverview);
-};
+const _toggleOverview=toggleOverview;
+window.toggleOverview=function(){ensureChartJS(_toggleOverview);};
 </script>
 {% endblock %}
