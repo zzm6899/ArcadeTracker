@@ -190,7 +190,7 @@ def card_emoji(ctype):
     return '🕹️' if ctype == 'timezone' else '🎮'
 
 def run_sync(fn, *args):
-    return asyncio.get_event_loop().run_in_executor(None, fn, *args)
+    return asyncio.to_thread(fn, *args)
 
 # ─── Bot ──────────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -234,13 +234,17 @@ STATUS_TEMPLATES = [
 @tasks.loop(seconds=45)
 async def cycle_status():
     try:
-        stats = await asyncio.get_event_loop().run_in_executor(None, db_get_stats_for_status)
+        stats = await asyncio.to_thread(db_get_stats_for_status)
         tmpl = STATUS_TEMPLATES[bot._status_idx % len(STATUS_TEMPLATES)]
         atype, name = tmpl(stats)
         await bot.change_presence(activity=discord.Activity(type=atype, name=name))
         bot._status_idx += 1
     except Exception as e:
         print(f"[Bot] Status error: {e}")
+
+@cycle_status.before_loop
+async def before_cycle_status():
+    await bot.wait_until_ready()
 
 BalanceBot.cycle_status = cycle_status
 
@@ -266,7 +270,7 @@ async def cmd_cards(interaction: discord.Interaction):
         await interaction.response.send_message("No cards found.", ephemeral=ephem); return
 
     # Get all-time spending for each card
-    alltime = await asyncio.get_event_loop().run_in_executor(None, db_get_spent_alltime, user['id'])
+    alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
     alltime_map = {r['label']: r['spent'] for r in alltime}
 
     embed = discord.Embed(title=f"🎮 {user['username']}'s Cards", color=0x6366f1)
@@ -321,11 +325,11 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
     label_map = {'day': 'last 24h', 'week': 'last 7 days', 'month': 'last 30 days', 'all': 'all time'}
 
     if period == 'all':
-        results = await asyncio.get_event_loop().run_in_executor(None, db_get_spent_alltime, user['id'])
+        results = await asyncio.to_thread(db_get_spent_alltime, user['id'])
     else:
         days_map = {'day': 1, 'week': 7, 'month': 30}
         days = days_map.get(period, 1)
-        results = await asyncio.get_event_loop().run_in_executor(None, db_get_spent, user['id'], days)
+        results = await asyncio.to_thread(db_get_spent, user['id'], days)
 
     if not results:
         await interaction.response.send_message("No spending data available.", ephemeral=ephem); return
@@ -368,12 +372,12 @@ async def cmd_refresh(interaction: discord.Interaction):
         try:
             data = None
             if card['card_type'] == 'koko':
-                data = await asyncio.get_event_loop().run_in_executor(None, fetch_koko_balance, card['card_token'])
+                data = await asyncio.to_thread(fetch_koko_balance, card['card_token'])
             else:
                 tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
                 if tzs:
-                    guest = await asyncio.get_event_loop().run_in_executor(
-                        None, fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
+                    guest = await asyncio.to_thread(
+                        fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
                     )
                     if guest:
                         for c in guest.get('cards', []):
@@ -400,9 +404,9 @@ async def cmd_leaderboard(interaction: discord.Interaction):
             ephemeral=True
         )
         return
-    user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
+    user = await asyncio.to_thread(db_get_user, interaction.user.id)
     ephem = is_ephemeral(user, 'leaderboard', default=False)
-    rows = await asyncio.get_event_loop().run_in_executor(None, db_get_leaderboard)
+    rows = await asyncio.to_thread(db_get_leaderboard)
     if not rows:
         embed = discord.Embed(title="🏆 Leaderboard", color=0xfbbf24,
             description="No public cards yet.\nEnable leaderboard in Settings to appear here.")
@@ -434,11 +438,11 @@ async def cmd_leaderboard(interaction: discord.Interaction):
     app_commands.Choice(name="/leaderboard", value="leaderboard"),
 ])
 async def cmd_privacy(interaction: discord.Interaction, command: str, public: bool):
-    user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
+    user = await asyncio.to_thread(db_get_user, interaction.user.id)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
     ephemeral = not public
-    await asyncio.get_event_loop().run_in_executor(None, db_set_command_privacy, user['id'], command, ephemeral)
+    await asyncio.to_thread(db_set_command_privacy, user['id'], command, ephemeral)
     visibility = "**public** 📢" if public else "**private** 🔒"
     await interaction.response.send_message(
         f"✅ `/{command}` responses will now be {visibility} in this server.",
@@ -495,7 +499,7 @@ class AddKokoModal(discord.ui.Modal, title="Add Koko Card"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
+        user = await asyncio.to_thread(db_get_user, interaction.user.id)
         if not user:
             await interaction.followup.send("❌ Use `/link` first to connect your account.", ephemeral=True)
             return
@@ -509,7 +513,7 @@ class AddKokoModal(discord.ui.Modal, title="Add Koko Card"):
         await interaction.followup.send("⏳ Fetching card data...", ephemeral=True)
 
         try:
-            data = await asyncio.get_event_loop().run_in_executor(None, fetch_koko_balance, token_val)
+            data = await asyncio.to_thread(fetch_koko_balance, token_val)
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ Error fetching card: {e}")
             return
@@ -524,8 +528,8 @@ class AddKokoModal(discord.ui.Modal, title="Add Koko Card"):
         card_name = data.get('card_name') or token_val
         total = cash + bonus
 
-        ok, result = await asyncio.get_event_loop().run_in_executor(
-            None, db_add_koko_card, user['id'], token_val, label_val, cash, bonus, points, card_name
+        ok, result = await asyncio.to_thread(
+            db_add_koko_card, user['id'], token_val, label_val, cash, bonus, points, card_name
         )
 
         if not ok:
@@ -614,7 +618,7 @@ class TimezoneCardSelectView(discord.ui.View):
     app_commands.Choice(name="🕹️ Timezone — pick from your account", value="timezone"),
 ])
 async def cmd_addcard(interaction: discord.Interaction, card_type: str):
-    user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
+    user = await asyncio.to_thread(db_get_user, interaction.user.id)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first to connect your account.", ephemeral=True)
         return
@@ -643,8 +647,8 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
         await interaction.followup.send("⏳ Fetching your Timezone cards...", ephemeral=True)
 
         try:
-            guest = await asyncio.get_event_loop().run_in_executor(
-                None, fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
+            guest = await asyncio.to_thread(
+                fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
             )
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ Error connecting to Timezone: {e}")
