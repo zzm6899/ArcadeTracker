@@ -390,8 +390,22 @@ async function forcePoll(cardId, btn) {
     const r = await resp.json();
     if (r.success) {
       btn.textContent='✓';
+      // Update timestamp
       const ts = document.querySelector(`[data-card-ts="${cardId}"]`);
       if (ts && r.last_updated) ts.textContent = r.last_updated;
+      // Update balance stat boxes — walk up to the card container then find stat values
+      if (r.data) {
+        const cardEl = btn.closest('[onclick*="cards/' + cardId + '"]') || btn.closest('.card');
+        if (cardEl) {
+          const statVals = cardEl.querySelectorAll('.stat-box .value');
+          if (statVals.length >= 3) {
+            const d = r.data;
+            statVals[0].textContent = '$' + (d.cash_balance || 0).toFixed(2);
+            statVals[1].textContent = '$' + (d.cash_bonus || 0).toFixed(2);
+            statVals[2].textContent = (d.points || 0).toLocaleString();
+          }
+        }
+      }
     } else { btn.textContent='✗'; }
     setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},2500);
   } catch(e) { btn.textContent=orig; btn.disabled=false; }

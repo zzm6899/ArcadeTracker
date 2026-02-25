@@ -295,13 +295,8 @@ class BalanceBot(discord.Client):
                           (discord.ActivityType.watching, f"🎮 {s['cards']} cards tracked"),
             ]
 
-            # If there are Timezone auth issues, occasionally show a warning
-            if stats['tz_issues'] > 0 and self._status_idx % 6 == 5:
-                atype = discord.ActivityType.watching
-                name = f"⚠️ {stats['tz_issues']} Timezone session(s) need attention"
-            else:
-                tmpl = STATUS_TEMPLATES[self._status_idx % len(STATUS_TEMPLATES)]
-                atype, name = tmpl(stats)
+            tmpl = STATUS_TEMPLATES[self._status_idx % len(STATUS_TEMPLATES)]
+            atype, name = tmpl(stats)
 
             await self.change_presence(activity=discord.Activity(type=atype, name=name))
             self._status_idx += 1
@@ -328,11 +323,19 @@ async def cmd_link(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return
     code = await run_sync(db_create_link_code, interaction.user.id, str(interaction.user))
-    embed = discord.Embed(title="🔗 Link Your Account", color=0x6366f1,
-        description="Enter this code in Balance Tracker Settings → Discord Link")
-    embed.add_field(name="Code (expires 15min)", value=f"```{code}```", inline=False)
-    embed.add_field(name="Where", value=f"{APP_URL}/settings", inline=False)
-    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=True)
+    link_url = f"{APP_URL}/settings?link_code={code}"
+    embed = discord.Embed(
+        title="🔗 Link Your Account",
+        description=(
+            "Click the button below to open Balance Tracker and link your Discord automatically.\n\n"
+            "Or enter this code manually in **Settings → Discord Link**:"
+        ),
+        color=0x6366f1
+    )
+    embed.add_field(name="Manual Code (expires 15min)", value=f"```{code}```", inline=False)
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="🔗 Link My Account", url=link_url, style=discord.ButtonStyle.link))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @bot.tree.command(name="cards", description="Show your card balances")
