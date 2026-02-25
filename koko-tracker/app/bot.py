@@ -69,7 +69,7 @@ def db_get_leaderboard():
         'FROM cards c JOIN users u ON c.user_id=u.id '
         'LEFT JOIN balance_history h ON h.id=(SELECT id FROM balance_history WHERE card_id=c.id ORDER BY recorded_at DESC LIMIT 1) '
         'WHERE c.active=1 AND c.leaderboard_public=1 AND u.leaderboard_opt_in=1 '
-        'ORDER BY (COALESCE(h.cash_balance,0)+COALESCE(h.cash_bonus,0)) DESC LIMIT 10'
+        'ORDER BY (COALESCE(h.cash_balance,0)+COALESCE(h.cash_bonus,0)) DESC LIMIT 25'
     ).fetchall()
     conn.close()
     return rows
@@ -284,7 +284,6 @@ class BalanceBot(discord.Client):
                 lambda s: (discord.ActivityType.watching,
                            f"🎮 {s['cards']} cards · {s['users']} players"),
                 lambda s: (discord.ActivityType.playing, "Balance Tracker"),
-                lambda s: (discord.ActivityType.playing, "card.z2hs.au"),
                 # Public leaderboard total (may be $0 if no one opted in — skip if so)
                 lambda s: (discord.ActivityType.watching,
                            f"🏆 ${s['public_total']:.0f} on leaderboard")
@@ -296,8 +295,13 @@ class BalanceBot(discord.Client):
                           (discord.ActivityType.watching, f"🎮 {s['cards']} cards tracked"),
             ]
 
-            tmpl = STATUS_TEMPLATES[self._status_idx % len(STATUS_TEMPLATES)]
-            atype, name = tmpl(stats)
+            # If there are Timezone auth issues, occasionally show a warning
+            if stats['tz_issues'] > 0 and self._status_idx % 6 == 5:
+                atype = discord.ActivityType.watching
+                name = f"⚠️ {stats['tz_issues']} Timezone session(s) need attention"
+            else:
+                tmpl = STATUS_TEMPLATES[self._status_idx % len(STATUS_TEMPLATES)]
+                atype, name = tmpl(stats)
 
             await self.change_presence(activity=discord.Activity(type=atype, name=name))
             self._status_idx += 1
@@ -324,19 +328,11 @@ async def cmd_link(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         return
     code = await run_sync(db_create_link_code, interaction.user.id, str(interaction.user))
-    link_url = f"{APP_URL}/settings?link_code={code}"
-    embed = discord.Embed(
-        title="🔗 Link Your Account",
-        description=(
-            "Click the button below to open Balance Tracker and link your Discord automatically.\n\n"
-            "Or enter this code manually in **Settings → Discord Link**:"
-        ),
-        color=0x6366f1
-    )
-    embed.add_field(name="Manual Code (expires 15min)", value=f"```{code}```", inline=False)
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="🔗 Link My Account", url=link_url, style=discord.ButtonStyle.link))
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    embed = discord.Embed(title="🔗 Link Your Account", color=0x6366f1,
+        description="Enter this code in Balance Tracker Settings → Discord Link")
+    embed.add_field(name="Code (expires 15min)", value=f"```{code}```", inline=False)
+    embed.add_field(name="Where", value=f"{APP_URL}/settings", inline=False)
+    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=True)
 
 
 @bot.tree.command(name="cards", description="Show your card balances")
@@ -571,6 +567,57 @@ async def cmd_timezone_status(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
+PAGE_SIZE = 5  # entries per leaderboard page
+
+class LeaderboardView(discord.ui.View):
+    def __init__(self, rows, page=0):
+        super().__init__(timeout=120)
+        self.rows = rows
+        self.page = page
+        self.total_pages = max(1, (len(rows) + PAGE_SIZE - 1) // PAGE_SIZE)
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= self.total_pages - 1
+        self.page_label.label = f"{self.page + 1} / {self.total_pages}"
+
+    def build_embed(self):
+        medals = ['🥇', '🥈', '🥉']
+        start = self.page * PAGE_SIZE
+        page_rows = self.rows[start:start + PAGE_SIZE]
+        embed = discord.Embed(title="🏆 Balance Leaderboard", color=0xfbbf24)
+        for i, row in enumerate(page_rows):
+            rank_num = start + i
+            total = (row['cash_balance'] or 0) + (row['cash_bonus'] or 0)
+            rank  = medals[rank_num] if rank_num < 3 else f"`#{rank_num + 1}`"
+            tier  = f" {tier_emoji(row['tier'])}" if row['tier'] else ""
+            last  = row['recorded_at'][:10] if row['recorded_at'] else '?'
+            embed.add_field(
+                name=f"{rank} {row['username']}{tier}",
+                value=f"**${total:.2f}** · {row['card_label'] or 'Card'} · {last}",
+                inline=False
+            )
+        embed.set_footer(text=f"Page {self.page + 1}/{self.total_pages} · Enable in Settings to appear here")
+        return embed
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="1 / 1", style=discord.ButtonStyle.secondary, disabled=True)
+    async def page_label(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+
 @bot.tree.command(name="leaderboard", description="Public card balance leaderboard (server only)")
 async def cmd_leaderboard(interaction: discord.Interaction):
     if interaction.guild is None:
@@ -585,22 +632,11 @@ async def cmd_leaderboard(interaction: discord.Interaction):
     if not rows:
         embed = discord.Embed(title="🏆 Leaderboard", color=0xfbbf24,
             description="No public cards yet.\nEnable leaderboard in Settings to appear here.")
-        await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem); return
+        await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem)
+        return
 
-    medals = ['🥇','🥈','🥉']
-    embed = discord.Embed(title="🏆 Balance Leaderboard", color=0xfbbf24)
-    for i, row in enumerate(rows):
-        total = (row['cash_balance'] or 0) + (row['cash_bonus'] or 0)
-        rank  = medals[i] if i < 3 else f"`#{i+1}`"
-        tier  = f" {tier_emoji(row['tier'])}" if row['tier'] else ""
-        last  = row['recorded_at'][:10] if row['recorded_at'] else '?'
-        embed.add_field(
-            name=f"{rank} {row['username']}{tier}",
-            value=f"**${total:.2f}** · {row['card_label'] or 'Card'} · {last}",
-            inline=False
-        )
-    embed.set_footer(text="Enable in Settings → Leaderboard to appear here")
-    await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem)
+    view = LeaderboardView(rows)
+    await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=ephem)
 
 
 @bot.tree.command(name="privacy", description="Toggle whether each command response is public or private")
