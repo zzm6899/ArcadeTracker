@@ -88,7 +88,6 @@ def db_create_link_code(discord_id, discord_username):
     return code
 
 def db_get_command_privacy(user_id):
-    """Return dict of command->ephemeral for a user."""
     conn = get_db()
     row = conn.execute('SELECT discord_cmd_privacy FROM users WHERE id=?', (user_id,)).fetchone()
     conn.close()
@@ -113,7 +112,6 @@ def db_set_command_privacy(user_id, cmd, ephemeral):
     conn.commit(); conn.close()
 
 def db_get_spent(user_id, days=1):
-    """Get spending per card for the last N days."""
     since = (datetime.utcnow() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db()
     cards = conn.execute('SELECT id, card_label, card_number, card_type FROM cards WHERE user_id=? AND active=1', (user_id,)).fetchall()
@@ -125,7 +123,6 @@ def db_get_spent(user_id, days=1):
             (card['id'], since)
         ).fetchall()
         if len(rows) < 2:
-            # get latest before window for comparison
             before = conn.execute(
                 'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? AND recorded_at<? ORDER BY recorded_at DESC LIMIT 1',
                 (card['id'], since)
@@ -148,27 +145,86 @@ def db_get_spent(user_id, days=1):
     return results
 
 def db_get_stats_for_status():
-    """Privacy-safe aggregate stats for bot status messages."""
+    """
+    Aggregate stats for bot status messages.
+    total_balance: sum of ALL active cards' latest balances (not just public ones).
+    public_total: sum of public leaderboard cards only (for display).
+    """
     conn = get_db()
     total_cards = conn.execute('SELECT COUNT(*) FROM cards WHERE active=1').fetchone()[0]
     total_users = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
-    # Sum of all public card balances only
+
+    # Sum ALL active cards' latest balance (privacy-safe — no names, just aggregate)
+    all_bal = conn.execute(
+        'SELECT SUM(h.cash_balance + COALESCE(h.cash_bonus, 0)) as tot FROM cards c '
+        'LEFT JOIN balance_history h ON h.id=('
+        '  SELECT id FROM balance_history WHERE card_id=c.id ORDER BY recorded_at DESC LIMIT 1'
+        ') WHERE c.active=1'
+    ).fetchone()
+    total_balance = all_bal['tot'] or 0
+
+    # Public-only total (for leaderboard status variant)
     pub = conn.execute(
-        'SELECT SUM(h.cash_balance + h.cash_bonus) as tot FROM cards c '
+        'SELECT SUM(h.cash_balance + COALESCE(h.cash_bonus, 0)) as tot FROM cards c '
         'JOIN users u ON c.user_id=u.id '
-        'LEFT JOIN balance_history h ON h.id=(SELECT id FROM balance_history WHERE card_id=c.id ORDER BY recorded_at DESC LIMIT 1) '
-        'WHERE c.active=1 AND c.leaderboard_public=1 AND u.leaderboard_opt_in=1'
+        'LEFT JOIN balance_history h ON h.id=('
+        '  SELECT id FROM balance_history WHERE card_id=c.id ORDER BY recorded_at DESC LIMIT 1'
+        ') WHERE c.active=1 AND c.leaderboard_public=1 AND u.leaderboard_opt_in=1'
     ).fetchone()
     public_total = pub['tot'] or 0
+
     top = conn.execute(
         'SELECT c.tier, COUNT(*) as cnt FROM cards c WHERE c.active=1 AND c.tier!=\'\' AND c.tier IS NOT NULL GROUP BY c.tier ORDER BY cnt DESC LIMIT 1'
     ).fetchone()
     top_tier = top['tier'] if top else None
+
+    # Count Timezone sessions with issues
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    tz_issues = conn.execute(
+        "SELECT COUNT(*) FROM timezone_sessions WHERE last_poll_status IN ('error', 'needs_reconnect')"
+    ).fetchone()[0]
+
     conn.close()
-    return {'cards': total_cards, 'users': total_users, 'public_total': public_total, 'top_tier': top_tier}
+    return {
+        'cards': total_cards,
+        'users': total_users,
+        'total_balance': total_balance,
+        'public_total': public_total,
+        'top_tier': top_tier,
+        'tz_issues': tz_issues,
+    }
+
+def db_get_timezone_status(user_id):
+    """Get Timezone session status for a user."""
+    conn = get_db()
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user_id,)).fetchone()
+    conn.close()
+    if not tzs:
+        return 'disconnected'
+    # No bearer token — check if it was cleared due to expired refresh token
+    if not tzs['bearer_token']:
+        if tzs['last_poll_status'] == 'needs_reconnect':
+            return 'needs_reconnect'
+        return 'disconnected'
+    now_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    now_dt  = datetime.utcnow()
+    if tzs['session_expires_at'] and tzs['session_expires_at'] < now_str:
+        return 'expired'
+    if tzs['last_poll_status'] == 'needs_reconnect':
+        return 'needs_reconnect'
+    if tzs['last_poll_at']:
+        try:
+            last = datetime.strptime(tzs['last_poll_at'], '%Y-%m-%d %H:%M:%S')
+            age = (now_dt - last).total_seconds()
+            if tzs['last_poll_status'] == 'error' and age < 1800:
+                return 'error'
+            if age > 2700:
+                return 'stale'
+        except:
+            pass
+    return 'connected'
 
 def is_ephemeral(user, cmd_name, default=True):
-    """Check if a command should be ephemeral for this user."""
     if not user: return default
     priv = db_get_command_privacy(user['id'])
     return priv.get(cmd_name, default)
@@ -194,7 +250,6 @@ class BalanceBot(discord.Client):
         self._status_idx = 0
 
     async def setup_hook(self):
-        # Allow bot to be used in DMs and group chats (user-installable app)
         self.tree.allowed_installs = discord.app_commands.AppInstallationType(guild=True, user=True)
         self.tree.allowed_contexts = discord.app_commands.AppCommandContext(
             guild=True, dm_channel=True, private_channel=True
@@ -214,17 +269,40 @@ class BalanceBot(discord.Client):
 
     @tasks.loop(seconds=45)
     async def status_task(self):
-        STATUS_TEMPLATES = [
-            lambda s: (discord.ActivityType.watching,  f"💰 ${s['public_total']:.0f} in public balances"),
-            lambda s: (discord.ActivityType.watching,  f"🎮 {s['cards']} cards tracked"),
-            lambda s: (discord.ActivityType.watching,  f"👥 {s['users']} players"),
-            lambda s: (discord.ActivityType.playing,   "Balance Tracker"),
-            lambda s: (discord.ActivityType.watching,  f"💎 {s['top_tier']} members active") if s['top_tier'] else (discord.ActivityType.watching, f"🎮 {s['cards']} cards tracked"),
-        ]
+        """
+        Rotate through status messages. Uses total_balance (ALL cards) for the
+        balance display so the number actually updates as cards are polled.
+        Public-only total is used for the leaderboard variant.
+        """
         try:
             stats = await asyncio.get_event_loop().run_in_executor(None, db_get_stats_for_status)
-            tmpl = STATUS_TEMPLATES[self._status_idx % len(STATUS_TEMPLATES)]
-            atype, name = tmpl(stats)
+
+            STATUS_TEMPLATES = [
+                # Show total across ALL tracked cards — this updates on every poll
+                lambda s: (discord.ActivityType.watching,
+                           f"💰 ${s['total_balance']:.0f} in tracked balances"),
+                lambda s: (discord.ActivityType.watching,
+                           f"🎮 {s['cards']} cards · {s['users']} players"),
+                lambda s: (discord.ActivityType.playing, "Balance Tracker"),
+                # Public leaderboard total (may be $0 if no one opted in — skip if so)
+                lambda s: (discord.ActivityType.watching,
+                           f"🏆 ${s['public_total']:.0f} on leaderboard")
+                          if s['public_total'] > 0 else
+                          (discord.ActivityType.watching, f"💰 ${s['total_balance']:.0f} tracked"),
+                lambda s: (discord.ActivityType.watching,
+                           f"💎 {s['top_tier']} members active")
+                          if s['top_tier'] else
+                          (discord.ActivityType.watching, f"🎮 {s['cards']} cards tracked"),
+            ]
+
+            # If there are Timezone auth issues, occasionally show a warning
+            if stats['tz_issues'] > 0 and self._status_idx % 6 == 5:
+                atype = discord.ActivityType.watching
+                name = f"⚠️ {stats['tz_issues']} Timezone session(s) need attention"
+            else:
+                tmpl = STATUS_TEMPLATES[self._status_idx % len(STATUS_TEMPLATES)]
+                atype, name = tmpl(stats)
+
             await self.change_presence(activity=discord.Activity(type=atype, name=name))
             self._status_idx += 1
             print(f"[Bot] Status: {name}")
@@ -237,7 +315,6 @@ bot = BalanceBot()
 
 @bot.tree.command(name="link", description="Link your Discord account to Balance Tracker")
 async def cmd_link(interaction: discord.Interaction):
-    # Check if already linked
     user = await run_sync(db_get_user, interaction.user.id)
     if user:
         embed = discord.Embed(
@@ -246,7 +323,6 @@ async def cmd_link(interaction: discord.Interaction):
             color=0x22c55e
         )
         embed.set_footer(text="To unlink, go to Settings on the website.")
-        # Unlink button points to website settings
         view = discord.ui.View()
         view.add_item(discord.ui.Button(label="🌐 Manage on Website", url=f"{APP_URL}/settings", style=discord.ButtonStyle.link))
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -268,17 +344,42 @@ async def cmd_cards(interaction: discord.Interaction):
     if not cards:
         await interaction.response.send_message("No cards found.", ephemeral=ephem); return
 
+    # Check Timezone session status for warning
+    tz_status = None
+    has_tz_cards = any(c['card_type'] == 'timezone' for c in cards)
+    if has_tz_cards and user:
+        tz_status = await asyncio.get_event_loop().run_in_executor(None, db_get_timezone_status, user['id'])
+
     embed = discord.Embed(title=f"🎮 {user['username']}'s Cards", color=0x6366f1)
+
     for card in cards:
         total = (card['cash_balance'] or 0) + (card['cash_bonus'] or 0)
         tier  = f" {tier_emoji(card['tier'])} {card['tier']}" if card['tier'] else ""
         label = card['card_label'] or 'Card'
         last  = card['last_updated'][:16] if card['last_updated'] else 'Never'
         pts_label = 'e-Tickets' if card['card_type'] == 'timezone' else 'pts'
+
+        # Add issue indicator for Timezone cards if session has problems
+        issue_note = ""
+        if card['card_type'] == 'timezone' and tz_status in ('error', 'stale', 'expired', 'disconnected', 'needs_reconnect'):
+            status_icons = {
+                'error':           '⚠️ Auth error',
+                'stale':           '⏰ Stale data',
+                'expired':         '🔒 Session expired',
+                'disconnected':    '❌ Disconnected',
+                'needs_reconnect': '🔴 Reconnect required',
+            }
+            issue_note = f"\n{status_icons.get(tz_status, '⚠️ Issue')} — [reconnect]({APP_URL}/timezone/start)"
+
         val = (f"💰 **${total:.2f}** · ${card['cash_balance'] or 0:.2f} + ${card['cash_bonus'] or 0:.2f} bonus\n"
                f"🎫 {card['points'] or 0:,} {pts_label}\n"
-               f"🕐 {last}")
+               f"🕐 {last}{issue_note}")
         embed.add_field(name=f"{card_emoji(card['card_type'])} {label}{tier}", value=val, inline=False)
+
+    # Footer warning if Timezone session has issues
+    if tz_status and tz_status not in ('connected', None):
+        embed.set_footer(text=f"⚠️ Timezone session status: {tz_status} — visit the website to reconnect")
+
     await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem)
 
 
@@ -288,13 +389,33 @@ async def cmd_balance(interaction: discord.Interaction):
     ephem = is_ephemeral(user, 'balance', default=True)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
+
     total = sum((c['cash_balance'] or 0) + (c['cash_bonus'] or 0) for c in cards)
     tickets = sum(c['points'] or 0 for c in cards)
+
+    # Check for Timezone issues
+    has_tz_cards = any(c['card_type'] == 'timezone' for c in cards)
+    tz_status = None
+    if has_tz_cards:
+        tz_status = await asyncio.get_event_loop().run_in_executor(None, db_get_timezone_status, user['id'])
+
     embed = discord.Embed(
         title=f"💰 {user['username']}'s Balance",
         description=f"**${total:.2f}** across {len(cards)} card(s)\n🎫 {tickets:,} tickets/points",
         color=0x22c55e
     )
+
+    if tz_status and tz_status not in ('connected',):
+        status_msgs = {
+            'error':           '⚠️ Timezone auth error — data may be outdated',
+            'stale':           '⏰ Timezone data is stale — polling may have stopped',
+            'expired':         '🔒 Timezone session expired — please reconnect',
+            'disconnected':    '❌ Timezone disconnected — Timezone card balances not updating',
+            'needs_reconnect': '🔴 **Timezone refresh token expired** — balances frozen until you reconnect',
+        }
+        msg = status_msgs.get(tz_status, f'⚠️ Timezone issue: {tz_status}')
+        embed.add_field(name="Timezone Status", value=f"{msg}\n[Fix it here]({APP_URL}/timezone/start)", inline=False)
+
     await interaction.response.send_message(embed=embed, view=bot_buttons(), ephemeral=ephem)
 
 
@@ -349,21 +470,25 @@ async def cmd_refresh(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=ephem)
 
     sys.path.insert(0, os.path.dirname(__file__))
-    from app import fetch_koko_balance, fetch_timezone_guest
+    from app import fetch_koko_balance, fetch_timezone_guest, cache_get_or_load_token
     import json as _json
 
     conn = get_db()
     refreshed = 0
+    tz_error = False
     for card in cards:
         try:
             data = None
             if card['card_type'] == 'koko':
                 data = await asyncio.get_event_loop().run_in_executor(None, fetch_koko_balance, card['card_token'])
             else:
-                tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
-                if tzs:
+                token_info = await asyncio.get_event_loop().run_in_executor(
+                    None, cache_get_or_load_token, user['id']
+                )
+                if token_info:
+                    bearer, _, cookies, _ = token_info
                     guest = await asyncio.get_event_loop().run_in_executor(
-                        None, fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
+                        None, fetch_timezone_guest, bearer, cookies, user['id']
                     )
                     if guest:
                         for c in guest.get('cards', []):
@@ -371,6 +496,10 @@ async def cmd_refresh(interaction: discord.Interaction):
                                 data = {'cash_balance': c.get('cashBalance',0), 'cash_bonus': c.get('bonusBalance',0),
                                         'points': c.get('eTickets',0), 'tier': c.get('tier','')}
                                 break
+                    else:
+                        tz_error = True
+                else:
+                    tz_error = True
             if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus')]):
                 conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,tier) VALUES (?,?,?,?,?)',
                     (card['id'], data.get('cash_balance'), data.get('cash_bonus'), data.get('points'), data.get('tier','')))
@@ -378,12 +507,68 @@ async def cmd_refresh(interaction: discord.Interaction):
         except Exception as e:
             print(f"[Bot] Refresh error {card['id']}: {e}")
     conn.commit(); conn.close()
-    await interaction.followup.send(f"✅ Refreshed {refreshed}/{len(cards)} card(s). Use `/cards` to see updated balances.", ephemeral=ephem)
+
+    msg = f"✅ Refreshed {refreshed}/{len(cards)} card(s). Use `/cards` to see updated balances."
+    if tz_error:
+        msg += f"\n⚠️ Timezone session has issues — [reconnect here]({APP_URL}/timezone/start)"
+    await interaction.followup.send(msg, ephemeral=ephem)
+
+
+@bot.tree.command(name="timezone-status", description="Check your Timezone session status")
+async def cmd_timezone_status(interaction: discord.Interaction):
+    user = await run_sync(db_get_user, interaction.user.id)
+    if not user:
+        await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
+
+    tz_status = await asyncio.get_event_loop().run_in_executor(None, db_get_timezone_status, user['id'])
+
+    conn = get_db()
+    tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
+    conn.close()
+
+    status_info = {
+        'connected':       ('✅', 'Connected',       0x22c55e, 'Your Timezone session is active and polling normally.'),
+        'error':           ('❌', 'Auth Error',       0xef4444, 'The last poll failed. Your token may have expired.'),
+        'stale':           ('⏰', 'Stale',            0xf59e0b, 'No successful poll recently. The poller may be stuck.'),
+        'expired':         ('🔒', 'Expired',          0xef4444, 'Your session cookie has expired.'),
+        'disconnected':    ('🔌', 'Disconnected',     0x6b7280, 'No Timezone session found.'),
+        'needs_reconnect': ('⚠️', 'Reconnect Required', 0xef4444,
+                           'Your Timezone refresh token has expired (AADB2C90080). '
+                           'You must reconnect via the bookmarklet to resume tracking.'),
+    }
+    icon, label, color, desc = status_info.get(tz_status, ('❓', tz_status, 0x6b7280, ''))
+
+    embed = discord.Embed(
+        title=f"{icon} Timezone Session — {label}",
+        description=desc,
+        color=color
+    )
+
+    if tzs:
+        if tzs['last_poll_at']:
+            embed.add_field(name="Last Poll", value=tzs['last_poll_at'][:16], inline=True)
+        if tzs['last_poll_status']:
+            embed.add_field(name="Last Status", value=tzs['last_poll_status'], inline=True)
+        if tzs['token_expires_at']:
+            embed.add_field(name="Token Expires", value=tzs['token_expires_at'][:16], inline=True)
+        has_rt = bool(tzs['refresh_token']) if 'refresh_token' in tzs.keys() else False
+        embed.add_field(name="Auto-Refresh", value="✅ Available" if has_rt else "❌ Not set — reconnect needed", inline=True)
+
+    if tz_status not in ('connected',):
+        embed.add_field(
+            name="Fix It",
+            value=f"[Reconnect your Timezone account]({APP_URL}/timezone/start)",
+            inline=False
+        )
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="🔄 Reconnect Timezone", url=f"{APP_URL}/timezone/start", style=discord.ButtonStyle.link))
+    view.add_item(discord.ui.Button(label="🌐 Open Website", url=APP_URL, style=discord.ButtonStyle.link))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @bot.tree.command(name="leaderboard", description="Public card balance leaderboard (server only)")
 async def cmd_leaderboard(interaction: discord.Interaction):
-    # Leaderboard requires a guild context to be meaningful
     if interaction.guild is None:
         await interaction.response.send_message(
             "🏆 The leaderboard only works inside a server — invite me to a Discord server to use it!",
@@ -434,8 +619,6 @@ async def cmd_privacy(interaction: discord.Interaction, command: str, public: bo
         f"✅ `/{command}` responses will now be {visibility} in this server.",
         ephemeral=True
     )
-
-
 
 
 # ─── Add Card ─────────────────────────────────────────────────────────────────
@@ -533,14 +716,12 @@ class AddKokoModal(discord.ui.Modal, title="Add Koko Card"):
 
 
 class TimezoneCardSelectView(discord.ui.View):
-    """Shown after validating a Timezone session — lets user pick which card to track."""
     def __init__(self, user_id, cards_data, timeout=120):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.cards_data = cards_data
-        # Build select options
         options = []
-        for c in cards_data[:25]:  # Discord max 25 options
+        for c in cards_data[:25]:
             num = str(c.get('number', ''))
             tier = c.get('tier', '')
             balance = (c.get('cashBalance') or 0) + (c.get('bonusBalance') or 0)
@@ -614,7 +795,6 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
 
     elif card_type == "timezone":
         await interaction.response.defer(ephemeral=True)
-        # Check for active Timezone session
         conn = get_db()
         tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
         conn.close()
@@ -627,14 +807,21 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
             return
 
         sys.path.insert(0, os.path.dirname(__file__))
-        from app import fetch_timezone_guest
+        from app import fetch_timezone_guest, cache_get_or_load_token
         import json as _json
 
         await interaction.followup.send("⏳ Fetching your Timezone cards...", ephemeral=True)
 
         try:
+            token_info = await asyncio.get_event_loop().run_in_executor(None, cache_get_or_load_token, user['id'])
+            if not token_info:
+                await interaction.edit_original_response(
+                    content=f"❌ Could not load Timezone token. Please reconnect at {APP_URL}/timezone/start"
+                )
+                return
+            bearer, _, cookies, _ = token_info
             guest = await asyncio.get_event_loop().run_in_executor(
-                None, fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
+                None, fetch_timezone_guest, bearer, cookies, user['id']
             )
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ Error connecting to Timezone: {e}")
@@ -642,12 +829,11 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
 
         if not guest or not guest.get('cards'):
             await interaction.edit_original_response(
-                content="❌ Could not fetch Timezone cards. Your session may have expired — reconnect at the website."
+                content=f"❌ Could not fetch Timezone cards. Your session may have expired — [reconnect here]({APP_URL}/timezone/start)."
             )
             return
 
         tz_cards = guest.get('cards', [])
-        # Filter out already-tracked active cards
         conn = get_db()
         tracked = {r['card_number'] for r in conn.execute(
             "SELECT card_number FROM cards WHERE user_id=? AND active=1 AND card_type='timezone'", (user['id'],)
@@ -667,7 +853,6 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
         )
 
 
-
 @bot.tree.command(name="help", description="Show all available commands")
 async def cmd_help(interaction: discord.Interaction):
     user = await asyncio.get_event_loop().run_in_executor(None, db_get_user, interaction.user.id)
@@ -677,6 +862,7 @@ async def cmd_help(interaction: discord.Interaction):
     embed = discord.Embed(title="Balance Tracker - Help", description=desc, color=0x6366f1)
     embed.add_field(name="Account", value="`/link` - Connect Discord\n`/addcard` - Add a card", inline=False)
     embed.add_field(name="Balances", value="`/cards` - All balances\n`/balance` - Quick total\n`/spent` - Spending history\n`/refresh` - Force refresh now", inline=False)
+    embed.add_field(name="Timezone", value="`/timezone-status` - Check Timezone session health", inline=False)
     embed.add_field(name="Leaderboard", value="`/leaderboard` - Public rankings (server only)\nEnable in Settings to appear", inline=False)
     embed.add_field(name="Settings", value="`/privacy command:X public:True/False` - Toggle visibility\n`/help` - This message", inline=False)
     if not linked:
