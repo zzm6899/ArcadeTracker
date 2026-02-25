@@ -106,6 +106,8 @@ def cache_get_or_load_token(user_id):
         tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user_id,)).fetchone()
         conn.close()
         if not tzs or not tzs['bearer_token']:
+            if tzs and tzs['last_poll_status'] == 'needs_reconnect':
+                print(f"[TokenCache] User {user_id} needs_reconnect — skipping token load")
             return None
         expires_dt = datetime.utcnow() + timedelta(minutes=14)
         if tzs['token_expires_at']:
@@ -1002,7 +1004,22 @@ def poll_cards():
                             log_poll(card['id'], False, 'API error - token may be expired')
                             print(f"[Poller] Timezone API error for user {card['user_id']} - token may be expired")
                     else:
-                        log_poll(card['id'], False, 'No session token')
+                        # Check why — needs_reconnect vs never connected
+                        try:
+                            conn2 = get_db()
+                            tzs_check = conn2.execute(
+                                'SELECT last_poll_status FROM timezone_sessions WHERE user_id=?',
+                                (card['user_id'],)
+                            ).fetchone()
+                            conn2.close()
+                            if tzs_check and tzs_check['last_poll_status'] == 'needs_reconnect':
+                                log_poll(card['id'], False, 'needs_reconnect — user must redo bookmarklet')
+                                print(f"[Poller] Card {card['id']} skipped — user {card['user_id']} needs_reconnect")
+                            else:
+                                log_poll(card['id'], False, 'No Timezone session')
+                                print(f"[Poller] Card {card['id']} skipped — no Timezone session for user {card['user_id']}")
+                        except:
+                            log_poll(card['id'], False, 'No session token')
 
                 if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
                     conn = get_db()
@@ -1019,12 +1036,13 @@ def poll_cards():
                         new_total = (data.get('cash_balance') or 0) + (data.get('cash_bonus') or 0)
                         if abs(new_total - prev_total) >= 0.01:
                             send_discord_webhook(user_row['discord_webhook'], card, data, prev_total, new_total)
-                    # Admin-wide webhook — only fire when balance actually changed (or first reading)
+                    # Admin-wide webhook — only fire when balance actually changed
                     username = user_row['username'] if user_row else f'user_{card["user_id"]}'
-                    new_total_adm = (data.get('cash_balance') or 0) + (data.get('cash_bonus') or 0)
-                    prev_total_adm = ((prev['cash_balance'] or 0) + (prev['cash_bonus'] or 0)) if prev else None
-                    if prev is None or (prev_total_adm is not None and abs(new_total_adm - prev_total_adm) >= 0.01):
-                        send_admin_webhook(card, data, prev, username)
+                    if prev is not None:
+                        new_total_adm  = (data.get('cash_balance') or 0) + (data.get('cash_bonus') or 0)
+                        prev_total_adm = (prev['cash_balance'] or 0) + (prev['cash_bonus'] or 0)
+                        if abs(new_total_adm - prev_total_adm) >= 0.01:
+                            send_admin_webhook(card, data, prev, username)
                     print(f"[Poller] Card {card['id']} ({ctype}): {data.get('cash_balance')}/{data.get('cash_bonus')}/{data.get('points')}")
 
         except Exception as e:
