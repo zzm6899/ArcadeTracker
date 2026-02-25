@@ -146,7 +146,7 @@
                 <td class="py-2 pr-3 text-yellow-400 text-xs">${{ "%.2f"|format(card.cash_bonus or 0) }}</td>
                 <td class="py-2 pr-3 text-orange-400 text-xs">{{ card.points or 0 }}</td>
                 <td class="py-2 pr-3 text-slate-500 text-xs">{{ card.poll_interval or 60 }}s</td>
-                <td class="py-2 pr-3 text-slate-500 text-xs">{{ card.last_updated[:16] if card.last_updated else 'Never' }}</td>
+                <td class="py-2 pr-3 text-slate-500 text-xs"><span class="utc-ts">{{ card.last_updated[:16] if card.last_updated else 'Never' }}</span></td>
                 <td class="py-2">
                     <form method="POST" action="/admin/cards/{{ card.id }}/leaderboard">
                         <input type="hidden" name="leaderboard_public" value="{{ '0' if card.leaderboard_public else '1' }}">
@@ -180,9 +180,9 @@
                     {% else %}bg-slate-700 text-slate-400{% endif %}">{{ st }}</span>
             </div>
             <div class="text-xs text-slate-500">
-                Token: <span class="text-slate-400">{{ ts.token_expires_at or '?' }}</span> ·
-                Last poll: <span class="{% if ts.last_poll_status == 'ok' %}text-green-400{% elif ts.last_poll_status %}text-red-400{% else %}text-slate-400{% endif %}">
-                    {{ ts.last_poll_at or 'Never' }}{% if ts.last_poll_status %} ({{ ts.last_poll_status }}){% endif %}
+                Token: <span class="text-slate-400 utc-ts">{{ ts.token_expires_at or '?' }}</span> ·
+                Last poll: <span class="{% if ts.last_poll_status == 'ok' %}text-green-400{% elif ts.last_poll_status %}text-red-400{% else %}text-slate-400{% endif %} utc-ts">
+                    {{ ts.last_poll_at or 'Never' }}</span>{% if ts.last_poll_status %} ({{ ts.last_poll_status }}){% endif %}
                 </span>
             </div>
         </div>
@@ -216,11 +216,11 @@
     <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
         <div>
             <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">🌙 Koko Quiet Hours</h2>
-            <p class="text-xs text-slate-600 mt-0.5">Stop all Koko card polling during overnight hours (UTC)</p>
+            <p class="text-xs text-slate-600 mt-0.5">Stop all Koko card polling during overnight hours</p>
         </div>
         <div id="quiet-status-badge" class="text-xs px-2.5 py-1 rounded-full border
             {% if quiet_cfg.koko_quiet_enabled == '1' %}bg-indigo-900/30 text-indigo-300 border-indigo-800{% else %}bg-slate-800 text-slate-500 border-slate-700{% endif %}">
-            {% if quiet_cfg.koko_quiet_enabled == '1' %}● Active — {{ quiet_cfg.koko_quiet_start }}:00–{{ quiet_cfg.koko_quiet_end }}:00 UTC{% else %}○ Off{% endif %}
+            {% if quiet_cfg.koko_quiet_enabled == '1' %}● Active — {{ quiet_cfg.koko_quiet_start }}:00–{{ quiet_cfg.koko_quiet_end }}:00 {{ quiet_cfg.koko_quiet_timezone }}{% else %}○ Off{% endif %}
         </div>
     </div>
     <div class="space-y-3">
@@ -243,7 +243,14 @@
                     <option value="{{ h }}" {% if quiet_cfg.koko_quiet_end == h|string %}selected{% endif %}>{{ '%02d'|format(h) }}:00</option>
                     {% endfor %}
                 </select>
-                <span class="text-xs text-slate-600">UTC</span>
+            </div>
+            <div class="flex items-center gap-2">
+                <label class="text-xs text-slate-500">Timezone</label>
+                <select id="quiet-timezone" class="input-field text-xs px-2 py-1.5 rounded-lg w-52">
+                    {% for tz in ['Australia/Sydney','Australia/Melbourne','Australia/Brisbane','Australia/Perth','Australia/Adelaide','Australia/Hobart','Australia/Darwin','Pacific/Auckland','Asia/Tokyo','Asia/Singapore','Asia/Hong_Kong','America/New_York','America/Chicago','America/Denver','America/Los_Angeles','Europe/London','Europe/Paris','UTC'] %}
+                    <option value="{{ tz }}" {% if quiet_cfg.koko_quiet_timezone == tz %}selected{% endif %}>{{ tz }}</option>
+                    {% endfor %}
+                </select>
             </div>
         </div>
         <div class="flex justify-end">
@@ -365,6 +372,21 @@
 </div>
 
 <script>
+const USER_TZ = '{{ user_timezone }}';
+
+// Convert all UTC timestamps to user timezone
+document.querySelectorAll('.utc-ts').forEach(el => {
+    const raw = el.textContent.trim();
+    if (raw && raw !== 'Never' && raw !== '?') {
+        try {
+            const d = new Date(raw.replace(' ','T') + 'Z');
+            if (!isNaN(d.getTime())) {
+                el.textContent = d.toLocaleString('en-AU', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', timeZone: USER_TZ});
+            }
+        } catch(e) {}
+    }
+});
+
 let _logLines = [];
 let _logRefreshInterval = null;
 let _logSeen = 0;
@@ -614,7 +636,8 @@ async function saveQuietHours() {
             body: JSON.stringify({
                 enabled: document.getElementById('quiet-enabled').checked,
                 start: parseInt(document.getElementById('quiet-start').value),
-                end: parseInt(document.getElementById('quiet-end').value)
+                end: parseInt(document.getElementById('quiet-end').value),
+                timezone: document.getElementById('quiet-timezone').value
             })
         });
         const d = await r.json();
@@ -624,9 +647,10 @@ async function saveQuietHours() {
             const enabled = document.getElementById('quiet-enabled').checked;
             const s = document.getElementById('quiet-start').value;
             const e = document.getElementById('quiet-end').value;
+            const tz = document.getElementById('quiet-timezone').value;
             if (enabled) {
                 badge.className = 'text-xs px-2.5 py-1 rounded-full border bg-indigo-900/30 text-indigo-300 border-indigo-800';
-                badge.textContent = `● Active — ${s}:00–${e}:00 UTC`;
+                badge.textContent = `● Active — ${s}:00–${e}:00 ${tz}`;
             } else {
                 badge.className = 'text-xs px-2.5 py-1 rounded-full border bg-slate-800 text-slate-500 border-slate-700';
                 badge.textContent = '○ Off';

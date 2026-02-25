@@ -158,7 +158,7 @@
     <span class="text-[10px] font-bold uppercase tracking-widest" style="color:#fbbf24">🕹️ Timezone</span>
     <div class="flex-1 h-px" style="background:var(--border)"></div>
     {% if tz_session %}
-    <span class="text-[10px] text-faint">Last poll: {{ tz_session.last_poll_at[:16] if tz_session.last_poll_at else 'Never' }}</span>
+    <span class="text-[10px] text-faint">Last poll: <span class="utc-ts">{{ tz_session.last_poll_at[:16] if tz_session.last_poll_at else 'Never' }}</span></span>
     {% if tz_status in ['stale','error','needs_reconnect'] %}
     {% if tz_status == 'needs_reconnect' %}
     <a href="/timezone/start" class="text-[10px] px-2 py-0.5 rounded-lg transition"
@@ -308,6 +308,7 @@
 // ── Overview ──────────────────────────────────────────────────────────────────
 let overviewChart = null, overviewOpen = false, overviewPeriod = 'day';
 const COLORS = ['#818cf8','#fbbf24','#34d399','#f87171','#a78bfa','#38bdf8'];
+const USER_TZ = '{{ user_timezone }}';
 
 function toggleOverview() {
   overviewOpen = !overviewOpen;
@@ -338,7 +339,7 @@ async function loadOverview() {
     const allTimes = [...new Set(series.flatMap(s => s.data.map(d => d.t)))].sort();
     const sharedLabels = allTimes.map(t => {
       const d = new Date(t.replace(' ','T')+'Z');
-      return d.toLocaleString('en-AU',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+      return d.toLocaleString('en-AU',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',timeZone:USER_TZ});
     });
     overviewChart = new Chart(canvas.getContext('2d'), {
       type: 'line',
@@ -392,7 +393,14 @@ async function forcePoll(cardId, btn) {
       btn.textContent='✓';
       // Update timestamp
       const ts = document.querySelector(`[data-card-ts="${cardId}"]`);
-      if (ts && r.last_updated) ts.textContent = r.last_updated;
+      if (ts && r.last_updated) {
+        try {
+          const d = new Date(r.last_updated.replace(' ','T') + 'Z');
+          if (!isNaN(d.getTime())) {
+            ts.textContent = d.toLocaleString('en-AU', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', timeZone: USER_TZ});
+          } else { ts.textContent = r.last_updated; }
+        } catch(e) { ts.textContent = r.last_updated; }
+      }
       // Update balance stat boxes — walk up to the card container then find stat values
       if (r.data) {
         const cardEl = btn.closest('[onclick*="cards/' + cardId + '"]') || btn.closest('.card');
@@ -492,5 +500,29 @@ function ensureChartJS(cb) {
 }
 const _toggleOverview=toggleOverview;
 window.toggleOverview=function(){ensureChartJS(_toggleOverview);};
+
+// Convert all server-rendered timestamps to user timezone
+document.querySelectorAll('[data-card-ts]').forEach(el => {
+    const raw = el.textContent.trim();
+    if (raw && raw !== 'Pending...') {
+        try {
+            const d = new Date(raw.replace(' ','T') + 'Z');
+            if (!isNaN(d.getTime())) {
+                el.textContent = d.toLocaleString('en-AU', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', timeZone: USER_TZ});
+            }
+        } catch(e) {}
+    }
+});
+document.querySelectorAll('.utc-ts').forEach(el => {
+    const raw = el.textContent.trim();
+    if (raw && raw !== 'Never' && raw !== 'Pending...') {
+        try {
+            const d = new Date(raw.replace(' ','T') + 'Z');
+            if (!isNaN(d.getTime())) {
+                el.textContent = d.toLocaleString('en-AU', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit', timeZone: USER_TZ});
+            }
+        } catch(e) {}
+    }
+});
 </script>
 {% endblock %}

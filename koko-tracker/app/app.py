@@ -41,7 +41,16 @@ sys.stderr = _PrintCapture(sys.stderr)
 @app.context_processor
 def inject_discord():
     invite = f'https://discord.com/oauth2/authorize?client_id={DISCORD_CLIENT_ID}' if DISCORD_CLIENT_ID else None
-    return dict(discord_invite=invite)
+    user_tz = 'Australia/Sydney'
+    if 'user_id' in session:
+        try:
+            conn = get_db()
+            u = conn.execute('SELECT timezone_name FROM users WHERE id=?', (session['user_id'],)).fetchone()
+            conn.close()
+            if u and u['timezone_name']:
+                user_tz = u['timezone_name']
+        except: pass
+    return dict(discord_invite=invite, user_timezone=user_tz)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -214,6 +223,7 @@ def init_db():
     conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_start', '4')")
     conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_end', '10')")
     conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_enabled', '1')")
+    conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_timezone', 'Australia/Sydney')")
     # Migrations
     for sql in [
         'ALTER TABLE cards ADD COLUMN tier TEXT',
@@ -878,27 +888,34 @@ def fetch_timezone_history(bearer_token, card_no, cookies_dict=None):
 
 # ─── Poller ───────────────────────────────────────────────────────────────────
 def get_quiet_hours():
-    """Return (enabled, start_hour, end_hour) for koko quiet hours."""
+    """Return (enabled, start_hour, end_hour, tz_name) for koko quiet hours."""
     try:
         conn = get_db()
         enabled = conn.execute("SELECT value FROM app_config WHERE key='koko_quiet_enabled'").fetchone()
         start = conn.execute("SELECT value FROM app_config WHERE key='koko_quiet_start'").fetchone()
         end = conn.execute("SELECT value FROM app_config WHERE key='koko_quiet_end'").fetchone()
+        tz = conn.execute("SELECT value FROM app_config WHERE key='koko_quiet_timezone'").fetchone()
         conn.close()
         return (
             bool(int(enabled['value'])) if enabled else True,
             int(start['value']) if start else 4,
             int(end['value']) if end else 10,
+            tz['value'] if tz else 'Australia/Sydney',
         )
     except:
-        return True, 4, 10
+        return True, 4, 10, 'Australia/Sydney'
 
 def is_koko_quiet_hour():
-    """Check if we're in the koko quiet hours window (UTC)."""
-    enabled, start, end = get_quiet_hours()
+    """Check if we're in the koko quiet hours window (in the configured timezone)."""
+    enabled, start, end, tz_name = get_quiet_hours()
     if not enabled:
         return False
-    hour = datetime.utcnow().hour
+    try:
+        from zoneinfo import ZoneInfo
+        now_local = datetime.now(ZoneInfo(tz_name))
+        hour = now_local.hour
+    except Exception:
+        hour = datetime.utcnow().hour  # fallback to UTC
     if start <= end:
         return start <= hour < end
     else:  # wraps around midnight
@@ -1934,9 +1951,9 @@ def admin():
     admin_wh = conn.execute('SELECT * FROM admin_webhook WHERE id=1').fetchone()
     # Get quiet hours config
     quiet_cfg = {}
-    for key in ['koko_quiet_enabled', 'koko_quiet_start', 'koko_quiet_end']:
+    for key in ['koko_quiet_enabled', 'koko_quiet_start', 'koko_quiet_end', 'koko_quiet_timezone']:
         row = conn.execute("SELECT value FROM app_config WHERE key=?", (key,)).fetchone()
-        quiet_cfg[key] = row['value'] if row else ('1' if 'enabled' in key else '4' if 'start' in key else '10')
+        quiet_cfg[key] = row['value'] if row else ('1' if 'enabled' in key else '4' if 'start' in key else '10' if 'end' in key else 'Australia/Sydney')
     conn.close()
     tz_statuses = {ts['user_id']: tz_session_status(ts) for ts in tz_sessions}
     current = get_current_user()
@@ -2005,12 +2022,14 @@ def admin_quiet_hours():
     enabled = '1' if data.get('enabled') else '0'
     start = str(int(data.get('start', 4)))
     end = str(int(data.get('end', 10)))
+    tz_name = data.get('timezone', 'Australia/Sydney')
     conn = get_db()
     conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('koko_quiet_enabled', ?)", (enabled,))
     conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('koko_quiet_start', ?)", (start,))
     conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('koko_quiet_end', ?)", (end,))
+    conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('koko_quiet_timezone', ?)", (tz_name,))
     conn.commit(); conn.close()
-    print(f"[Admin] Quiet hours updated: enabled={enabled}, {start}:00-{end}:00 UTC")
+    print(f"[Admin] Quiet hours updated: enabled={enabled}, {start}:00-{end}:00 {tz_name}")
     return jsonify({'success': True})
 
 @app.route('/admin/make-admin/<int:user_id>', methods=['POST'])

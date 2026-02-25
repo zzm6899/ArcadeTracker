@@ -134,6 +134,28 @@ def db_get_spent(user_id, days=1):
     conn.close()
     return results
 
+def db_get_spent_alltime(user_id):
+    """Get all-time spending per card (first reading vs latest reading)."""
+    conn = get_db()
+    cards = conn.execute('SELECT id, card_label, card_number, card_type FROM cards WHERE user_id=? AND active=1', (user_id,)).fetchall()
+    results = []
+    for card in cards:
+        first = conn.execute(
+            'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC LIMIT 1',
+            (card['id'],)
+        ).fetchone()
+        latest = conn.execute(
+            'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1',
+            (card['id'],)
+        ).fetchone()
+        if first and latest:
+            first_total = (first['cash_balance'] or 0) + (first['cash_bonus'] or 0)
+            last_total  = (latest['cash_balance'] or 0) + (latest['cash_bonus'] or 0)
+            spent = first_total - last_total
+            results.append({'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
+    conn.close()
+    return results
+
 def db_get_stats_for_status():
     """Privacy-safe aggregate stats for bot status messages."""
     conn = get_db()
@@ -243,6 +265,10 @@ async def cmd_cards(interaction: discord.Interaction):
     if not cards:
         await interaction.response.send_message("No cards found.", ephemeral=ephem); return
 
+    # Get all-time spending for each card
+    alltime = await asyncio.get_event_loop().run_in_executor(None, db_get_spent_alltime, user['id'])
+    alltime_map = {r['label']: r['spent'] for r in alltime}
+
     embed = discord.Embed(title=f"🎮 {user['username']}'s Cards", color=0x6366f1)
     for card in cards:
         total = (card['cash_balance'] or 0) + (card['cash_bonus'] or 0)
@@ -250,8 +276,13 @@ async def cmd_cards(interaction: discord.Interaction):
         label = card['card_label'] or 'Card'
         last  = card['last_updated'][:16] if card['last_updated'] else 'Never'
         pts_label = 'e-Tickets' if card['card_type'] == 'timezone' else 'pts'
+        at_spent = alltime_map.get(label, 0)
+        at_str = ''
+        if abs(at_spent) >= 0.01:
+            at_sign = '-' if at_spent > 0 else '+'
+            at_str = f"\n📉 All-time: {at_sign}${abs(at_spent):.2f}"
         val = (f"💰 **${total:.2f}** · ${card['cash_balance'] or 0:.2f} + ${card['cash_bonus'] or 0:.2f} bonus\n"
-               f"🎫 {card['points'] or 0:,} {pts_label}\n"
+               f"🎫 {card['points'] or 0:,} {pts_label}{at_str}\n"
                f"🕐 {last}")
         embed.add_field(name=f"{card_emoji(card['card_type'])} {label}{tier}", value=val, inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=ephem)
@@ -274,11 +305,12 @@ async def cmd_balance(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="spent", description="How much you've spent in a timeframe")
-@app_commands.describe(period="Timeframe: day, week, month (default: day)")
+@app_commands.describe(period="Timeframe: day, week, month, all time (default: day)")
 @app_commands.choices(period=[
     app_commands.Choice(name="Today (24h)", value="day"),
     app_commands.Choice(name="This week (7d)", value="week"),
     app_commands.Choice(name="This month (30d)", value="month"),
+    app_commands.Choice(name="All Time", value="all"),
 ])
 async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
     user, _ = await run_sync(db_get_user_cards, interaction.user.id)
@@ -286,11 +318,14 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
     if not user:
         await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
 
-    days_map = {'day': 1, 'week': 7, 'month': 30}
-    days = days_map.get(period, 1)
-    label_map = {'day': 'last 24h', 'week': 'last 7 days', 'month': 'last 30 days'}
+    label_map = {'day': 'last 24h', 'week': 'last 7 days', 'month': 'last 30 days', 'all': 'all time'}
 
-    results = await asyncio.get_event_loop().run_in_executor(None, db_get_spent, user['id'], days)
+    if period == 'all':
+        results = await asyncio.get_event_loop().run_in_executor(None, db_get_spent_alltime, user['id'])
+    else:
+        days_map = {'day': 1, 'week': 7, 'month': 30}
+        days = days_map.get(period, 1)
+        results = await asyncio.get_event_loop().run_in_executor(None, db_get_spent, user['id'], days)
 
     if not results:
         await interaction.response.send_message("No spending data available.", ephemeral=ephem); return
@@ -431,7 +466,7 @@ def db_add_koko_card(user_id, token, label, cash_balance, cash_bonus, points, ca
         else:
             conn.execute(
                 "INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,poll_interval) VALUES (?,?,?,?,?,?)",
-                (user_id, 'koko', token, label or card_name or token, card_name, 60)
+                (user_id, 'koko', token, label or card_name or token, card_name, 300)
             )
             cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
         conn.execute(
