@@ -775,21 +775,23 @@ def send_admin_webhook(card, data, prev, username):
 
         color = 0x6366f1  # indigo default
         change_str = ''
+        action = ''
         if prev:
             prev_total = (prev['cash_balance'] or 0) + (prev['cash_bonus'] or 0)
             diff = new_total - prev_total
             if abs(diff) >= 0.01:
-                sign   = '+' if diff >= 0 else ''
-                color  = 0x22c55e if diff > 0 else 0xef4444
+                sign      = '+' if diff >= 0 else ''
+                color     = 0x22c55e if diff > 0 else 0xef4444
+                action    = '💳 Topup!' if diff > 0 else '🎮 Tapped!'
                 change_str = f'{sign}${diff:.2f}'
-                fields.append({'name': 'Change', 'value': change_str, 'inline': True})
+                fields.append({'name': 'Change', 'value': f'{action}  {change_str}', 'inline': True})
 
         mode_label = {'on': 'Live', '5m': 'Every 5m', '10m': 'Every 10m',
                       '30m': 'Every 30m', '1h': 'Hourly', '1d': 'Daily'}.get(mode, mode)
 
         payload = {
             'embeds': [{
-                'title': f'{emoji} Balance Update — {label}',
+                'title': f'{emoji} {action or "Balance Update"} — {label}',
                 'color': color,
                 'fields': fields,
                 'footer': {'text': f'Total: ${new_total:.2f}  ·  Admin Monitor ({mode_label})'},
@@ -803,21 +805,22 @@ def send_admin_webhook(card, data, prev, username):
 
 def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
     try:
-        diff = new_total - prev_total
-        sign = '+' if diff > 0 else ''
-        color = 0x22c55e if diff > 0 else 0xef4444
-        label = card['card_label'] or card['card_number'] or 'Card'
-        ctype = card['card_type'] or 'koko'
-        emoji = '🕹️' if ctype == 'timezone' else '🎮'
+        diff   = new_total - prev_total
+        sign   = '+' if diff > 0 else ''
+        color  = 0x22c55e if diff > 0 else 0xef4444
+        action = '💳 Topup!' if diff > 0 else '🎮 Tapped!'
+        label  = card['card_label'] or card['card_number'] or 'Card'
+        ctype  = card['card_type'] or 'koko'
+        emoji  = '🕹️' if ctype == 'timezone' else '🎮'
         payload = {
             'embeds': [{
                 'title': f'{emoji} {label}',
-                'description': f'Balance updated',
+                'description': action,
                 'color': color,
                 'fields': [
                     {'name': 'Credits', 'value': f"${data.get('cash_balance', 0):.2f}", 'inline': True},
-                    {'name': 'Bonus', 'value': f"${data.get('cash_bonus', 0):.2f}", 'inline': True},
-                    {'name': 'Change', 'value': f"{sign}${diff:.2f}", 'inline': True},
+                    {'name': 'Bonus',   'value': f"${data.get('cash_bonus', 0):.2f}",   'inline': True},
+                    {'name': 'Change',  'value': f"{sign}${diff:.2f}",                  'inline': True},
                 ],
                 'footer': {'text': f'Total: ${new_total:.2f}'},
                 'timestamp': datetime.utcnow().isoformat() + 'Z'
@@ -1016,9 +1019,12 @@ def poll_cards():
                         new_total = (data.get('cash_balance') or 0) + (data.get('cash_bonus') or 0)
                         if abs(new_total - prev_total) >= 0.01:
                             send_discord_webhook(user_row['discord_webhook'], card, data, prev_total, new_total)
-                    # Admin-wide webhook — fires for every card update regardless of change amount
+                    # Admin-wide webhook — only fire when balance actually changed (or first reading)
                     username = user_row['username'] if user_row else f'user_{card["user_id"]}'
-                    send_admin_webhook(card, data, prev, username)
+                    new_total_adm = (data.get('cash_balance') or 0) + (data.get('cash_bonus') or 0)
+                    prev_total_adm = ((prev['cash_balance'] or 0) + (prev['cash_bonus'] or 0)) if prev else None
+                    if prev is None or (prev_total_adm is not None and abs(new_total_adm - prev_total_adm) >= 0.01):
+                        send_admin_webhook(card, data, prev, username)
                     print(f"[Poller] Card {card['id']} ({ctype}): {data.get('cash_balance')}/{data.get('cash_bonus')}/{data.get('points')}")
 
         except Exception as e:
