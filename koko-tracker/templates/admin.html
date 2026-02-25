@@ -32,7 +32,7 @@
                         {% if u.is_admin %}<span class="text-xs bg-indigo-900/50 text-indigo-300 border border-indigo-800 px-2 py-0.5 rounded-full">Admin</span>{% endif %}
                     </div>
                     <div class="flex items-center gap-3 text-xs text-slate-500 flex-wrap">
-                        <span class="{% if st == 'connected' %}text-green-400{% elif st in ['error','stale'] %}text-red-400{% endif %}">TZ: {{ st }}</span>
+                        <span class="{% if st == 'connected' %}text-green-400{% elif st in ['error','stale','needs_reconnect'] %}text-red-400{% endif %}">TZ: {{ st }}</span>
                         <span>Discord: {{ '✓ linked' if u.discord_id else '— none' }}</span>
                         <span>Joined: {{ u.created_at[:10] }}</span>
                     </div>
@@ -148,7 +148,7 @@
                 <span class="font-medium text-white text-sm">{{ ts.username }}</span>
                 <span class="text-xs px-2 py-0.5 rounded-full
                     {% if st == 'connected' %}bg-green-900/40 text-green-400
-                    {% elif st in ['stale','error'] %}bg-red-900/40 text-red-400
+                    {% elif st in ['stale','error','needs_reconnect'] %}bg-red-900/40 text-red-400
                     {% else %}bg-slate-700 text-slate-400{% endif %}">{{ st }}</span>
             </div>
             <div class="text-xs text-slate-500">
@@ -159,7 +159,12 @@
             </div>
         </div>
         <div class="flex flex-col gap-1 items-end shrink-0">
-        {% if st in ['stale','error'] %}
+        {% if st == 'needs_reconnect' %}
+        <a href="/timezone/start" target="_blank"
+            class="text-xs text-red-300 bg-red-900/20 border border-red-900 hover:bg-red-900/40 rounded-lg px-2 py-1 transition">
+            ⚠️ Reconnect Required
+        </a>
+        {% elif st in ['stale','error'] %}
         <button onclick="tzReauth({{ ts.user_id }}, this)"
             class="text-xs text-red-300 bg-red-900/20 border border-red-900 hover:bg-red-900/40 rounded-lg px-2 py-1 transition">
             ⚠️ {{ 'Error' if st == 'error' else 'Stale' }} — 🔄 Refresh Token
@@ -303,6 +308,10 @@ async function tzReauth(userId, btn) {
             btn.textContent = '✅ Refreshed!';
             btn.className = btn.className.replace(/text-red-\w+/g, 'text-green-400').replace(/border-red-\w+/g, 'border-green-700').replace(/bg-red-\w+\/\w+/g, '');
             setTimeout(() => location.reload(), 1500);
+        } else if (d.needs_reconnect) {
+            btn.textContent = '⚠️ Needs reconnect';
+            btn.className = btn.className;
+            setTimeout(() => location.reload(), 2000);
         } else {
             btn.textContent = '❌ ' + (d.error || 'Failed');
             setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);

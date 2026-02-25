@@ -663,7 +663,19 @@ def tz_session_status(tzs):
             age = (now_dt - last).total_seconds()
             if tzs['last_poll_status'] == 'error' and age < TIMEZONE_POLL_INTERVAL * 2:
                 return 'error'
+            # Only call stale if updated_at is also old — a recent reauth/token refresh
+            # touches updated_at, so we shouldn't flag stale if the session was recently active
             if age > TIMEZONE_POLL_INTERVAL * 3:
+                updated_at = None
+                if tzs['updated_at']:
+                    try:
+                        updated_at = datetime.strptime(str(tzs['updated_at'])[:19], '%Y-%m-%d %H:%M:%S')
+                    except: pass
+                if updated_at:
+                    updated_age = (now_dt - updated_at).total_seconds()
+                    # If session was touched (reauth/token refresh) within 2x poll interval, not stale
+                    if updated_age < TIMEZONE_POLL_INTERVAL * 2:
+                        return 'connected'
                 return 'stale'
     return 'connected'
 
@@ -1132,8 +1144,18 @@ def timezone_reauth():
 
     _save_refreshed_token_to_db(target_uid, new_tok, new_rt, expires_in or 840,
                                 json.loads(tzs['cookies_json'] or '{}'))
+    # Also reset last_poll_at so the stale detector doesn't immediately re-flag
     now = datetime.utcnow()
     tok_exp = (now + timedelta(seconds=expires_in or 840)).strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        conn = get_db()
+        conn.execute(
+            "UPDATE timezone_sessions SET last_poll_at=?, last_poll_status='ok' WHERE user_id=?",
+            (now.strftime('%Y-%m-%d %H:%M:%S'), target_uid)
+        )
+        conn.commit(); conn.close()
+    except Exception as e:
+        print(f"[Reauth] Could not reset last_poll_at: {e}")
     print(f"[Reauth] Token refreshed for user {target_uid}, expires {tok_exp}")
     return jsonify({'success': True, 'expires': tok_exp, 'message': f'Token refreshed, expires {tok_exp}'})
 
