@@ -333,8 +333,8 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
     """
     Refresh Timezone bearer token.
     Returns (new_access_token, new_refresh_token, expires_in) on success.
-    Returns (TZ_REFRESH_TOKEN_EXPIRED, None, None) when the refresh token has expired (AADB2C90080).
-    Returns (None, None, None) on other errors.
+    Returns (TZ_REFRESH_TOKEN_EXPIRED, None, None) when the refresh token has DEFINITIVELY expired (AADB2C90080).
+    Returns (None, None, None) on other/transient errors.
     """
     try:
         resp = requests.post(TZ_TOKEN_URL, data={
@@ -364,10 +364,13 @@ def tz_refresh_ms_token(refresh_token, ms_client_id=None):
             error_code = err.get('error', '')
             error_desc = err.get('error_description', '')
             print(f"[Timezone] MS refresh fail ({resp.status_code}): {error_code}: {error_desc[:200]}")
-            # AADB2C90080 = refresh token expired — user must log in again via bookmarklet
-            if 'AADB2C90080' in error_desc or error_code == 'invalid_grant':
-                print(f"[Timezone] Refresh token has expired (AADB2C90080) — user must reconnect")
+            # ONLY mark as definitively expired if Azure explicitly says so via AADB2C90080.
+            # Do NOT treat generic 'invalid_grant' as expired — that code is also returned for
+            # transient server errors and token clock-skew. Those should retry next cycle.
+            if 'AADB2C90080' in error_desc:
+                print(f"[Timezone] Refresh token has definitively expired (AADB2C90080) — user must reconnect")
                 return TZ_REFRESH_TOKEN_EXPIRED, None, None
+            # All other errors (invalid_grant, server errors, etc.) are treated as transient
             return None, None, None
     except Exception as e:
         print(f"[Timezone] MS refresh error: {e}")
@@ -862,7 +865,7 @@ def log_poll(card_id, success, message=''):
     except: pass
 
 def _refresh_tz_tokens(label):
-    """Refresh any Timezone tokens that are expired or expiring within 5 minutes."""
+    """Refresh any Timezone tokens that are expired or expiring within 10 minutes."""
     try:
         conn = get_db()
         # Exclude sessions already marked needs_reconnect — nothing we can do until user reconnects
@@ -879,7 +882,7 @@ def _refresh_tz_tokens(label):
             else:
                 try:
                     exp = datetime.strptime(tzs['token_expires_at'], '%Y-%m-%d %H:%M:%S')
-                    if (exp - now).total_seconds() < 300:
+                    if (exp - now).total_seconds() < 600:  # 10 min window (was 5)
                         needs_refresh = True
                 except:
                     needs_refresh = True
@@ -952,8 +955,8 @@ def poll_cards():
                         bearer, rt, cookies, expires_dt = token_info
                         secs_left = (expires_dt - datetime.utcnow()).total_seconds()
 
-                        # Proactively refresh if expiring within 3 minutes
-                        if secs_left < 180 and rt:
+                        # Proactively refresh if expiring within 10 minutes
+                        if secs_left < 600 and rt:
                             print(f"[Poller] Token expires in {secs_left:.0f}s for user {card['user_id']}, pre-refreshing...")
                             conn2 = get_db()
                             tzs_row = conn2.execute('SELECT ms_client_id FROM timezone_sessions WHERE user_id=?', (card['user_id'],)).fetchone()
