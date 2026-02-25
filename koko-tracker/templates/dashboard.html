@@ -198,7 +198,7 @@
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-1.5">
         <span class="{% if tz_status == 'connected' %}pulse-yellow{% elif tz_status in ['error','needs_reconnect'] %}pulse-red{% else %}pulse-red{% endif %}"></span>
-        <span class="font-mono text-[10px] {% if tz_status in ['error','needs_reconnect'] %}text-danger{% else %}text-muted{% endif %}">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
+        <span class="font-mono text-[10px] {% if tz_status in ['error','needs_reconnect'] %}text-danger{% else %}text-muted{% endif %}" data-card-ts="{{ card.id }}">{{ card.last_updated[:16] if card.last_updated else 'Pending...' }}</span>
       </div>
       <div class="flex items-center gap-1" onclick="event.stopPropagation()">
         <select onchange="updateInterval({{ card.id }}, this.value)"
