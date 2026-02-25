@@ -183,6 +183,93 @@
 {% endif %}
 
 
+<!-- Admin Webhook Monitor -->
+<div class="card rounded-2xl p-5 mt-5">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+        <div>
+            <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">📡 Admin Webhook Monitor</h2>
+            <p class="text-xs text-slate-600 mt-0.5">Ping a Discord webhook on card balance updates across all users</p>
+        </div>
+        <div id="wh-status-badge" class="text-xs px-2.5 py-1 rounded-full border
+            {% if admin_webhook and admin_webhook.enabled and admin_webhook.mode != 'off' %}
+                bg-green-900/30 text-green-400 border-green-800
+            {% else %}
+                bg-slate-800 text-slate-500 border-slate-700
+            {% endif %}">
+            {% if admin_webhook and admin_webhook.enabled and admin_webhook.mode != 'off' %}
+                ● Active — {{ {'on':'Live','5m':'Every 5m','10m':'Every 10m','30m':'Every 30m','1h':'Hourly','1d':'Daily'}.get(admin_webhook.mode, admin_webhook.mode) }}
+            {% else %}
+                ○ Off
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- URL + controls row -->
+    <div class="space-y-3">
+        <div class="flex gap-2 flex-wrap items-end">
+            <div class="flex-1 min-w-0">
+                <label class="text-xs text-slate-500 mb-1 block">Webhook URL</label>
+                <input id="wh-url" type="url"
+                    value="{{ admin_webhook.webhook_url or '' if admin_webhook else '' }}"
+                    placeholder="https://discord.com/api/webhooks/..."
+                    class="input-field w-full px-3 py-2 rounded-lg text-sm font-mono">
+            </div>
+            <button onclick="whTest()"
+                class="text-xs text-slate-400 hover:text-white border border-slate-700 hover:border-slate-500 rounded-lg px-3 py-2 transition shrink-0">
+                🧪 Test
+            </button>
+        </div>
+
+        <!-- Mode selector -->
+        <div>
+            <label class="text-xs text-slate-500 mb-1.5 block">Fire mode</label>
+            <div class="flex flex-wrap gap-2">
+                {% for val, lbl in [('off','Off'),('on','Every update'),('5m','Every 5 min'),('10m','Every 10 min'),('30m','Every 30 min'),('1h','Hourly'),('1d','Daily')] %}
+                <button onclick="whSetMode('{{ val }}')"
+                    id="wh-mode-{{ val }}"
+                    class="wh-mode-btn text-xs px-3 py-1.5 rounded-lg border transition
+                        {% if admin_webhook and admin_webhook.mode == val %}
+                            {% if val == 'off' %}bg-slate-700 text-white border-slate-600
+                            {% else %}bg-indigo-600 text-white border-indigo-500{% endif %}
+                        {% else %}border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300{% endif %}">
+                    {{ lbl }}
+                </button>
+                {% endfor %}
+            </div>
+            <p class="text-xs text-slate-600 mt-1.5">
+                <strong class="text-slate-500">Every update:</strong> fires on each card poll that returns data.
+                <strong class="text-slate-500">Timer modes:</strong> batches into one ping per interval (useful to avoid spam).
+            </p>
+        </div>
+
+        <!-- Save button + last fired -->
+        <div class="flex items-center justify-between gap-3 flex-wrap pt-1">
+            <div class="text-xs text-slate-600">
+                {% if admin_webhook and admin_webhook.last_fired_at %}
+                    Last fired: <span class="text-slate-500">{{ admin_webhook.last_fired_at[:16] }}</span>
+                {% else %}
+                    Never fired
+                {% endif %}
+            </div>
+            <button id="wh-save-btn" onclick="whSave()"
+                class="text-xs btn-primary px-4 py-1.5 rounded-lg text-white transition">
+                💾 Save
+            </button>
+        </div>
+    </div>
+
+    <!-- Recent fires feed (live, last 20) -->
+    <div class="mt-4 border-t border-slate-800 pt-4">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs text-slate-500 font-medium">Recent webhook fires</span>
+            <span id="wh-feed-count" class="text-xs text-slate-600">—</span>
+        </div>
+        <div id="wh-feed" class="space-y-1.5 max-h-64 overflow-y-auto">
+            <div class="text-xs text-slate-600 text-center py-4">No fires yet this session</div>
+        </div>
+    </div>
+</div>
+
 <!-- Console Log -->
 <div class="card rounded-2xl p-5 mt-6">
     <div class="flex items-center justify-between mb-3">
@@ -324,5 +411,134 @@ function toggleRename(uid) {
     f.classList.toggle('hidden');
     if (!f.classList.contains('hidden')) f.querySelector('input').focus();
 }
+
+// ── Admin Webhook ─────────────────────────────────────────────────────────────
+let _whMode = '{{ admin_webhook.mode if admin_webhook else "off" }}';
+let _whFires = [];  // in-memory log of fires this session
+
+function whSetMode(mode) {
+    _whMode = mode;
+    document.querySelectorAll('.wh-mode-btn').forEach(btn => {
+        const isSelected = btn.id === 'wh-mode-' + mode;
+        if (isSelected) {
+            btn.className = btn.className.replace(/border-slate-700|text-slate-500|hover:\S+/g, '').trim();
+            btn.classList.add(...(mode === 'off'
+                ? ['bg-slate-700','text-white','border-slate-600']
+                : ['bg-indigo-600','text-white','border-indigo-500']));
+        } else {
+            btn.className = 'wh-mode-btn text-xs px-3 py-1.5 rounded-lg border transition border-slate-700 text-slate-500 hover:border-slate-500 hover:text-slate-300';
+        }
+    });
+}
+
+async function whSave() {
+    const btn  = document.getElementById('wh-save-btn');
+    const url  = document.getElementById('wh-url').value.trim();
+    const orig = btn.textContent;
+    btn.textContent = '⟳ Saving...'; btn.disabled = true;
+    try {
+        const r = await fetch('/admin/webhook', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({webhook_url: url, mode: _whMode})
+        });
+        const d = await r.json();
+        if (d.success) {
+            btn.textContent = '✅ Saved!';
+            const badge = document.getElementById('wh-status-badge');
+            const modeLabels = {on:'Live','5m':'Every 5m','10m':'Every 10m','30m':'Every 30m','1h':'Hourly','1d':'Daily'};
+            if (d.enabled) {
+                badge.className = badge.className.replace(/bg-slate-800|text-slate-500|border-slate-700/g,'').trim();
+                badge.classList.add('bg-green-900/30','text-green-400','border-green-800');
+                badge.textContent = `● Active — ${modeLabels[d.mode] || d.mode}`;
+            } else {
+                badge.className = badge.className.replace(/bg-green-\S+|text-green-\S+|border-green-\S+/g,'').trim();
+                badge.classList.add('bg-slate-800','text-slate-500','border-slate-700');
+                badge.textContent = '○ Off';
+            }
+        } else {
+            btn.textContent = '❌ ' + (d.error || 'Error');
+        }
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
+    } catch(e) {
+        btn.textContent = '❌ Network error'; btn.disabled = false;
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
+    }
+}
+
+async function whTest() {
+    const url = document.getElementById('wh-url').value.trim();
+    if (!url) { alert('Enter a webhook URL first'); return; }
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = '⟳ Sending...'; btn.disabled = true;
+    try {
+        const r = await fetch('/admin/webhook/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({webhook_url: url})
+        });
+        const d = await r.json();
+        btn.textContent = d.success ? '✅ Sent!' : '❌ ' + (d.error || 'Failed');
+        if (d.success) whAddFire({type:'test', label:'Test message', username:'admin', card_type:'—', ts: new Date().toISOString()});
+    } catch(e) { btn.textContent = '❌ Error'; }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 3000);
+}
+
+function whAddFire(entry) {
+    _whFires.unshift(entry);
+    if (_whFires.length > 20) _whFires = _whFires.splice(0, 20);
+    whRenderFeed();
+}
+
+function whRenderFeed() {
+    const el = document.getElementById('wh-feed');
+    const cnt = document.getElementById('wh-feed-count');
+    cnt.textContent = _whFires.length ? `${_whFires.length} fire${_whFires.length>1?'s':''} this session` : '—';
+    if (!_whFires.length) {
+        el.innerHTML = '<div class="text-xs text-slate-600 text-center py-4">No fires yet this session</div>';
+        return;
+    }
+    const typeIcon = t => t === 'timezone' ? '🟡' : t === 'test' ? '🔔' : '🟣';
+    el.innerHTML = _whFires.map(f => {
+        const ts = f.ts ? f.ts.replace('T',' ').slice(0,16) : '';
+        const change = f.change ? `<span class="${f.change.startsWith('+') ? 'text-green-400' : 'text-red-400'} font-mono ml-1">${f.change}</span>` : '';
+        return `<div class="flex items-center gap-2 bg-slate-800/40 rounded-lg px-3 py-2 text-xs">
+            <span class="shrink-0">${typeIcon(f.card_type)}</span>
+            <span class="text-slate-400 font-medium shrink-0">${f.username || '—'}</span>
+            <span class="text-slate-600 shrink-0">${f.card_type || '—'}</span>
+            <span class="text-white truncate flex-1">${f.label || f.card_name || '—'}</span>
+            ${change}
+            <span class="text-slate-600 shrink-0 tabular-nums">${ts}</span>
+        </div>`;
+    }).join('');
+}
+
+// Poll log to capture admin webhook fires via log scanning
+// We piggyback on the existing log feed — when a [AdminWebhook] line appears, parse it
+const _origRenderLogs = typeof renderLogs === 'function' ? renderLogs : null;
+let _lastWhLogSeen = 0;
+function checkLogsForWebhookFires() {
+    if (!_logLines) return;
+    const wh = _logLines.filter((l, i) => i >= _lastWhLogSeen && l.msg && l.msg.includes('[AdminWebhook] Fired'));
+    wh.forEach(l => {
+        // Parse: [AdminWebhook] Fired for card X (label) — HTTP 200
+        const m = l.msg.match(/Fired for card \d+ \((.+?)\)/);
+        whAddFire({
+            label: m ? m[1] : 'Card',
+            username: '—',
+            card_type: '—',
+            ts: l.ts,
+        });
+    });
+    _lastWhLogSeen = _logLines.length;
+}
+// Hook into the existing fetchLogs cycle
+const _origFetchLogs = fetchLogs;
+async function fetchLogs() {
+    await _origFetchLogs();
+    checkLogsForWebhookFires();
+}
+
 </script>
 {% endblock %}

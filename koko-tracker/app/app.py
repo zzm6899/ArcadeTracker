@@ -193,7 +193,17 @@ def init_db():
             code TEXT NOT NULL,
             expires_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS admin_webhook (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            webhook_url TEXT,
+            enabled INTEGER DEFAULT 0,
+            mode TEXT DEFAULT 'off',
+            last_fired_at TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
+    # Ensure admin_webhook singleton row exists
+    conn.execute("INSERT OR IGNORE INTO admin_webhook (id, enabled, mode) VALUES (1, 0, 'off')")
     # Migrations
     for sql in [
         'ALTER TABLE cards ADD COLUMN tier TEXT',
@@ -681,6 +691,116 @@ def tz_session_status(tzs):
 
 
 # ─── Discord Webhook ──────────────────────────────────────────────────────────
+# ─── Admin Webhook ────────────────────────────────────────────────────────────
+# In-memory: last time admin webhook was fired per mode (timer modes)
+_admin_webhook_last = {}
+_admin_webhook_lock = threading.Lock()
+
+# Mode -> seconds interval (None = fire on every update)
+ADMIN_WEBHOOK_INTERVALS = {
+    'on':  None,   # fire on every card update
+    '5m':  300,
+    '10m': 600,
+    '30m': 1800,
+    '1h':  3600,
+    '1d':  86400,
+}
+
+def get_admin_webhook_config():
+    """Return (url, mode) or (None, 'off') if not configured."""
+    try:
+        conn = get_db()
+        row = conn.execute('SELECT webhook_url, mode, enabled FROM admin_webhook WHERE id=1').fetchone()
+        conn.close()
+        if row and row['enabled'] and row['webhook_url'] and row['mode'] != 'off':
+            return row['webhook_url'], row['mode']
+    except Exception as e:
+        print(f"[AdminWebhook] Config read error: {e}")
+    return None, 'off'
+
+def send_admin_webhook(card, data, prev, username):
+    """
+    Fire the admin-wide webhook with full card info.
+    Respects mode: 'on' = every update, timer modes = throttled.
+    card     — cards row (with card_type, card_label, card_number, user_id)
+    data     — freshly polled balance dict
+    prev     — previous balance_history row (or None)
+    username — owner's username string
+    """
+    url, mode = get_admin_webhook_config()
+    if not url or mode == 'off':
+        return
+
+    interval = ADMIN_WEBHOOK_INTERVALS.get(mode)
+    if interval is not None:
+        # Timer mode — only fire if enough time has passed since last fire
+        with _admin_webhook_lock:
+            last = _admin_webhook_last.get('fired')
+            now  = datetime.utcnow()
+            if last and (now - last).total_seconds() < interval:
+                return
+            _admin_webhook_lock_update = True
+        # Update last fired (outside lock to avoid blocking)
+        with _admin_webhook_lock:
+            _admin_webhook_last['fired'] = datetime.utcnow()
+        # Also persist to DB so it survives restarts
+        try:
+            conn = get_db()
+            conn.execute("UPDATE admin_webhook SET last_fired_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=1",
+                         (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),))
+            conn.commit(); conn.close()
+        except: pass
+
+    try:
+        ctype     = card['card_type'] or 'koko'
+        label     = card['card_label'] or card['card_number'] or 'Card'
+        emoji     = '🕹️' if ctype == 'timezone' else '🎮'
+        type_emoji = '🟡' if ctype == 'timezone' else '🟣'
+        new_bal   = data.get('cash_balance') or 0
+        new_bon   = data.get('cash_bonus') or 0
+        new_pts   = data.get('points') or 0
+        new_total = new_bal + new_bon
+
+        # Build change fields if we have a previous reading
+        fields = [
+            {'name': 'User',    'value': f'`{username}`',       'inline': True},
+            {'name': 'Type',    'value': f'{type_emoji} {ctype}','inline': True},
+            {'name': 'Card',    'value': f'`{label}`',           'inline': True},
+            {'name': 'Credits', 'value': f'${new_bal:.2f}',      'inline': True},
+            {'name': 'Bonus',   'value': f'${new_bon:.2f}',      'inline': True},
+            {'name': 'Points',  'value': str(new_pts),           'inline': True},
+        ]
+        if data.get('tier'):
+            fields.append({'name': 'Tier', 'value': data['tier'], 'inline': True})
+
+        color = 0x6366f1  # indigo default
+        change_str = ''
+        if prev:
+            prev_total = (prev['cash_balance'] or 0) + (prev['cash_bonus'] or 0)
+            diff = new_total - prev_total
+            if abs(diff) >= 0.01:
+                sign   = '+' if diff >= 0 else ''
+                color  = 0x22c55e if diff > 0 else 0xef4444
+                change_str = f'{sign}${diff:.2f}'
+                fields.append({'name': 'Change', 'value': change_str, 'inline': True})
+
+        mode_label = {'on': 'Live', '5m': 'Every 5m', '10m': 'Every 10m',
+                      '30m': 'Every 30m', '1h': 'Hourly', '1d': 'Daily'}.get(mode, mode)
+
+        payload = {
+            'embeds': [{
+                'title': f'{emoji} Balance Update — {label}',
+                'color': color,
+                'fields': fields,
+                'footer': {'text': f'Total: ${new_total:.2f}  ·  Admin Monitor ({mode_label})'},
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+            }]
+        }
+        resp = requests.post(url, json=payload, timeout=8)
+        print(f"[AdminWebhook] Fired for card {card['id']} ({label}) — HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"[AdminWebhook] Error firing webhook: {e}")
+
 def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
     try:
         diff = new_total - prev_total
@@ -889,13 +1009,16 @@ def poll_cards():
                     if data.get('tier'):
                         conn.execute('UPDATE cards SET tier=? WHERE id=?', (data['tier'], card['id']))
                     conn.commit()
-                    user_row = conn.execute('SELECT discord_webhook FROM users WHERE id=?', (card['user_id'],)).fetchone()
+                    user_row = conn.execute('SELECT discord_webhook, username FROM users WHERE id=?', (card['user_id'],)).fetchone()
                     conn.close()
                     if user_row and user_row['discord_webhook'] and prev:
                         prev_total = (prev['cash_balance'] or 0) + (prev['cash_bonus'] or 0)
                         new_total = (data.get('cash_balance') or 0) + (data.get('cash_bonus') or 0)
                         if abs(new_total - prev_total) >= 0.01:
                             send_discord_webhook(user_row['discord_webhook'], card, data, prev_total, new_total)
+                    # Admin-wide webhook — fires for every card update regardless of change amount
+                    username = user_row['username'] if user_row else f'user_{card["user_id"]}'
+                    send_admin_webhook(card, data, prev, username)
                     print(f"[Poller] Card {card['id']} ({ctype}): {data.get('cash_balance')}/{data.get('cash_bonus')}/{data.get('points')}")
 
         except Exception as e:
@@ -1686,12 +1809,66 @@ def admin():
         SELECT ts.*, u.username FROM timezone_sessions ts
         JOIN users u ON ts.user_id = u.id
     ''').fetchall()
+    admin_wh = conn.execute('SELECT * FROM admin_webhook WHERE id=1').fetchone()
     conn.close()
     tz_statuses = {ts['user_id']: tz_session_status(ts) for ts in tz_sessions}
     current = get_current_user()
     return render_template('admin.html', users=users, cards=cards,
                           tz_sessions=tz_sessions, tz_statuses=tz_statuses,
-                          user=current, current_user=current, admin_username=ADMIN_USERNAME)
+                          user=current, current_user=current, admin_username=ADMIN_USERNAME,
+                          admin_webhook=admin_wh)
+
+@app.route('/admin/webhook', methods=['POST'])
+@admin_required
+def admin_webhook_save():
+    """Save admin webhook config."""
+    data = request.get_json()
+    url  = (data.get('webhook_url') or '').strip()
+    mode = data.get('mode', 'off')
+    if mode not in ('off', 'on', '5m', '10m', '30m', '1h', '1d'):
+        return jsonify({'success': False, 'error': 'Invalid mode'}), 400
+    enabled = 0 if mode == 'off' else 1
+    conn = get_db()
+    conn.execute(
+        "UPDATE admin_webhook SET webhook_url=?, enabled=?, mode=?, updated_at=CURRENT_TIMESTAMP WHERE id=1",
+        (url or None, enabled, mode)
+    )
+    conn.commit(); conn.close()
+    print(f"[AdminWebhook] Config updated: mode={mode}, url={'set' if url else 'cleared'}")
+    return jsonify({'success': True, 'mode': mode, 'enabled': bool(enabled)})
+
+@app.route('/admin/webhook/test', methods=['POST'])
+@admin_required
+def admin_webhook_test():
+    """Fire a test embed to verify the webhook URL."""
+    data = request.get_json()
+    url  = (data.get('webhook_url') or '').strip()
+    if not url:
+        return jsonify({'success': False, 'error': 'No webhook URL provided'})
+    try:
+        payload = {
+            'embeds': [{
+                'title': '🔔 Admin Webhook Test',
+                'description': 'Balance Tracker admin webhook is configured correctly.',
+                'color': 0x6366f1,
+                'fields': [
+                    {'name': 'User',    'value': '`test_user`',    'inline': True},
+                    {'name': 'Type',    'value': '🟣 koko',         'inline': True},
+                    {'name': 'Card',    'value': '`Test Card`',     'inline': True},
+                    {'name': 'Credits', 'value': '$42.00',          'inline': True},
+                    {'name': 'Bonus',   'value': '$8.00',           'inline': True},
+                    {'name': 'Points',  'value': '1337',            'inline': True},
+                ],
+                'footer': {'text': 'Admin Monitor — Test message'},
+                'timestamp': datetime.utcnow().isoformat() + 'Z',
+            }]
+        }
+        resp = requests.post(url, json=payload, timeout=8)
+        if resp.status_code in (200, 204):
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': f'Discord returned HTTP {resp.status_code}: {resp.text[:200]}'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/admin/make-admin/<int:user_id>', methods=['POST'])
 @admin_required
