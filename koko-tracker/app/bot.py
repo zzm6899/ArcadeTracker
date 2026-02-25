@@ -284,6 +284,7 @@ class BalanceBot(discord.Client):
                 lambda s: (discord.ActivityType.watching,
                            f"🎮 {s['cards']} cards · {s['users']} players"),
                 lambda s: (discord.ActivityType.playing, "Balance Tracker"),
+                lambda s: (discord.ActivityType.playing, "card.z2hs.au")
                 # Public leaderboard total (may be $0 if no one opted in — skip if so)
                 lambda s: (discord.ActivityType.watching,
                            f"🏆 ${s['public_total']:.0f} on leaderboard")
