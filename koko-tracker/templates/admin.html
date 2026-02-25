@@ -211,6 +211,48 @@
 {% endif %}
 
 
+<!-- Koko Quiet Hours -->
+<div class="card rounded-2xl p-5 mt-5">
+    <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
+        <div>
+            <h2 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">🌙 Koko Quiet Hours</h2>
+            <p class="text-xs text-slate-600 mt-0.5">Stop all Koko card polling during overnight hours (UTC)</p>
+        </div>
+        <div id="quiet-status-badge" class="text-xs px-2.5 py-1 rounded-full border
+            {% if quiet_cfg.koko_quiet_enabled == '1' %}bg-indigo-900/30 text-indigo-300 border-indigo-800{% else %}bg-slate-800 text-slate-500 border-slate-700{% endif %}">
+            {% if quiet_cfg.koko_quiet_enabled == '1' %}● Active — {{ quiet_cfg.koko_quiet_start }}:00–{{ quiet_cfg.koko_quiet_end }}:00 UTC{% else %}○ Off{% endif %}
+        </div>
+    </div>
+    <div class="space-y-3">
+        <div class="flex items-center gap-4 flex-wrap">
+            <label class="flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" id="quiet-enabled" {% if quiet_cfg.koko_quiet_enabled == '1' %}checked{% endif %}
+                    class="rounded border-slate-600 bg-slate-800 text-indigo-500 focus:ring-indigo-500">
+                <span class="text-sm text-slate-300">Enable quiet hours</span>
+            </label>
+            <div class="flex items-center gap-2">
+                <label class="text-xs text-slate-500">From</label>
+                <select id="quiet-start" class="input-field text-xs px-2 py-1.5 rounded-lg w-20">
+                    {% for h in range(24) %}
+                    <option value="{{ h }}" {% if quiet_cfg.koko_quiet_start == h|string %}selected{% endif %}>{{ '%02d'|format(h) }}:00</option>
+                    {% endfor %}
+                </select>
+                <label class="text-xs text-slate-500">to</label>
+                <select id="quiet-end" class="input-field text-xs px-2 py-1.5 rounded-lg w-20">
+                    {% for h in range(24) %}
+                    <option value="{{ h }}" {% if quiet_cfg.koko_quiet_end == h|string %}selected{% endif %}>{{ '%02d'|format(h) }}:00</option>
+                    {% endfor %}
+                </select>
+                <span class="text-xs text-slate-600">UTC</span>
+            </div>
+        </div>
+        <div class="flex justify-end">
+            <button id="quiet-save-btn" onclick="saveQuietHours()"
+                class="text-xs btn-primary px-4 py-1.5 rounded-lg text-white transition">💾 Save</button>
+        </div>
+    </div>
+</div>
+
 <!-- Admin Webhook Monitor -->
 <div class="card rounded-2xl p-5 mt-5">
     <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
@@ -561,6 +603,41 @@ function checkLogsForWebhookFires() {
     });
     _lastWhLogSeen = _logLines.length;
 }
+async function saveQuietHours() {
+    const btn = document.getElementById('quiet-save-btn');
+    const orig = btn.textContent;
+    btn.textContent = '⟳ Saving...'; btn.disabled = true;
+    try {
+        const r = await fetch('/admin/quiet-hours', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                enabled: document.getElementById('quiet-enabled').checked,
+                start: parseInt(document.getElementById('quiet-start').value),
+                end: parseInt(document.getElementById('quiet-end').value)
+            })
+        });
+        const d = await r.json();
+        if (d.success) {
+            btn.textContent = '✅ Saved!';
+            const badge = document.getElementById('quiet-status-badge');
+            const enabled = document.getElementById('quiet-enabled').checked;
+            const s = document.getElementById('quiet-start').value;
+            const e = document.getElementById('quiet-end').value;
+            if (enabled) {
+                badge.className = 'text-xs px-2.5 py-1 rounded-full border bg-indigo-900/30 text-indigo-300 border-indigo-800';
+                badge.textContent = `● Active — ${s}:00–${e}:00 UTC`;
+            } else {
+                badge.className = 'text-xs px-2.5 py-1 rounded-full border bg-slate-800 text-slate-500 border-slate-700';
+                badge.textContent = '○ Off';
+            }
+        } else {
+            btn.textContent = '❌ Error';
+        }
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500);
+    } catch(e) { btn.textContent = '❌ Error'; setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2500); }
+}
+
 // Hook into the existing fetchLogs cycle
 const _origFetchLogs = fetchLogs;
 async function fetchLogs() {

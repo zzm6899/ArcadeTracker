@@ -70,7 +70,7 @@
     </div>
     <div class="flex items-center gap-2">
       <div class="flex gap-0.5 rounded-lg p-0.5" style="background:rgba(6,10,18,0.7);border:1px solid var(--border)">
-        {% for p, label in [('day','24h'),('week','7d'),('month','30d')] %}
+        {% for p, label in [('day','24h'),('week','7d'),('month','30d'),('all','All')] %}
         <button onclick="event.stopPropagation(); setOverviewPeriod('{{ p }}')"
           class="period-btn {% if p == 'day' %}active{% endif %}" data-period="{{ p }}">{{ label }}</button>
         {% endfor %}
@@ -136,7 +136,7 @@
           class="text-[10px] px-2 py-1 rounded-lg font-mono"
           style="background:rgba(6,10,18,0.7);border:1px solid var(--border);color:var(--text-muted)">
           {% for val, lbl in [(60,'1 min'),(300,'5 min'),(900,'15 min'),(3600,'1 hr'),(86400,'Daily')] %}
-          <option value="{{ val }}" {% if (card.poll_interval or 60) == val %}selected{% endif %}>{{ lbl }}</option>
+          <option value="{{ val }}" {% if (card.poll_interval or 300) == val %}selected{% endif %}>{{ lbl }}</option>
           {% endfor %}
         </select>
         <a href="/cards/{{ card.id }}" onclick="event.stopPropagation()" class="btn-ghost text-[10px] px-2 py-1 rounded-lg">View</a>
@@ -289,7 +289,7 @@
         <input name="card_label" type="text" class="input-field w-full px-3 py-2.5 rounded-xl text-sm" placeholder="Nickname (optional)">
         <select name="poll_interval" class="input-field w-full px-3 py-2.5 rounded-xl text-sm">
           <option value="60">Every 1 minute</option>
-          <option value="300">Every 5 minutes</option>
+          <option value="300" selected>Every 5 minutes</option>
           <option value="900">Every 15 minutes</option>
           <option value="3600">Hourly</option>
           <option value="86400">Daily</option>
@@ -479,7 +479,7 @@ async function resolveQR(url) {
 function addScannedCard() {
   if (!scannedToken) return;
   const form=document.createElement('form'); form.method='POST'; form.action='/cards/add';
-  [['card_token',scannedToken],['card_label',document.getElementById('scan-label').value.trim()],['poll_interval','60']].forEach(([n,v])=>{
+  [['card_token',scannedToken],['card_label',document.getElementById('scan-label').value.trim()],['poll_interval','300']].forEach(([n,v])=>{
     const i=document.createElement('input'); i.type='hidden'; i.name=n; i.value=v; form.appendChild(i);
   });
   document.body.appendChild(form); form.submit();

@@ -53,7 +53,17 @@ function renderCards(cards, name) {
         showState('success', `Connected as ${name}! No cards found on this account.`);
         return;
     }
-    list.innerHTML = cards.map(card => `
+    // Add "Add all cards" button at the top if multiple cards
+    let addAllHtml = '';
+    if (cards.length > 1) {
+        addAllHtml = `
+            <button onclick="addAllCards()" id="add-all-btn"
+                class="w-full bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl text-sm font-semibold text-white transition mb-3">
+                + Track all ${cards.length} cards
+            </button>
+        `;
+    }
+    list.innerHTML = addAllHtml + cards.map(card => `
         <div class="bg-slate-800 rounded-xl p-4">
             <div class="flex items-start justify-between gap-3 mb-3">
                 <div>
@@ -96,6 +106,41 @@ function renderCards(cards, name) {
             </form>
         </div>
     `).join('');
+
+    // Store cards globally for addAllCards
+    window._tzCards = cards;
+}
+
+async function addAllCards() {
+    const btn = document.getElementById('add-all-btn');
+    if (!btn || !window._tzCards) return;
+    btn.textContent = '⟳ Adding...'; btn.disabled = true;
+    try {
+        const resp = await fetch('/timezone/add-all-cards', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cards: window._tzCards.map(c => ({
+                number: c.number,
+                label: 'Timezone ' + c.number,
+                cashBalance: c.cashBalance,
+                bonusBalance: c.bonusBalance,
+                tickets: c.tickets,
+                tier: c.tier || ''
+            }))})
+        });
+        const result = await resp.json();
+        if (result.success) {
+            btn.textContent = `✅ ${result.added} card(s) added!`;
+            btn.className = btn.className.replace('bg-indigo-600 hover:bg-indigo-500', 'bg-green-700');
+            setTimeout(() => window.location.href = '/dashboard', 1200);
+        } else {
+            btn.textContent = '❌ ' + (result.error || 'Failed');
+            setTimeout(() => { btn.textContent = `+ Track all ${window._tzCards.length} cards`; btn.disabled = false; }, 3000);
+        }
+    } catch(e) {
+        btn.textContent = '❌ Error';
+        setTimeout(() => { btn.textContent = `+ Track all ${window._tzCards.length} cards`; btn.disabled = false; }, 3000);
+    }
 }
 
 async function run() {

@@ -66,11 +66,11 @@
 
     <!-- Last updated -->
     <p class="text-xs text-slate-600 mt-3" id="last-updated-line">
-        Last updated: {{ card.last_updated[:16] if card.last_updated else 'Pending first poll…' }}
+        Last updated: {{ last_updated if last_updated else 'Pending first poll…' }}
     </p>
 
     <!-- Stats -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3" id="stats-container">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mt-3" id="stats-container">
         <div class="bg-slate-800 rounded-xl p-3">
             <p class="text-xs text-slate-500 mb-1">{{ 'Credits' if card.card_type == 'timezone' else 'Cash Balance' }}</p>
             <p class="font-bold text-green-400 text-xl" id="stat-balance">–</p>
@@ -87,6 +87,10 @@
             <p class="text-xs text-slate-500 mb-1">Spent (24h)</p>
             <p class="font-bold text-slate-400 text-xl" id="stat-spent">–</p>
         </div>
+        <div class="bg-slate-800 rounded-xl p-3">
+            <p class="text-xs text-slate-500 mb-1">All-Time Spent</p>
+            <p class="font-bold text-slate-400 text-xl" id="stat-alltime">–</p>
+        </div>
     </div>
 </div>
 
@@ -98,6 +102,7 @@
             <button onclick="loadChart('day')" id="btn-day" class="period-btn active px-3 py-1.5 rounded-md text-xs font-medium transition">24h</button>
             <button onclick="loadChart('week')" id="btn-week" class="period-btn px-3 py-1.5 rounded-md text-xs font-medium transition">7 Days</button>
             <button onclick="loadChart('month')" id="btn-month" class="period-btn px-3 py-1.5 rounded-md text-xs font-medium transition">30 Days</button>
+            <button onclick="loadChart('all')" id="btn-all" class="period-btn px-3 py-1.5 rounded-md text-xs font-medium transition">All Time</button>
         </div>
     </div>
     <div style="position:relative; height:280px;">
@@ -150,7 +155,7 @@
 
 <!-- Poll Log -->
 <div class="card rounded-2xl p-5">
-    <h2 class="text-base font-bold text-white mb-3">📋 Recent Polls</h2>
+    <h2 class="text-base font-bold text-white mb-3">📡 Last Pings</h2>
     <div id="poll-log-container">
     {% if poll_logs %}
     <div class="space-y-0" id="poll-log-list">
@@ -236,6 +241,13 @@ async function loadStats() {
         if (d.spent_24h !== null && d.spent_24h !== undefined) {
             const spent = d.spent_24h;
             const el = document.getElementById('stat-spent');
+            el.textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
+            el.className = 'font-bold text-xl ' + (spent > 0 ? 'text-red-400' : 'text-green-400');
+        }
+
+        if (d.spent_alltime !== null && d.spent_alltime !== undefined) {
+            const spent = d.spent_alltime;
+            const el = document.getElementById('stat-alltime');
             el.textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
             el.className = 'font-bold text-xl ' + (spent > 0 ? 'text-red-400' : 'text-green-400');
         }

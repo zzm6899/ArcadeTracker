@@ -48,7 +48,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = True  # requires HTTPS
 
 DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
-DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 60))
+DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 300))
 TIMEZONE_POLL_INTERVAL = int(os.environ.get('TIMEZONE_POLL_INTERVAL', 900))
 KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
 TEEG_API = 'https://api.teeg.cloud'
@@ -203,9 +203,17 @@ def init_db():
             last_fired_at TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS app_config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
     ''')
     # Ensure admin_webhook singleton row exists
     conn.execute("INSERT OR IGNORE INTO admin_webhook (id, enabled, mode) VALUES (1, 0, 'off')")
+    # Ensure default quiet hours config
+    conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_start', '4')")
+    conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_end', '10')")
+    conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_enabled', '1')")
     # Migrations
     for sql in [
         'ALTER TABLE cards ADD COLUMN tier TEXT',
@@ -233,6 +241,10 @@ def init_db():
     # Fix timezone cards that have the wrong default poll interval (60 instead of 900)
     try:
         conn.execute("UPDATE cards SET poll_interval=900 WHERE card_type='timezone' AND poll_interval=60")
+    except: pass
+    # Migrate koko cards from old 1-min default to 5-min default
+    try:
+        conn.execute("UPDATE cards SET poll_interval=300 WHERE card_type='koko' AND poll_interval=60")
     except: pass
     conn.commit()
     # Sync env-defined admin
@@ -817,16 +829,28 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
         label  = card['card_label'] or card['card_number'] or 'Card'
         ctype  = card['card_type'] or 'koko'
         emoji  = '🕹️' if ctype == 'timezone' else '🎮'
+        fields = [
+            {'name': 'Credits', 'value': f"${data.get('cash_balance', 0):.2f}", 'inline': True},
+            {'name': 'Bonus',   'value': f"${data.get('cash_bonus', 0):.2f}",   'inline': True},
+            {'name': 'Change',  'value': f"{sign}${diff:.2f}",                  'inline': True},
+        ]
+        # Calculate all-time spending
+        try:
+            conn = get_db()
+            first = conn.execute('SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC LIMIT 1', (card['id'],)).fetchone()
+            conn.close()
+            if first:
+                first_total = (first['cash_balance'] or 0) + (first['cash_bonus'] or 0)
+                alltime_spent = first_total - new_total
+                if abs(alltime_spent) >= 0.01:
+                    fields.append({'name': 'All-Time Spent', 'value': f"${alltime_spent:.2f}", 'inline': True})
+        except: pass
         payload = {
             'embeds': [{
                 'title': f'{emoji} {label}',
                 'description': action,
                 'color': color,
-                'fields': [
-                    {'name': 'Credits', 'value': f"${data.get('cash_balance', 0):.2f}", 'inline': True},
-                    {'name': 'Bonus',   'value': f"${data.get('cash_bonus', 0):.2f}",   'inline': True},
-                    {'name': 'Change',  'value': f"{sign}${diff:.2f}",                  'inline': True},
-                ],
+                'fields': fields,
                 'footer': {'text': f'Total: ${new_total:.2f}'},
                 'timestamp': datetime.utcnow().isoformat() + 'Z'
             }]
@@ -853,6 +877,33 @@ def fetch_timezone_history(bearer_token, card_no, cookies_dict=None):
         return None
 
 # ─── Poller ───────────────────────────────────────────────────────────────────
+def get_quiet_hours():
+    """Return (enabled, start_hour, end_hour) for koko quiet hours."""
+    try:
+        conn = get_db()
+        enabled = conn.execute("SELECT value FROM app_config WHERE key='koko_quiet_enabled'").fetchone()
+        start = conn.execute("SELECT value FROM app_config WHERE key='koko_quiet_start'").fetchone()
+        end = conn.execute("SELECT value FROM app_config WHERE key='koko_quiet_end'").fetchone()
+        conn.close()
+        return (
+            bool(int(enabled['value'])) if enabled else True,
+            int(start['value']) if start else 4,
+            int(end['value']) if end else 10,
+        )
+    except:
+        return True, 4, 10
+
+def is_koko_quiet_hour():
+    """Check if we're in the koko quiet hours window (UTC)."""
+    enabled, start, end = get_quiet_hours()
+    if not enabled:
+        return False
+    hour = datetime.utcnow().hour
+    if start <= end:
+        return start <= hour < end
+    else:  # wraps around midnight
+        return hour >= start or hour < end
+
 def log_poll(card_id, success, message=''):
     try:
         conn = get_db()
@@ -942,6 +993,8 @@ def poll_cards():
 
                 data = None
                 if ctype == 'koko':
+                    if is_koko_quiet_hour():
+                        continue  # skip koko cards during quiet hours
                     data = fetch_koko_balance(card['card_token'])
                     if data and any(v is not None for v in [data.get('cash_balance'), data.get('cash_bonus'), data.get('points')]):
                         log_poll(card['id'], True, 'OK')
@@ -1538,8 +1591,10 @@ def card_detail(card_id):
     card = conn.execute('SELECT * FROM cards WHERE id=? AND user_id=? AND active=1', (card_id, user['id'])).fetchone()
     if not card: conn.close(); return redirect(url_for('dashboard'))
     logs = conn.execute('SELECT * FROM poll_log WHERE card_id=? ORDER BY logged_at DESC LIMIT 20', (card_id,)).fetchall()
+    latest = conn.execute('SELECT recorded_at FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1', (card_id,)).fetchone()
     conn.close()
-    return render_template('card_detail.html', user=user, card=card, poll_logs=logs)
+    last_updated = latest['recorded_at'][:16] if latest else None
+    return render_template('card_detail.html', user=user, card=card, poll_logs=logs, last_updated=last_updated)
 
 # ─── Routes: Timezone ─────────────────────────────────────────────────────────
 @app.route('/timezone/connect')
@@ -1647,6 +1702,46 @@ def timezone_add_card():
     except sqlite3.IntegrityError: flash('Card already tracked.', 'error')
     finally: conn.close()
     return redirect(url_for('dashboard'))
+
+@app.route('/timezone/add-all-cards', methods=['POST'])
+@login_required
+def timezone_add_all_cards():
+    """Add all timezone cards at once from a JSON payload."""
+    user = get_current_user()
+    data = request.get_json()
+    cards_data = data.get('cards', [])
+    if not cards_data:
+        return jsonify({'error': 'No cards provided'}), 400
+    added = 0
+    conn = get_db()
+    for c in cards_data:
+        card_number = str(c.get('number', '')).strip()
+        if not card_number:
+            continue
+        card_label = c.get('label', f'Timezone {card_number}')
+        cash_balance = float(c.get('cashBalance', 0))
+        bonus_balance = float(c.get('bonusBalance', 0))
+        tickets = int(float(c.get('tickets', 0)))
+        tier = c.get('tier', '')
+        try:
+            existing = conn.execute("SELECT id FROM cards WHERE user_id=? AND card_token=?",
+                (user['id'], f'tz_{card_number}')).fetchone()
+            if existing:
+                conn.execute("UPDATE cards SET active=1, card_label=?, tier=?, poll_interval=? WHERE id=?",
+                    (card_label, tier, TIMEZONE_POLL_INTERVAL, existing['id']))
+                cid = existing['id']
+            else:
+                conn.execute("INSERT INTO cards (user_id,card_type,card_token,card_label,card_number,tier,poll_interval) VALUES (?,'timezone',?,?,?,?,?)",
+                    (user['id'], f'tz_{card_number}', card_label, card_number, tier, TIMEZONE_POLL_INTERVAL))
+                cid = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+            conn.execute('INSERT INTO balance_history (card_id,cash_balance,cash_bonus,points,card_name,tier) VALUES (?,?,?,?,?,?)',
+                (cid, cash_balance, bonus_balance, tickets, card_label, tier))
+            added += 1
+        except sqlite3.IntegrityError:
+            pass
+    conn.commit()
+    conn.close()
+    return jsonify({'success': True, 'added': added})
 
 @app.route('/timezone/disconnect', methods=['POST'])
 @login_required
@@ -1837,13 +1932,18 @@ def admin():
         JOIN users u ON ts.user_id = u.id
     ''').fetchall()
     admin_wh = conn.execute('SELECT * FROM admin_webhook WHERE id=1').fetchone()
+    # Get quiet hours config
+    quiet_cfg = {}
+    for key in ['koko_quiet_enabled', 'koko_quiet_start', 'koko_quiet_end']:
+        row = conn.execute("SELECT value FROM app_config WHERE key=?", (key,)).fetchone()
+        quiet_cfg[key] = row['value'] if row else ('1' if 'enabled' in key else '4' if 'start' in key else '10')
     conn.close()
     tz_statuses = {ts['user_id']: tz_session_status(ts) for ts in tz_sessions}
     current = get_current_user()
     return render_template('admin.html', users=users, cards=cards,
                           tz_sessions=tz_sessions, tz_statuses=tz_statuses,
                           user=current, current_user=current, admin_username=ADMIN_USERNAME,
-                          admin_webhook=admin_wh)
+                          admin_webhook=admin_wh, quiet_cfg=quiet_cfg)
 
 @app.route('/admin/webhook', methods=['POST'])
 @admin_required
@@ -1896,6 +1996,22 @@ def admin_webhook_test():
         return jsonify({'success': False, 'error': f'Discord returned HTTP {resp.status_code}: {resp.text[:200]}'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/admin/quiet-hours', methods=['POST'])
+@admin_required
+def admin_quiet_hours():
+    """Save koko quiet hours config."""
+    data = request.get_json()
+    enabled = '1' if data.get('enabled') else '0'
+    start = str(int(data.get('start', 4)))
+    end = str(int(data.get('end', 10)))
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('koko_quiet_enabled', ?)", (enabled,))
+    conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('koko_quiet_start', ?)", (start,))
+    conn.execute("INSERT OR REPLACE INTO app_config (key, value) VALUES ('koko_quiet_end', ?)", (end,))
+    conn.commit(); conn.close()
+    print(f"[Admin] Quiet hours updated: enabled={enabled}, {start}:00-{end}:00 UTC")
+    return jsonify({'success': True})
 
 @app.route('/admin/make-admin/<int:user_id>', methods=['POST'])
 @admin_required
@@ -1987,12 +2103,16 @@ def admin_toggle_leaderboard(card_id):
 def api_history(card_id):
     user = get_current_user()
     period = request.args.get('period','day')
-    since = datetime.utcnow() - ({'day': timedelta(hours=24), 'week': timedelta(days=7), 'month': timedelta(days=30)}.get(period, timedelta(hours=24)))
     conn = get_db()
     if not conn.execute('SELECT id FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone():
         conn.close(); return jsonify({'error': 'Not found'}), 404
-    rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at>=? AND cash_balance IS NOT NULL ORDER BY recorded_at ASC',
-        (card_id, since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
+    if period == 'all':
+        rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND cash_balance IS NOT NULL ORDER BY recorded_at ASC',
+            (card_id,)).fetchall()
+    else:
+        since = datetime.utcnow() - ({'day': timedelta(hours=24), 'week': timedelta(days=7), 'month': timedelta(days=30)}.get(period, timedelta(hours=24)))
+        rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at>=? AND cash_balance IS NOT NULL ORDER BY recorded_at ASC',
+            (card_id, since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
     conn.close()
     return jsonify({'labels':[r['recorded_at'] for r in rows], 'cash_balance':[r['cash_balance'] for r in rows],
                     'cash_bonus':[r['cash_bonus'] for r in rows], 'points':[r['points'] for r in rows],
@@ -2022,20 +2142,34 @@ def api_stats(card_id):
     spent_24h = None
     if first_24h and latest:
         spent_24h = round(((first_24h['cash_balance'] or 0)+(first_24h['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
-    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'card_type': card['card_type'], 'history': history or []})
+    # All-time spending: difference between first ever reading and latest
+    spent_alltime = None
+    first_ever = conn2_first = None
+    try:
+        conn2 = get_db()
+        first_ever = conn2.execute('SELECT cash_balance,cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC LIMIT 1', (card_id,)).fetchone()
+        conn2.close()
+    except: pass
+    if first_ever and latest:
+        spent_alltime = round(((first_ever['cash_balance'] or 0)+(first_ever['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
+    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'spent_alltime': spent_alltime, 'card_type': card['card_type'], 'history': history or []})
 
 @app.route('/api/dashboard/overview')
 @login_required
 def api_dashboard_overview():
     user = get_current_user()
     period = request.args.get('period', 'day')
-    since = datetime.utcnow() - ({'day': timedelta(hours=24), 'week': timedelta(days=7), 'month': timedelta(days=30)}.get(period, timedelta(hours=24)))
     conn = get_db()
     cards = conn.execute('SELECT id, card_label, card_type, card_number FROM cards WHERE user_id=? AND active=1', (user['id'],)).fetchall()
     result = []
     for card in cards:
-        rows = conn.execute('SELECT cash_balance, cash_bonus, points, recorded_at FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC',
-            (card['id'], since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
+        if period == 'all':
+            rows = conn.execute('SELECT cash_balance, cash_bonus, points, recorded_at FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC',
+                (card['id'],)).fetchall()
+        else:
+            since = datetime.utcnow() - ({'day': timedelta(hours=24), 'week': timedelta(days=7), 'month': timedelta(days=30)}.get(period, timedelta(hours=24)))
+            rows = conn.execute('SELECT cash_balance, cash_bonus, points, recorded_at FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC',
+                (card['id'], since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
         result.append({
             'card_id': card['id'],
             'label': card['card_label'] or card['card_number'] or 'Card',
