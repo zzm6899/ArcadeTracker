@@ -118,7 +118,7 @@ async function prepare() {
         state: st,
         code_challenge: ch,
         code_challenge_method: 'S256',
-        response_mode: 'fragment',
+        response_mode: 'query',
     }).toString();
     const btn = document.getElementById('login-btn');
     if (btn) { btn.disabled = false; btn.textContent = 'Open Timezone Login →'; }
@@ -164,9 +164,11 @@ function doLogin() {
                 clearInterval(pollTimer);
                 popup.close();
 
-                // Code is in the hash fragment (#code=...&state=...)
-                var hash = new URL(href).hash.slice(1); // strip leading #
-                var params = new URLSearchParams(hash);
+                // Try query params first (?code=), fall back to hash fragment (#code=)
+                var u = new URL(href);
+                var params = u.searchParams.get('code')
+                    ? u.searchParams
+                    : new URLSearchParams(u.hash.slice(1));
 
                 var err = params.get('error');
                 if (err) {
@@ -179,7 +181,7 @@ function doLogin() {
                 if (code) {
                     exchangeCode(code, verifier);
                 } else {
-                    setState('error', 'No authorization code received. Hash: ' + hash.slice(0,80));
+                    setState('error', 'No authorization code received. URL: ' + href.slice(0,120));
                 }
             }
         } catch(e) {
