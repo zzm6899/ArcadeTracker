@@ -126,18 +126,28 @@ async function prepare() {
 
 // ── Click handler: opens popup SYNCHRONOUSLY (no async = no blocker) ──
 function doLogin() {
-    if (!readyUrl) return;
+    if (!readyUrl) {
+        setState('error', 'Still preparing — please wait a moment and try again.');
+        return;
+    }
 
     // Capture current values before regenerating
     const url = readyUrl;
     const verifier = readyVerifier;
 
     // Open popup immediately in the click handler (synchronous!)
+    // Use a unique window name each time to avoid a stale named window
+    // that won't re-navigate (the root cause of the about:blank bug).
     const w = 500, h = 700;
     const left = (screen.width - w) / 2;
     const top = (screen.height - h) / 2;
-    const popup = window.open(url, 'tz_login',
+    const winName = 'tz_login_' + Date.now();
+    const popup = window.open('about:blank', winName,
         `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`);
+
+    // Navigate the popup immediately after opening (still within the same
+    // synchronous click handler tick — browsers allow this).
+    if (popup) popup.location.href = url;
 
     // Regenerate for next attempt
     prepare();
