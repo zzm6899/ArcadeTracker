@@ -5,7 +5,7 @@ Configure via docker-compose.yml environment variables:
   DISCORD_GUILD_ID=your_server_id  (optional, faster command sync)
 """
 
-import os, sys, asyncio, sqlite3, secrets, random
+import os, sys, asyncio, sqlite3, secrets, random, json
 from datetime import datetime, timedelta
 import discord
 from discord import app_commands
@@ -25,6 +25,16 @@ def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def db_touch_last_seen(discord_id):
+    """Update last_seen timestamp for a user (called on every command)."""
+    try:
+        conn = get_db()
+        now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        conn.execute('UPDATE users SET last_seen=? WHERE discord_id=?', (now, str(discord_id)))
+        conn.commit(); conn.close()
+    except Exception:
+        pass
 
 def db_get_user(discord_id):
     conn = get_db()
@@ -82,13 +92,11 @@ def db_get_command_privacy(user_id):
     if not row or not row['discord_cmd_privacy']:
         return {}
     try:
-        import json
         return json.loads(row['discord_cmd_privacy'])
     except:
         return {}
 
 def db_set_command_privacy(user_id, cmd, ephemeral):
-    import json
     conn = get_db()
     row = conn.execute('SELECT discord_cmd_privacy FROM users WHERE id=?', (user_id,)).fetchone()
     priv = {}
@@ -112,7 +120,6 @@ def db_get_spent(user_id, days=1):
             (card['id'], since)
         ).fetchall()
         if len(rows) < 2:
-            # get latest before window for comparison
             before = conn.execute(
                 'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? AND recorded_at<? ORDER BY recorded_at DESC LIMIT 1',
                 (card['id'], since)
@@ -161,7 +168,6 @@ def db_get_stats_for_status():
     conn = get_db()
     total_cards = conn.execute('SELECT COUNT(*) FROM cards WHERE active=1').fetchone()[0]
     total_users = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
-    # Sum of all public card balances only
     pub = conn.execute(
         'SELECT SUM(h.cash_balance + h.cash_bonus) as tot FROM cards c '
         'JOIN users u ON c.user_id=u.id '
@@ -189,9 +195,6 @@ def tier_emoji(tier):
 def card_emoji(ctype):
     return '🕹️' if ctype == 'timezone' else '🎮'
 
-def run_sync(fn, *args):
-    return asyncio.to_thread(fn, *args)
-
 # ─── Bot ──────────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = False
@@ -203,7 +206,6 @@ class BalanceBot(discord.Client):
         self._status_idx = 0
 
     async def setup_hook(self):
-        # Allow bot to be used in DMs and group chats (user-installable app)
         self.tree.allowed_installs = discord.app_commands.AppInstallationType(guild=True, user=True)
         self.tree.allowed_contexts = discord.app_commands.AppCommandContext(
             guild=True, dm_channel=True, private_channel=True
@@ -214,45 +216,148 @@ class BalanceBot(discord.Client):
             await self.tree.sync(guild=guild)
         else:
             await self.tree.sync()
-        self.cycle_status.start()
-        print(f"[Bot] Ready. Guild: {GUILD_ID or 'global'}")
+        print(f"[Bot] Synced commands. Guild: {GUILD_ID or 'global'}")
 
     async def on_ready(self):
         print(f"[Bot] Logged in as {self.user}")
+        if not self.status_loop.is_running():
+            self.status_loop.start()
+            print("[Bot] Status loop started.")
+
+    @tasks.loop(seconds=45)
+    async def status_loop(self):
+        try:
+            stats = await asyncio.to_thread(db_get_stats_for_status)
+            templates = [
+                (discord.ActivityType.watching,  f"💰 ${stats['public_total']:.0f} in public balances"),
+                (discord.ActivityType.watching,  f"🎮 {stats['cards']} cards tracked"),
+                (discord.ActivityType.watching,  f"👥 {stats['users']} players"),
+                (discord.ActivityType.playing,   "Balance Tracker"),
+            ]
+            if stats['top_tier']:
+                templates.append((discord.ActivityType.watching, f"💎 {stats['top_tier']} members active"))
+
+            atype, name = templates[self._status_idx % len(templates)]
+            await self.change_presence(activity=discord.Activity(type=atype, name=name))
+            self._status_idx += 1
+        except Exception as e:
+            print(f"[Bot] Status error: {e}")
 
 bot = BalanceBot()
 
-# ─── Status cycling — privacy-safe aggregate facts ───────────────────────────
-STATUS_TEMPLATES = [
-    lambda s: (discord.ActivityType.watching,  f"💰 ${s['public_total']:.0f} in public balances"),
-    lambda s: (discord.ActivityType.watching,  f"🎮 {s['cards']} cards tracked"),
-    lambda s: (discord.ActivityType.watching,  f"👥 {s['users']} players"),
-    lambda s: (discord.ActivityType.playing,   f"Balance Tracker"),
-    lambda s: (discord.ActivityType.watching,  f"💎 {s['top_tier']} members active") if s['top_tier'] else (discord.ActivityType.watching, f"🎮 {s['cards']} cards tracked"),
-]
-
-@tasks.loop(seconds=45)
-async def cycle_status():
-    try:
-        stats = await asyncio.to_thread(db_get_stats_for_status)
-        tmpl = STATUS_TEMPLATES[bot._status_idx % len(STATUS_TEMPLATES)]
-        atype, name = tmpl(stats)
-        await bot.change_presence(activity=discord.Activity(type=atype, name=name))
-        bot._status_idx += 1
-    except Exception as e:
-        print(f"[Bot] Status error: {e}")
-
-@cycle_status.before_loop
-async def before_cycle_status():
-    await bot.wait_until_ready()
-
-BalanceBot.cycle_status = cycle_status
-
 # ─── Commands ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="help", description="Show all available commands")
+async def cmd_help(interaction: discord.Interaction):
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    embed = discord.Embed(
+        title="📖 Balance Tracker — Commands",
+        color=0x6366f1,
+        description="Track your Koko & Timezone arcade card balances."
+    )
+    embed.add_field(name="🔗 /link", value="Link your Discord account", inline=True)
+    embed.add_field(name="🎮 /cards", value="Show all card balances", inline=True)
+    embed.add_field(name="💰 /balance", value="Quick total balance", inline=True)
+    embed.add_field(name="📊 /spent", value="Spending over time", inline=True)
+    embed.add_field(name="🔄 /refresh", value="Force poll all cards", inline=True)
+    embed.add_field(name="🏆 /leaderboard", value="Public balance rankings", inline=True)
+    embed.add_field(name="➕ /addcard", value="Add a Koko or Timezone card", inline=True)
+    embed.add_field(name="🔒 /privacy", value="Toggle public/private per command", inline=True)
+    embed.add_field(name="ℹ️ /info", value="Bot & account info", inline=True)
+    embed.add_field(name="🛠 /setup", value="Quick start guide", inline=True)
+    embed.set_footer(text=f"Dashboard: {APP_URL}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="info", description="Bot info and your account status")
+async def cmd_info(interaction: discord.Interaction):
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    user = await asyncio.to_thread(db_get_user, interaction.user.id)
+
+    embed = discord.Embed(title="ℹ️ Balance Tracker", color=0x6366f1)
+    embed.add_field(name="🌐 Dashboard", value=f"[Open]({APP_URL})", inline=True)
+    embed.add_field(name="⚙️ Settings", value=f"[Open]({APP_URL}/settings)", inline=True)
+
+    if user:
+        _, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
+        koko_count = sum(1 for c in cards if c['card_type'] == 'koko')
+        tz_count   = sum(1 for c in cards if c['card_type'] == 'timezone')
+        total_bal  = sum((c['cash_balance'] or 0) + (c['cash_bonus'] or 0) for c in cards)
+
+        embed.add_field(name="👤 Account", value=f"Linked as **{user['username']}**", inline=False)
+        embed.add_field(name="🎮 Koko Cards", value=str(koko_count), inline=True)
+        embed.add_field(name="🕹️ Timezone Cards", value=str(tz_count), inline=True)
+        embed.add_field(name="💰 Total Balance", value=f"${total_bal:.2f}", inline=True)
+
+        alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
+        total_alltime = sum(r['spent'] for r in alltime)
+        if abs(total_alltime) >= 0.01:
+            sign = '-' if total_alltime > 0 else '+'
+            embed.add_field(name="📉 All-Time Spent", value=f"{sign}${abs(total_alltime):.2f}", inline=True)
+
+        embed.add_field(name="🏆 Leaderboard", value="Opted In" if user['leaderboard_opt_in'] else "Opted Out", inline=True)
+    else:
+        embed.add_field(name="👤 Account", value="Not linked — use `/link` or `/setup`", inline=False)
+
+    stats = await asyncio.to_thread(db_get_stats_for_status)
+    embed.add_field(name="📊 Global Stats",
+        value=f"{stats['cards']} cards · {stats['users']} players · ${stats['public_total']:.0f} public balance",
+        inline=False)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="setup", description="Quick start guide to get tracking")
+async def cmd_setup(interaction: discord.Interaction):
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    user = await asyncio.to_thread(db_get_user, interaction.user.id)
+
+    embed = discord.Embed(title="🛠 Quick Setup Guide", color=0x22c55e)
+
+    if not user:
+        embed.description = "Let's get you set up! Follow these steps:"
+        embed.add_field(name="Step 1 — Create Account",
+            value=f"Go to [{APP_URL}/register]({APP_URL}/register) and create your account.\n*Or use `/link` if you already have one.*",
+            inline=False)
+        embed.add_field(name="Step 2 — Link Discord",
+            value="Run `/link` here to get a code, then enter it in Settings → Discord Link on the website.",
+            inline=False)
+        embed.add_field(name="Step 3 — Add Cards",
+            value="**Koko:** Run `/addcard` → Koko, enter your card QR token.\n"
+                  "**Timezone:** Connect your Timezone account on the website, then `/addcard` → Timezone.",
+            inline=False)
+        embed.add_field(name="Step 4 — Enjoy!",
+            value="Use `/cards` to view balances, `/spent` to track spending, `/leaderboard` to compete!",
+            inline=False)
+    else:
+        _, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
+        koko_count = sum(1 for c in cards if c['card_type'] == 'koko')
+        tz_count   = sum(1 for c in cards if c['card_type'] == 'timezone')
+
+        embed.description = f"✅ You're linked as **{user['username']}**!"
+        status_lines = []
+        status_lines.append(f"{'✅' if koko_count else '⬜'} **Koko Cards:** {koko_count} tracked")
+        status_lines.append(f"{'✅' if tz_count else '⬜'} **Timezone Cards:** {tz_count} tracked")
+        status_lines.append(f"{'✅' if user['leaderboard_opt_in'] else '⬜'} **Leaderboard:** {'Opted in' if user['leaderboard_opt_in'] else 'Not opted in'}")
+        embed.add_field(name="Your Status", value="\n".join(status_lines), inline=False)
+
+        if not koko_count and not tz_count:
+            embed.add_field(name="➡️ Next Step",
+                value="Add a card with `/addcard`!",
+                inline=False)
+        else:
+            embed.add_field(name="Useful Commands",
+                value="`/cards` — View balances\n`/spent` — Track spending\n`/refresh` — Force update\n`/privacy` — Public/private toggle",
+                inline=False)
+
+    embed.set_footer(text=f"Dashboard: {APP_URL}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="link", description="Link your Discord account to Balance Tracker")
 async def cmd_link(interaction: discord.Interaction):
-    code = await run_sync(db_create_link_code, interaction.user.id, str(interaction.user))
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    code = await asyncio.to_thread(db_create_link_code, interaction.user.id, str(interaction.user))
     embed = discord.Embed(title="🔗 Link Your Account", color=0x6366f1,
         description="Enter this code in Balance Tracker Settings → Discord Link")
     embed.add_field(name="Code (expires 15min)", value=f"```{code}```", inline=False)
@@ -262,14 +367,14 @@ async def cmd_link(interaction: discord.Interaction):
 
 @bot.tree.command(name="cards", description="Show your card balances")
 async def cmd_cards(interaction: discord.Interaction):
-    user, cards = await run_sync(db_get_user_cards, interaction.user.id)
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    user, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'cards', default=True)
     if not user:
         await interaction.response.send_message("❌ Use `/link` to connect your account.", ephemeral=True); return
     if not cards:
         await interaction.response.send_message("No cards found.", ephemeral=ephem); return
 
-    # Get all-time spending for each card
     alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
     alltime_map = {r['label']: r['spent'] for r in alltime}
 
@@ -294,7 +399,8 @@ async def cmd_cards(interaction: discord.Interaction):
 
 @bot.tree.command(name="balance", description="Quick total balance summary")
 async def cmd_balance(interaction: discord.Interaction):
-    user, cards = await run_sync(db_get_user_cards, interaction.user.id)
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    user, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'balance', default=True)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
@@ -317,7 +423,8 @@ async def cmd_balance(interaction: discord.Interaction):
     app_commands.Choice(name="All Time", value="all"),
 ])
 async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
-    user, _ = await run_sync(db_get_user_cards, interaction.user.id)
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    user, _ = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'spent', default=True)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
@@ -356,7 +463,8 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
 
 @bot.tree.command(name="refresh", description="Force refresh your card balances now")
 async def cmd_refresh(interaction: discord.Interaction):
-    user, cards = await run_sync(db_get_user_cards, interaction.user.id)
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    user, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'refresh', default=True)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
@@ -364,7 +472,6 @@ async def cmd_refresh(interaction: discord.Interaction):
 
     sys.path.insert(0, os.path.dirname(__file__))
     from app import fetch_koko_balance, fetch_timezone_guest
-    import json as _json
 
     conn = get_db()
     refreshed = 0
@@ -377,7 +484,7 @@ async def cmd_refresh(interaction: discord.Interaction):
                 tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
                 if tzs:
                     guest = await asyncio.to_thread(
-                        fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
+                        fetch_timezone_guest, tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}')
                     )
                     if guest:
                         for c in guest.get('cards', []):
@@ -397,7 +504,7 @@ async def cmd_refresh(interaction: discord.Interaction):
 
 @bot.tree.command(name="leaderboard", description="Public card balance leaderboard (server only)")
 async def cmd_leaderboard(interaction: discord.Interaction):
-    # Leaderboard requires a guild context to be meaningful
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     if interaction.guild is None:
         await interaction.response.send_message(
             "🏆 The leaderboard only works inside a server — invite me to a Discord server to use it!",
@@ -438,6 +545,7 @@ async def cmd_leaderboard(interaction: discord.Interaction):
     app_commands.Choice(name="/leaderboard", value="leaderboard"),
 ])
 async def cmd_privacy(interaction: discord.Interaction, command: str, public: bool):
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user = await asyncio.to_thread(db_get_user, interaction.user.id)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
@@ -448,8 +556,6 @@ async def cmd_privacy(interaction: discord.Interaction, command: str, public: bo
         f"✅ `/{command}` responses will now be {visibility} in this server.",
         ephemeral=True
     )
-
-
 
 
 # ─── Add Card ─────────────────────────────────────────────────────────────────
@@ -552,9 +658,8 @@ class TimezoneCardSelectView(discord.ui.View):
         super().__init__(timeout=timeout)
         self.user_id = user_id
         self.cards_data = cards_data
-        # Build select options
         options = []
-        for c in cards_data[:25]:  # Discord max 25 options
+        for c in cards_data[:25]:
             num = str(c.get('number', ''))
             tier = c.get('tier', '')
             balance = (c.get('cashBalance') or 0) + (c.get('bonusBalance') or 0)
@@ -618,6 +723,7 @@ class TimezoneCardSelectView(discord.ui.View):
     app_commands.Choice(name="🕹️ Timezone — pick from your account", value="timezone"),
 ])
 async def cmd_addcard(interaction: discord.Interaction, card_type: str):
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user = await asyncio.to_thread(db_get_user, interaction.user.id)
     if not user:
         await interaction.response.send_message("❌ Use `/link` first to connect your account.", ephemeral=True)
@@ -628,7 +734,6 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
 
     elif card_type == "timezone":
         await interaction.response.defer(ephemeral=True)
-        # Check for active Timezone session
         conn = get_db()
         tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
         conn.close()
@@ -642,13 +747,12 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
 
         sys.path.insert(0, os.path.dirname(__file__))
         from app import fetch_timezone_guest
-        import json as _json
 
         await interaction.followup.send("⏳ Fetching your Timezone cards...", ephemeral=True)
 
         try:
             guest = await asyncio.to_thread(
-                fetch_timezone_guest, tzs['bearer_token'], _json.loads(tzs['cookies_json'] or '{}')
+                fetch_timezone_guest, tzs['bearer_token'], json.loads(tzs['cookies_json'] or '{}')
             )
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ Error connecting to Timezone: {e}")
@@ -661,7 +765,6 @@ async def cmd_addcard(interaction: discord.Interaction, card_type: str):
             return
 
         tz_cards = guest.get('cards', [])
-        # Filter out already-tracked active cards
         conn = get_db()
         tracked = {r['card_number'] for r in conn.execute(
             "SELECT card_number FROM cards WHERE user_id=? AND active=1 AND card_type='timezone'", (user['id'],)

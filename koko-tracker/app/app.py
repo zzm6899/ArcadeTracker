@@ -51,7 +51,30 @@ def inject_discord():
                 user_tz = u['timezone_name']
         except: pass
     return dict(discord_invite=invite, user_timezone=user_tz)
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+def _get_persistent_secret():
+    """Get or create a persistent secret key stored in the data directory."""
+    env_key = os.environ.get('SECRET_KEY')
+    if env_key:
+        return env_key
+    key_file = os.path.join(os.path.dirname(DB_PATH), '.flask_secret_key')
+    try:
+        if os.path.exists(key_file):
+            with open(key_file, 'r') as f:
+                key = f.read().strip()
+                if key:
+                    return key
+        # Generate and persist
+        key = secrets.token_hex(32)
+        os.makedirs(os.path.dirname(key_file), exist_ok=True)
+        with open(key_file, 'w') as f:
+            f.write(key)
+        print(f"[App] Generated new persistent secret key at {key_file}")
+        return key
+    except Exception as e:
+        print(f"[App] Warning: Could not persist secret key ({e}), sessions will not survive restarts")
+        return secrets.token_hex(32)
+
+app.secret_key = _get_persistent_secret()
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = True  # requires HTTPS
@@ -150,6 +173,7 @@ def init_db():
             timezone_name TEXT DEFAULT 'Australia/Sydney',
             show_overview INTEGER DEFAULT 1,
             discord_webhook TEXT,
+            last_seen TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS cards (
@@ -245,6 +269,7 @@ def init_db():
         'ALTER TABLE users ADD COLUMN reset_expires TEXT',
         'ALTER TABLE timezone_sessions ADD COLUMN refresh_token TEXT',
         'ALTER TABLE timezone_sessions ADD COLUMN ms_client_id TEXT',
+        'ALTER TABLE users ADD COLUMN last_seen TIMESTAMP',
     ]:
         try: conn.execute(sql)
         except: pass
@@ -1171,7 +1196,13 @@ def login():
         conn.close()
         if user:
             session.permanent = True
-            session['user_id'] = user['id']; return redirect(url_for('dashboard'))
+            session['user_id'] = user['id']
+            try:
+                conn2 = get_db()
+                conn2.execute('UPDATE users SET last_seen=? WHERE id=?', (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), user['id']))
+                conn2.commit(); conn2.close()
+            except: pass
+            return redirect(url_for('dashboard'))
         flash('Invalid credentials.', 'error')
     return render_template('login.html')
 
@@ -1234,7 +1265,8 @@ def discord_oauth_callback():
     if user:
         session.permanent = True
         session['user_id'] = user['id']
-        conn.close()
+        conn.execute('UPDATE users SET last_seen=? WHERE id=?', (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), user['id']))
+        conn.commit(); conn.close()
         return redirect(url_for('dashboard'))
 
     if discord_email:
@@ -1439,6 +1471,9 @@ def settings():
 def dashboard():
     user = get_current_user()
     conn = get_db()
+    # Update last_seen
+    try: conn.execute('UPDATE users SET last_seen=? WHERE id=?', (datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), user['id']))
+    except: pass
     cards = conn.execute('''
         SELECT c.*, h.cash_balance, h.cash_bonus, h.points, h.recorded_at as last_updated
         FROM cards c
@@ -1960,7 +1995,8 @@ def admin():
     return render_template('admin.html', users=users, cards=cards,
                           tz_sessions=tz_sessions, tz_statuses=tz_statuses,
                           user=current, current_user=current, admin_username=ADMIN_USERNAME,
-                          admin_webhook=admin_wh, quiet_cfg=quiet_cfg)
+                          admin_webhook=admin_wh, quiet_cfg=quiet_cfg,
+                          now_date=datetime.utcnow().strftime('%Y-%m-%d'))
 
 @app.route('/admin/webhook', methods=['POST'])
 @admin_required

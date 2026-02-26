@@ -62,7 +62,16 @@
                         {# Email #}
                         {% if u.email %}<span class="text-slate-600 truncate max-w-[160px]" title="{{ u.email }}">✉ {{ u.email }}</span>{% endif %}
                         {# Join date #}
-                        <span>{{ u.created_at[:10] }}</span>
+                        <span class="utc-ts">{{ u.created_at[:10] }}</span>
+                        {# Last seen #}
+                        {% if u.last_seen %}
+                        <span class="text-slate-600">·</span>
+                        <span class="{% if u.last_seen and u.last_seen[:10] == now_date %}text-green-400{% else %}text-slate-500{% endif %}">
+                            👁 <span class="utc-ts">{{ u.last_seen[:16] if u.last_seen else '' }}</span>
+                        </span>
+                        {% else %}
+                        <span class="text-slate-700">· 👁 Never</span>
+                        {% endif %}
                     </div>
                 </div>
 
