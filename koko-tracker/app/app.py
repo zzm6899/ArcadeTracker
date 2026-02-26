@@ -1738,9 +1738,9 @@ def card_detail(card_id):
 # Because we can't register our redirect_uri in TEEG's Azure B2C tenant,
 # we use response_mode=fragment and a local page to capture the auth code.
 
-TZ_B2C_AUTHORIZE  = 'https://identity.teeg.cloud/guests.teeg.cloud/B2C_1_SignupSignin/oauth2/v2.0/authorize'
-TZ_B2C_TOKEN      = 'https://identity.teeg.cloud/guests.teeg.cloud/B2C_1_SignupSignin/oauth2/v2.0/token'
-TZ_PKCE_CLIENT_ID = TZ_MOBILE_CLIENT_ID  # '8791e440-a74b-482e-8089-9ccb16fd718b'
+TZ_B2C_AUTHORIZE  = 'https://identity.teeg.cloud/guests.teeg.cloud/b2c_1a_signupsignin/oauth2/v2.0/authorize'
+TZ_B2C_TOKEN      = 'https://identity.teeg.cloud/guests.teeg.cloud/b2c_1a_signupsignin/oauth2/v2.0/token'
+TZ_PKCE_CLIENT_ID = TZ_CLIENT_ID  # 'ca0e4868-177b-49d2-8c63-f1044e3edc63' — web portal client
 
 import hashlib as _hashlib
 
