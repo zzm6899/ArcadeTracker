@@ -84,7 +84,7 @@
             <p class="font-bold text-{{ 'orange' if card.card_type == 'timezone' else 'purple' }}-400 text-xl" id="stat-points">–</p>
         </div>
         <div class="bg-slate-800 rounded-xl p-3">
-            <p class="text-xs text-slate-500 mb-1">Spent (24h)</p>
+            <p class="text-xs text-slate-500 mb-1" id="stat-spent-label">Spent (24h)</p>
             <p class="font-bold text-slate-400 text-xl" id="stat-spent">–</p>
         </div>
         <div class="bg-slate-800 rounded-xl p-3">
@@ -234,13 +234,6 @@ async function loadStats() {
             document.getElementById('stat-points').textContent  = (d.latest.points || 0).toLocaleString();
         }
 
-        if (d.spent_24h !== null && d.spent_24h !== undefined) {
-            const spent = d.spent_24h;
-            const el = document.getElementById('stat-spent');
-            el.textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
-            el.className = 'font-bold text-xl ' + (spent > 0 ? 'text-red-400' : 'text-green-400');
-        }
-
         if (d.spent_alltime !== null && d.spent_alltime !== undefined) {
             const spent = d.spent_alltime;
             const el = document.getElementById('stat-alltime');
@@ -282,6 +275,11 @@ async function loadChart(period = 'day') {
     document.getElementById('points-loading').classList.remove('hidden');
     document.getElementById('points-empty').classList.add('hidden');
 
+    // Update spent label to match period
+    const periodLabels = {day: '24h', week: '7d', month: '30d', all: 'All Time'};
+    const spentLabel = document.getElementById('stat-spent-label');
+    if (spentLabel) spentLabel.textContent = `Spent (${periodLabels[period] || '24h'})`;
+
     try {
         const r = await fetch(`/api/cards/${CARD_ID}/history?period=${period}`);
         const d = await r.json();
@@ -292,7 +290,23 @@ async function loadChart(period = 'day') {
         if (!d.labels || d.labels.length < 2) {
             document.getElementById('chart-empty').classList.remove('hidden');
             document.getElementById('points-empty').classList.remove('hidden');
+            // Clear spent for this period if no data
+            const spentEl = document.getElementById('stat-spent');
+            spentEl.textContent = '–';
+            spentEl.className = 'font-bold text-slate-400 text-xl';
             return;
+        }
+
+        // Calculate spent from chart data (first total vs last total)
+        const balData = d.cash_balance || [];
+        const bonData = d.cash_bonus || [];
+        if (balData.length >= 2) {
+            const firstTotal = (balData[0] || 0) + (bonData[0] || 0);
+            const lastTotal  = (balData[balData.length-1] || 0) + (bonData[bonData.length-1] || 0);
+            const spent = firstTotal - lastTotal;
+            const spentEl = document.getElementById('stat-spent');
+            spentEl.textContent = (spent > 0 ? '-$' : '+$') + Math.abs(spent).toFixed(2);
+            spentEl.className = 'font-bold text-xl ' + (spent > 0 ? 'text-red-400' : 'text-green-400');
         }
 
         const labels = d.labels.map(formatLabel);
