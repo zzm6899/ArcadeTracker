@@ -1,4 +1,4 @@
-# 🎮 ArcadeTracker
+# ArcadeTracker
 
 Self-hosted balance tracker for **Koko Amusement** and **Timezone** arcade cards in Australia. Monitor your credits, bonus balance, points, and spending over time — with a web dashboard, Discord bot, and automated polling.
 
