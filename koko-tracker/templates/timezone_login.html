@@ -12,11 +12,12 @@
         <div id="state-init">
             <div class="text-5xl mb-4">🔐</div>
             <h2 class="text-xl font-bold text-white mb-2">Sign in to Timezone</h2>
-            <p class="text-slate-400 text-sm mb-6">A Timezone login window will open. Sign in with your phone number or email, then you'll be redirected back automatically.</p>
-            <button onclick="startLogin()" class="w-full btn-primary py-4 rounded-xl text-white font-semibold text-lg transition hover:brightness-110">
-                Open Timezone Login →
+            <p class="text-slate-400 text-sm mb-6">A login window will open. Sign in with your phone number or email — same as the Timezone app.</p>
+            <button id="login-btn" onclick="doLogin()" disabled
+                class="w-full btn-primary py-4 rounded-xl text-white font-semibold text-lg transition hover:brightness-110 disabled:opacity-50">
+                Preparing...
             </button>
-            <p class="text-slate-500 text-xs mt-3">Uses the same login as the Timezone mobile app</p>
+            <p class="text-slate-500 text-xs mt-3">Long-lived session — no 24h expiry</p>
         </div>
 
         <div id="state-waiting" class="hidden">
@@ -26,13 +27,13 @@
             <div class="flex justify-center mb-4">
                 <div class="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
             </div>
-            <button onclick="startLogin()" class="text-sm text-slate-500 hover:text-white transition">Window didn't open? Click to retry</button>
+            <button onclick="doLogin()" class="text-sm text-slate-500 hover:text-white transition">Window didn't open? Click to retry</button>
         </div>
 
         <div id="state-exchanging" class="hidden">
             <div class="text-5xl mb-4">🔄</div>
-            <h2 class="text-xl font-bold text-white mb-2">Exchanging tokens...</h2>
-            <p class="text-slate-400 text-sm mb-4">Almost there</p>
+            <h2 class="text-xl font-bold text-white mb-2">Connecting...</h2>
+            <p class="text-slate-400 text-sm mb-4">Exchanging tokens</p>
             <div class="flex justify-center">
                 <div class="w-8 h-8 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
             </div>
@@ -54,7 +55,7 @@
             <h2 class="text-xl font-bold text-white mb-2">Something went wrong</h2>
             <p id="error-msg" class="text-red-400 text-sm mb-4"></p>
             <p id="error-detail" class="text-slate-500 text-xs mb-6 break-all"></p>
-            <button onclick="startLogin()" class="block w-full btn-primary py-3 rounded-xl text-white font-medium mb-3">Try again</button>
+            <button onclick="doLogin()" class="block w-full btn-primary py-3 rounded-xl text-white font-medium mb-3">Try again</button>
             <a href="/timezone/start" class="text-sm text-slate-500 hover:text-slate-300">Use bookmarklet method instead</a>
         </div>
 
@@ -62,16 +63,15 @@
 </div>
 
 <script>
-const CONFIG = {
-    clientId:     {{ client_id | tojson }},
-    scope:        {{ scope | tojson }},
-    authorizeUrl: {{ authorize_url | tojson }},
-    tokenUrl:     {{ token_url | tojson }},
-    appUrl:       {{ app_url | tojson }},
-    redirectUri:  {{ app_url | tojson }} + '/timezone/login',
-};
+const CLIENT_ID     = {{ client_id | tojson }};
+const SCOPE         = {{ scope | tojson }};
+const AUTHORIZE_URL = {{ authorize_url | tojson }};
+const REDIRECT_URI  = 'https://login.microsoftonline.com/common/oauth2/nativeclient';
 
-let codeVerifier = null;
+// Pre-computed auth URL (ready before user clicks — avoids async popup blocking)
+let readyUrl = null;
+let readyVerifier = null;
+let pollTimer = null;
 
 function setState(name, msg, detail) {
     ['init','waiting','exchanging','success','error'].forEach(s =>
@@ -87,68 +87,116 @@ function setState(name, msg, detail) {
     }
 }
 
-// PKCE helpers
-function generateVerifier() {
-    const arr = new Uint8Array(64);
-    crypto.getRandomValues(arr);
-    return btoa(String.fromCharCode(...arr))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '').slice(0, 128);
+// ── PKCE ──
+function makeVerifier() {
+    const a = new Uint8Array(64);
+    crypto.getRandomValues(a);
+    return btoa(String.fromCharCode(...a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'').slice(0,128);
 }
 
-async function generateChallenge(verifier) {
-    const data = new TextEncoder().encode(verifier);
-    const hash = await crypto.subtle.digest('SHA-256', data);
-    return btoa(String.fromCharCode(...new Uint8Array(hash)))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+async function makeChallenge(v) {
+    const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(v));
+    return btoa(String.fromCharCode(...new Uint8Array(h))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
 
-function generateState() {
-    const arr = new Uint8Array(32);
-    crypto.getRandomValues(arr);
-    return btoa(String.fromCharCode(...arr))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+function makeState() {
+    const a = new Uint8Array(32);
+    crypto.getRandomValues(a);
+    return btoa(String.fromCharCode(...a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
 
-async function startLogin() {
-    setState('waiting');
-
-    codeVerifier = generateVerifier();
-    const codeChallenge = await generateChallenge(codeVerifier);
-    const state = generateState();
-
-    // Store PKCE verifier in sessionStorage for when we return
-    sessionStorage.setItem('tz_pkce_verifier', codeVerifier);
-    sessionStorage.setItem('tz_pkce_state', state);
-
-    const params = new URLSearchParams({
-        client_id: CONFIG.clientId,
+// ── Pre-compute auth URL on page load (before any click) ──
+async function prepare() {
+    readyVerifier = makeVerifier();
+    const ch = await makeChallenge(readyVerifier);
+    const st = makeState();
+    readyUrl = AUTHORIZE_URL + '?' + new URLSearchParams({
+        client_id: CLIENT_ID,
         response_type: 'code',
-        redirect_uri: CONFIG.redirectUri,
-        scope: CONFIG.scope,
-        state: state,
-        code_challenge: codeChallenge,
+        redirect_uri: REDIRECT_URI,
+        scope: SCOPE,
+        state: st,
+        code_challenge: ch,
         code_challenge_method: 'S256',
         response_mode: 'query',
-    });
-
-    // Full page redirect to B2C login
-    window.location.href = CONFIG.authorizeUrl + '?' + params.toString();
+    }).toString();
+    const btn = document.getElementById('login-btn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Open Timezone Login →'; }
 }
 
-async function exchangeCode(code) {
-    setState('exchanging');
+// ── Click handler: opens popup SYNCHRONOUSLY (no async = no blocker) ──
+function doLogin() {
+    if (!readyUrl) return;
 
+    // Capture current values before regenerating
+    const url = readyUrl;
+    const verifier = readyVerifier;
+
+    // Open popup immediately in the click handler (synchronous!)
+    const w = 500, h = 700;
+    const left = (screen.width - w) / 2;
+    const top = (screen.height - h) / 2;
+    const popup = window.open(url, 'tz_login',
+        `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`);
+
+    // Regenerate for next attempt
+    prepare();
+
+    if (!popup) {
+        setState('error', 'Popup was blocked. Please allow popups for this site, then try again.');
+        return;
+    }
+
+    setState('waiting');
+
+    // Poll popup URL to detect redirect back from B2C
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(function() {
+        try {
+            if (!popup || popup.closed) {
+                clearInterval(pollTimer);
+                setState('init');
+                return;
+            }
+            var href = popup.location.href;
+            if (href && href.indexOf('login.microsoftonline.com/common/oauth2/nativeclient') !== -1) {
+                clearInterval(pollTimer);
+                var u = new URL(href);
+                popup.close();
+
+                var err = u.searchParams.get('error');
+                if (err) {
+                    setState('error',
+                        u.searchParams.get('error_description') || err,
+                        'Error: ' + err);
+                    return;
+                }
+                var code = u.searchParams.get('code');
+                if (code) {
+                    exchangeCode(code, verifier);
+                } else {
+                    setState('error', 'No authorization code received.');
+                }
+            }
+        } catch(e) {
+            // Cross-origin — popup still on B2C domain, keep waiting
+        }
+    }, 300);
+}
+
+async function exchangeCode(code, verifier) {
+    setState('exchanging');
     try {
-        const resp = await fetch('/timezone/oauth-exchange', {
+        var resp = await fetch('/timezone/oauth-exchange', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 code: code,
-                code_verifier: codeVerifier,
-                redirect_uri: CONFIG.redirectUri,
+                code_verifier: verifier,
+                redirect_uri: REDIRECT_URI,
             })
         });
-        const result = await resp.json();
+        var result = await resp.json();
         if (result.success) {
             renderCards(result.cards, result.name);
         } else {
@@ -160,78 +208,40 @@ async function exchangeCode(code) {
 }
 
 function renderCards(cards, name) {
-    setState('success', `Connected as ${name}! Found ${cards.length} card(s).`);
-    const list = document.getElementById('card-list');
+    setState('success', 'Connected as ' + name + '! Found ' + cards.length + ' card(s).');
+    var list = document.getElementById('card-list');
     if (!cards.length) {
-        setState('success', `Connected as ${name}! No cards found — they'll appear after the first poll.`);
+        setState('success', 'Connected as ' + name + '! No cards found yet — they will appear after the first poll.');
         return;
     }
-    list.innerHTML = cards.map(card => `
-        <div class="bg-slate-800 rounded-xl p-4">
-            <div class="flex items-center justify-between mb-2">
-                <div class="font-mono font-bold text-white">${card.number}</div>
-                ${card.tier ? `<span class="text-xs px-2 py-0.5 rounded-full font-medium ${
-                    card.tier === 'Platinum' ? 'bg-purple-900/60 text-purple-300' :
-                    card.tier === 'Gold' ? 'bg-yellow-900/60 text-yellow-300' :
-                    'bg-slate-600 text-slate-300'}">${card.tier}</span>` : ''}
-            </div>
-            <div class="grid grid-cols-3 gap-2 mb-3">
-                <div class="bg-slate-900 rounded-lg p-2 text-center">
-                    <div class="text-xs text-slate-500">Credits</div>
-                    <div class="font-bold text-green-400 text-sm">$${card.cashBalance.toFixed(2)}</div>
-                </div>
-                <div class="bg-slate-900 rounded-lg p-2 text-center">
-                    <div class="text-xs text-slate-500">Bonus</div>
-                    <div class="font-bold text-yellow-400 text-sm">$${card.bonusBalance.toFixed(2)}</div>
-                </div>
-                <div class="bg-slate-900 rounded-lg p-2 text-center">
-                    <div class="text-xs text-slate-500">e-Tickets</div>
-                    <div class="font-bold text-orange-400 text-sm">${card.tickets}</div>
-                </div>
-            </div>
-            <form method="POST" action="/timezone/add-card">
-                <input type="hidden" name="card_number" value="${card.number}">
-                <input type="hidden" name="cash_balance" value="${card.cashBalance}">
-                <input type="hidden" name="bonus_balance" value="${card.bonusBalance}">
-                <input type="hidden" name="tickets" value="${card.tickets}">
-                <input type="hidden" name="tier" value="${card.tier || ''}">
-                <input type="hidden" name="card_label" value="Timezone ${card.number}">
-                <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">+ Track this card</button>
-            </form>
-        </div>
-    `).join('');
+    list.innerHTML = cards.map(function(card) { return ''
+        + '<div class="bg-slate-800 rounded-xl p-4">'
+        + '  <div class="flex items-center justify-between mb-2">'
+        + '    <div class="font-mono font-bold text-white">' + card.number + '</div>'
+        + (card.tier ? '<span class="text-xs px-2 py-0.5 rounded-full font-medium '
+            + (card.tier==='Platinum'?'bg-purple-900/60 text-purple-300':card.tier==='Gold'?'bg-yellow-900/60 text-yellow-300':'bg-slate-600 text-slate-300')
+            + '">' + card.tier + '</span>' : '')
+        + '  </div>'
+        + '  <div class="grid grid-cols-3 gap-2 mb-3">'
+        + '    <div class="bg-slate-900 rounded-lg p-2 text-center"><div class="text-xs text-slate-500">Credits</div><div class="font-bold text-green-400 text-sm">$' + card.cashBalance.toFixed(2) + '</div></div>'
+        + '    <div class="bg-slate-900 rounded-lg p-2 text-center"><div class="text-xs text-slate-500">Bonus</div><div class="font-bold text-yellow-400 text-sm">$' + card.bonusBalance.toFixed(2) + '</div></div>'
+        + '    <div class="bg-slate-900 rounded-lg p-2 text-center"><div class="text-xs text-slate-500">e-Tickets</div><div class="font-bold text-orange-400 text-sm">' + card.tickets + '</div></div>'
+        + '  </div>'
+        + '  <form method="POST" action="/timezone/add-card">'
+        + '    <input type="hidden" name="card_number" value="' + card.number + '">'
+        + '    <input type="hidden" name="cash_balance" value="' + card.cashBalance + '">'
+        + '    <input type="hidden" name="bonus_balance" value="' + card.bonusBalance + '">'
+        + '    <input type="hidden" name="tickets" value="' + card.tickets + '">'
+        + '    <input type="hidden" name="tier" value="' + (card.tier||'') + '">'
+        + '    <input type="hidden" name="card_label" value="Timezone ' + card.number + '">'
+        + '    <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">+ Track this card</button>'
+        + '  </form>'
+        + '</div>';
+    }).join('');
 }
 
-// On page load: check if we're returning from B2C with an auth code
-(function checkRedirectReturn() {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get('code');
-    const error = params.get('error');
-    const errorDesc = params.get('error_description');
-
-    if (error) {
-        // Clean URL
-        window.history.replaceState({}, '', '/timezone/login');
-        setState('error', errorDesc || error, 'Error code: ' + error);
-        return;
-    }
-
-    if (code) {
-        const verifier = sessionStorage.getItem('tz_pkce_verifier');
-        if (!verifier) {
-            window.history.replaceState({}, '', '/timezone/login');
-            setState('error', 'Session expired — PKCE verifier not found. Please try again.');
-            return;
-        }
-        sessionStorage.removeItem('tz_pkce_verifier');
-        sessionStorage.removeItem('tz_pkce_state');
-        codeVerifier = verifier;
-
-        // Clean URL immediately
-        window.history.replaceState({}, '', '/timezone/login');
-        exchangeCode(code);
-    }
-})();
+// Prepare auth URL immediately
+prepare();
 </script>
 
 {% endblock %}
