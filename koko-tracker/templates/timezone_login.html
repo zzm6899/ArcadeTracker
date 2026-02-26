@@ -67,14 +67,11 @@ const CONFIG = {
     scope:        {{ scope | tojson }},
     authorizeUrl: {{ authorize_url | tojson }},
     tokenUrl:     {{ token_url | tojson }},
-    // Use urn:ietf:wg:oauth:2.0:oob as redirect — Azure B2C shows the code on a page
-    // that we can read from the popup
-    redirectUri:  'https://login.microsoftonline.com/common/oauth2/nativeclient',
+    appUrl:       {{ app_url | tojson }},
+    redirectUri:  {{ app_url | tojson }} + '/timezone/login',
 };
 
 let codeVerifier = null;
-let authPopup = null;
-let popupPollTimer = null;
 
 function setState(name, msg, detail) {
     ['init','waiting','exchanging','success','error'].forEach(s =>
@@ -119,6 +116,10 @@ async function startLogin() {
     const codeChallenge = await generateChallenge(codeVerifier);
     const state = generateState();
 
+    // Store PKCE verifier in sessionStorage for when we return
+    sessionStorage.setItem('tz_pkce_verifier', codeVerifier);
+    sessionStorage.setItem('tz_pkce_state', state);
+
     const params = new URLSearchParams({
         client_id: CONFIG.clientId,
         response_type: 'code',
@@ -130,64 +131,14 @@ async function startLogin() {
         response_mode: 'query',
     });
 
-    const authUrl = CONFIG.authorizeUrl + '?' + params.toString();
-
-    // Open popup
-    const w = 500, h = 700;
-    const left = (screen.width - w) / 2;
-    const top = (screen.height - h) / 2;
-    authPopup = window.open(authUrl, 'tz_login', `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`);
-
-    if (!authPopup || authPopup.closed) {
-        // Popup blocked — fall back to same-window redirect
-        // Store verifier in sessionStorage so we can retrieve it on callback
-        sessionStorage.setItem('tz_pkce_verifier', codeVerifier);
-        sessionStorage.setItem('tz_pkce_state', state);
-        window.location.href = authUrl;
-        return;
-    }
-
-    // Poll popup for redirect with auth code
-    if (popupPollTimer) clearInterval(popupPollTimer);
-    popupPollTimer = setInterval(() => {
-        try {
-            if (authPopup.closed) {
-                clearInterval(popupPollTimer);
-                setState('init');
-                return;
-            }
-            // Check if popup has been redirected to our nativeclient URI
-            const popupUrl = authPopup.location.href;
-            if (popupUrl && popupUrl.startsWith(CONFIG.redirectUri)) {
-                clearInterval(popupPollTimer);
-                const popupParams = new URLSearchParams(new URL(popupUrl).search);
-                authPopup.close();
-
-                const code = popupParams.get('code');
-                const error = popupParams.get('error');
-                const errorDesc = popupParams.get('error_description');
-
-                if (error) {
-                    setState('error', errorDesc || error, `Error code: ${error}`);
-                    return;
-                }
-                if (code) {
-                    exchangeCode(code);
-                } else {
-                    setState('error', 'No authorization code received');
-                }
-            }
-        } catch(e) {
-            // Cross-origin — popup hasn't redirected yet, keep waiting
-        }
-    }, 500);
+    // Full page redirect to B2C login
+    window.location.href = CONFIG.authorizeUrl + '?' + params.toString();
 }
 
 async function exchangeCode(code) {
     setState('exchanging');
 
     try {
-        // Exchange auth code for tokens — do this server-side to avoid CORS
         const resp = await fetch('/timezone/oauth-exchange', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -251,19 +202,34 @@ function renderCards(cards, name) {
     `).join('');
 }
 
-// Check if we're returning from a same-window redirect (popup was blocked)
+// On page load: check if we're returning from B2C with an auth code
 (function checkRedirectReturn() {
-    const verifier = sessionStorage.getItem('tz_pkce_verifier');
-    if (verifier && window.location.search.includes('code=')) {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const error = params.get('error');
+    const errorDesc = params.get('error_description');
+
+    if (error) {
+        // Clean URL
+        window.history.replaceState({}, '', '/timezone/login');
+        setState('error', errorDesc || error, 'Error code: ' + error);
+        return;
+    }
+
+    if (code) {
+        const verifier = sessionStorage.getItem('tz_pkce_verifier');
+        if (!verifier) {
+            window.history.replaceState({}, '', '/timezone/login');
+            setState('error', 'Session expired — PKCE verifier not found. Please try again.');
+            return;
+        }
         sessionStorage.removeItem('tz_pkce_verifier');
         sessionStorage.removeItem('tz_pkce_state');
         codeVerifier = verifier;
-        const params = new URLSearchParams(window.location.search);
-        const code = params.get('code');
-        if (code) {
-            window.history.replaceState({}, '', '/timezone/login');
-            exchangeCode(code);
-        }
+
+        // Clean URL immediately
+        window.history.replaceState({}, '', '/timezone/login');
+        exchangeCode(code);
     }
 })();
 </script>
