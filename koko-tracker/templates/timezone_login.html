@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+{% block title %}Sign in to Timezone – Balance Tracker{% endblock %}
+{% block content %}
+
+<div class="flex items-center gap-4 mb-6">
+    <a href="/timezone/start" class="text-slate-400 hover:text-white transition">← Back</a>
+</div>
+
+<div class="max-w-md mx-auto">
+    <div class="card rounded-2xl p-8 text-center">
+
+        <div id="state-init">
+            <div class="text-5xl mb-4">🔐</div>
+            <h2 class="text-xl font-bold text-white mb-2">Sign in to Timezone</h2>
+            <p class="text-slate-400 text-sm mb-6">A Timezone login window will open. Sign in with your phone number or email, then you'll be redirected back automatically.</p>
+            <button onclick="startLogin()" class="w-full btn-primary py-4 rounded-xl text-white font-semibold text-lg transition hover:brightness-110">
+                Open Timezone Login →
+            </button>
+            <p class="text-slate-500 text-xs mt-3">Uses the same login as the Timezone mobile app</p>
+        </div>
+
+        <div id="state-waiting" class="hidden">
+            <div class="text-5xl mb-4">⏳</div>
+            <h2 class="text-xl font-bold text-white mb-2">Waiting for login...</h2>
+            <p class="text-slate-400 text-sm mb-6">Complete the sign-in in the popup window. This page will update automatically.</p>
+            <div class="flex justify-center mb-4">
+                <div class="w-8 h-8 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin"></div>
+            </div>
+            <button onclick="startLogin()" class="text-sm text-slate-500 hover:text-white transition">Window didn't open? Click to retry</button>
+        </div>
+
+        <div id="state-exchanging" class="hidden">
+            <div class="text-5xl mb-4">🔄</div>
+            <h2 class="text-xl font-bold text-white mb-2">Exchanging tokens...</h2>
+            <p class="text-slate-400 text-sm mb-4">Almost there</p>
+            <div class="flex justify-center">
+                <div class="w-8 h-8 border-2 border-green-400 border-t-transparent rounded-full animate-spin"></div>
+            </div>
+        </div>
+
+        <div id="state-success" class="hidden">
+            <div class="text-5xl mb-4">✅</div>
+            <h2 class="text-xl font-bold text-white mb-2">Connected!</h2>
+            <p class="text-slate-400 text-sm mb-2" id="success-msg"></p>
+            <p class="text-green-400 text-xs mb-4">🔋 Long-lived session — no 24h expiry</p>
+            <div id="card-list" class="space-y-3 text-left mb-6"></div>
+            <a href="/dashboard" class="block w-full btn-primary py-3 rounded-xl text-white font-medium">
+                Go to Dashboard →
+            </a>
+        </div>
+
+        <div id="state-error" class="hidden">
+            <div class="text-5xl mb-4">❌</div>
+            <h2 class="text-xl font-bold text-white mb-2">Something went wrong</h2>
+            <p id="error-msg" class="text-red-400 text-sm mb-4"></p>
+            <p id="error-detail" class="text-slate-500 text-xs mb-6 break-all"></p>
+            <button onclick="startLogin()" class="block w-full btn-primary py-3 rounded-xl text-white font-medium mb-3">Try again</button>
+            <a href="/timezone/start" class="text-sm text-slate-500 hover:text-slate-300">Use bookmarklet method instead</a>
+        </div>
+
+    </div>
+</div>
+
+<script>
+const CONFIG = {
+    clientId:     {{ client_id | tojson }},
+    scope:        {{ scope | tojson }},
+    authorizeUrl: {{ authorize_url | tojson }},
+    tokenUrl:     {{ token_url | tojson }},
+    // Use urn:ietf:wg:oauth:2.0:oob as redirect — Azure B2C shows the code on a page
+    // that we can read from the popup
+    redirectUri:  'https://login.microsoftonline.com/common/oauth2/nativeclient',
+};
+
+let codeVerifier = null;
+let authPopup = null;
+let popupPollTimer = null;
+
+function setState(name, msg, detail) {
+    ['init','waiting','exchanging','success','error'].forEach(s =>
+        document.getElementById('state-' + s).classList.add('hidden'));
+    document.getElementById('state-' + name).classList.remove('hidden');
+    if (msg) {
+        const el = document.getElementById(name === 'error' ? 'error-msg' : 'success-msg');
+        if (el) el.textContent = msg;
+    }
+    if (detail) {
+        const el = document.getElementById('error-detail');
+        if (el) el.textContent = detail;
+    }
+}
+
+// PKCE helpers
+function generateVerifier() {
+    const arr = new Uint8Array(64);
+    crypto.getRandomValues(arr);
+    return btoa(String.fromCharCode(...arr))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '').slice(0, 128);
+}
+
+async function generateChallenge(verifier) {
+    const data = new TextEncoder().encode(verifier);
+    const hash = await crypto.subtle.digest('SHA-256', data);
+    return btoa(String.fromCharCode(...new Uint8Array(hash)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function generateState() {
+    const arr = new Uint8Array(32);
+    crypto.getRandomValues(arr);
+    return btoa(String.fromCharCode(...arr))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function startLogin() {
+    setState('waiting');
+
+    codeVerifier = generateVerifier();
+    const codeChallenge = await generateChallenge(codeVerifier);
+    const state = generateState();
+
+    const params = new URLSearchParams({
+        client_id: CONFIG.clientId,
+        response_type: 'code',
+        redirect_uri: CONFIG.redirectUri,
+        scope: CONFIG.scope,
+        state: state,
+        code_challenge: codeChallenge,
+        code_challenge_method: 'S256',
+        response_mode: 'query',
+    });
+
+    const authUrl = CONFIG.authorizeUrl + '?' + params.toString();
+
+    // Open popup
+    const w = 500, h = 700;
+    const left = (screen.width - w) / 2;
+    const top = (screen.height - h) / 2;
+    authPopup = window.open(authUrl, 'tz_login', `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`);
+
+    if (!authPopup || authPopup.closed) {
+        // Popup blocked — fall back to same-window redirect
+        // Store verifier in sessionStorage so we can retrieve it on callback
+        sessionStorage.setItem('tz_pkce_verifier', codeVerifier);
+        sessionStorage.setItem('tz_pkce_state', state);
+        window.location.href = authUrl;
+        return;
+    }
+
+    // Poll popup for redirect with auth code
+    if (popupPollTimer) clearInterval(popupPollTimer);
+    popupPollTimer = setInterval(() => {
+        try {
+            if (authPopup.closed) {
+                clearInterval(popupPollTimer);
+                setState('init');
+                return;
+            }
+            // Check if popup has been redirected to our nativeclient URI
+            const popupUrl = authPopup.location.href;
+            if (popupUrl && popupUrl.startsWith(CONFIG.redirectUri)) {
+                clearInterval(popupPollTimer);
+                const popupParams = new URLSearchParams(new URL(popupUrl).search);
+                authPopup.close();
+
+                const code = popupParams.get('code');
+                const error = popupParams.get('error');
+                const errorDesc = popupParams.get('error_description');
+
+                if (error) {
+                    setState('error', errorDesc || error, `Error code: ${error}`);
+                    return;
+                }
+                if (code) {
+                    exchangeCode(code);
+                } else {
+                    setState('error', 'No authorization code received');
+                }
+            }
+        } catch(e) {
+            // Cross-origin — popup hasn't redirected yet, keep waiting
+        }
+    }, 500);
+}
+
+async function exchangeCode(code) {
+    setState('exchanging');
+
+    try {
+        // Exchange auth code for tokens — do this server-side to avoid CORS
+        const resp = await fetch('/timezone/oauth-exchange', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                code: code,
+                code_verifier: codeVerifier,
+                redirect_uri: CONFIG.redirectUri,
+            })
+        });
+        const result = await resp.json();
+        if (result.success) {
+            renderCards(result.cards, result.name);
+        } else {
+            setState('error', result.error || 'Token exchange failed', result.detail || '');
+        }
+    } catch(e) {
+        setState('error', 'Network error: ' + e.message);
+    }
+}
+
+function renderCards(cards, name) {
+    setState('success', `Connected as ${name}! Found ${cards.length} card(s).`);
+    const list = document.getElementById('card-list');
+    if (!cards.length) {
+        setState('success', `Connected as ${name}! No cards found — they'll appear after the first poll.`);
+        return;
+    }
+    list.innerHTML = cards.map(card => `
+        <div class="bg-slate-800 rounded-xl p-4">
+            <div class="flex items-center justify-between mb-2">
+                <div class="font-mono font-bold text-white">${card.number}</div>
+                ${card.tier ? `<span class="text-xs px-2 py-0.5 rounded-full font-medium ${
+                    card.tier === 'Platinum' ? 'bg-purple-900/60 text-purple-300' :
+                    card.tier === 'Gold' ? 'bg-yellow-900/60 text-yellow-300' :
+                    'bg-slate-600 text-slate-300'}">${card.tier}</span>` : ''}
+            </div>
+            <div class="grid grid-cols-3 gap-2 mb-3">
+                <div class="bg-slate-900 rounded-lg p-2 text-center">
+                    <div class="text-xs text-slate-500">Credits</div>
+                    <div class="font-bold text-green-400 text-sm">$${card.cashBalance.toFixed(2)}</div>
+                </div>
+                <div class="bg-slate-900 rounded-lg p-2 text-center">
+                    <div class="text-xs text-slate-500">Bonus</div>
+                    <div class="font-bold text-yellow-400 text-sm">$${card.bonusBalance.toFixed(2)}</div>
+                </div>
+                <div class="bg-slate-900 rounded-lg p-2 text-center">
+                    <div class="text-xs text-slate-500">e-Tickets</div>
+                    <div class="font-bold text-orange-400 text-sm">${card.tickets}</div>
+                </div>
+            </div>
+            <form method="POST" action="/timezone/add-card">
+                <input type="hidden" name="card_number" value="${card.number}">
+                <input type="hidden" name="cash_balance" value="${card.cashBalance}">
+                <input type="hidden" name="bonus_balance" value="${card.bonusBalance}">
+                <input type="hidden" name="tickets" value="${card.tickets}">
+                <input type="hidden" name="tier" value="${card.tier || ''}">
+                <input type="hidden" name="card_label" value="Timezone ${card.number}">
+                <button type="submit" class="w-full btn-primary py-2.5 rounded-lg text-sm font-medium text-white">+ Track this card</button>
+            </form>
+        </div>
+    `).join('');
+}
+
+// Check if we're returning from a same-window redirect (popup was blocked)
+(function checkRedirectReturn() {
+    const verifier = sessionStorage.getItem('tz_pkce_verifier');
+    if (verifier && window.location.search.includes('code=')) {
+        sessionStorage.removeItem('tz_pkce_verifier');
+        sessionStorage.removeItem('tz_pkce_state');
+        codeVerifier = verifier;
+        const params = new URLSearchParams(window.location.search);
+        const code = params.get('code');
+        if (code) {
+            window.history.replaceState({}, '', '/timezone/login');
+            exchangeCode(code);
+        }
+    }
+})();
+</script>
+
+{% endblock %}

@@ -1735,79 +1735,78 @@ def card_detail(card_id):
 # ─── Timezone: Direct OAuth Login (mobile client_id — long-lived tokens) ──────
 # Uses Authorization Code + PKCE against the mobile app's B2C user flow.
 # This gives refresh tokens with a much longer lifetime than the web portal.
+# Because we can't register our redirect_uri in TEEG's Azure B2C tenant,
+# we use response_mode=fragment and a local page to capture the auth code.
 
 TZ_B2C_AUTHORIZE  = 'https://identity.teeg.cloud/guests.teeg.cloud/B2C_1_SignupSignin/oauth2/v2.0/authorize'
 TZ_B2C_TOKEN      = 'https://identity.teeg.cloud/guests.teeg.cloud/B2C_1_SignupSignin/oauth2/v2.0/token'
 TZ_PKCE_CLIENT_ID = TZ_MOBILE_CLIENT_ID  # '8791e440-a74b-482e-8089-9ccb16fd718b'
-# Azure B2C public clients accept this redirect for native apps
-TZ_PKCE_REDIRECT  = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
 
 import hashlib as _hashlib
 
 @app.route('/timezone/login')
 @login_required
 def timezone_oauth_start():
-    """Redirect user to Azure B2C login using mobile app's client_id + PKCE."""
-    # Generate PKCE code_verifier and code_challenge
-    code_verifier = secrets.token_urlsafe(64)[:128]
-    code_challenge = base64.urlsafe_b64encode(
-        _hashlib.sha256(code_verifier.encode('ascii')).digest()
-    ).rstrip(b'=').decode('ascii')
-    # Generate state for CSRF
-    state = secrets.token_urlsafe(32)
-    # Store in session
-    session['tz_pkce_verifier'] = code_verifier
-    session['tz_pkce_state'] = state
-
-    params = {
-        'client_id': TZ_PKCE_CLIENT_ID,
-        'response_type': 'code',
-        'redirect_uri': f'{APP_URL}/timezone/oauth-callback',
-        'scope': TZ_SCOPE,
-        'state': state,
-        'code_challenge': code_challenge,
-        'code_challenge_method': 'S256',
-        'response_mode': 'query',
-    }
-    auth_url = TZ_B2C_AUTHORIZE + '?' + '&'.join(f'{k}={requests.utils.quote(str(v))}' for k, v in params.items())
-    print(f"[Timezone OAuth] Redirecting user {session.get('user_id')} to B2C login")
-    return redirect(auth_url)
+    """Show the OAuth login page that handles the PKCE flow client-side."""
+    return render_template('timezone_login.html', user=get_current_user(),
+                          client_id=TZ_PKCE_CLIENT_ID, scope=TZ_SCOPE,
+                          authorize_url=TZ_B2C_AUTHORIZE,
+                          token_url=TZ_B2C_TOKEN, app_url=APP_URL)
 
 
-@app.route('/timezone/oauth-callback')
+@app.route('/timezone/oauth-save', methods=['POST'])
 @login_required
-def timezone_oauth_callback():
-    """Handle the OAuth2 callback from Azure B2C, exchange code for tokens."""
+def timezone_oauth_save():
+    """Save tokens obtained via client-side PKCE flow."""
     user = get_current_user()
-    error = request.args.get('error')
-    error_desc = request.args.get('error_description', '')
+    data = request.get_json() or {}
+    access_token = data.get('access_token')
+    refresh_token = data.get('refresh_token')
+    expires_in = int(data.get('expires_in', 900))
 
-    if error:
-        print(f"[Timezone OAuth] Error from B2C: {error}: {error_desc[:200]}")
-        flash(f'Timezone login failed: {error_desc[:100]}', 'error')
-        return redirect(url_for('timezone_start'))
+    if not access_token:
+        return jsonify({'success': False, 'error': 'No access token'})
 
-    code = request.args.get('code')
-    state = request.args.get('state')
+    print(f"[Timezone OAuth] Saving tokens for user {user['id']}: expires={expires_in}s refresh={'yes' if refresh_token else 'no'}")
 
-    if not code:
-        flash('No authorization code received.', 'error')
-        return redirect(url_for('timezone_start'))
+    token_exp = (datetime.utcnow() + timedelta(seconds=expires_in)).strftime('%Y-%m-%d %H:%M:%S')
+    sess_exp = (datetime.utcnow() + timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')
 
-    # Validate state
-    expected_state = session.pop('tz_pkce_state', None)
-    code_verifier = session.pop('tz_pkce_verifier', None)
-    if not expected_state or state != expected_state:
-        flash('Invalid state — possible CSRF. Please try again.', 'error')
-        return redirect(url_for('timezone_start'))
+    save_timezone_session(user['id'], access_token, {}, token_exp, sess_exp,
+                          refresh_token=refresh_token, ms_client_id=TZ_PKCE_CLIENT_ID)
 
-    # Exchange code for tokens
+    # Fetch guest data
+    guest = fetch_timezone_guest(access_token, {}, user_id=user['id'])
+    if guest:
+        conn = get_db()
+        conn.execute('UPDATE timezone_sessions SET guest_id=? WHERE user_id=?', (guest.get('id'), user['id']))
+        conn.commit(); conn.close()
+        cards = _format_tz_cards(guest)
+        print(f"[Timezone OAuth] Success for user {user['id']}: {len(cards)} cards, client_id={TZ_PKCE_CLIENT_ID}")
+        return jsonify({'success': True, 'cards': cards, 'name': guest.get('givenName', '')})
+    else:
+        return jsonify({'success': False, 'error': 'Connected but could not fetch card data'})
+
+
+@app.route('/timezone/oauth-exchange', methods=['POST'])
+@login_required
+def timezone_oauth_exchange():
+    """Server-side token exchange for the PKCE flow (avoids CORS issues)."""
+    user = get_current_user()
+    data = request.get_json() or {}
+    code = data.get('code')
+    code_verifier = data.get('code_verifier')
+    redirect_uri = data.get('redirect_uri')
+
+    if not code or not code_verifier:
+        return jsonify({'success': False, 'error': 'Missing code or code_verifier'})
+
     try:
         resp = requests.post(TZ_B2C_TOKEN, data={
             'client_id': TZ_PKCE_CLIENT_ID,
             'grant_type': 'authorization_code',
             'code': code,
-            'redirect_uri': f'{APP_URL}/timezone/oauth-callback',
+            'redirect_uri': redirect_uri or 'https://login.microsoftonline.com/common/oauth2/nativeclient',
             'code_verifier': code_verifier,
             'scope': TZ_SCOPE,
         }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
@@ -1815,60 +1814,43 @@ def timezone_oauth_callback():
         print(f"[Timezone OAuth] Token exchange: HTTP {resp.status_code}")
 
         if resp.status_code != 200:
-            err = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
-            print(f"[Timezone OAuth] Token exchange failed: {err.get('error','')}: {err.get('error_description','')[:200]}")
-            flash(f'Token exchange failed: {err.get("error_description", "Unknown error")[:100]}', 'error')
-            return redirect(url_for('timezone_start'))
+            err = {}
+            try: err = resp.json()
+            except: pass
+            error_desc = err.get('error_description', resp.text[:200])
+            print(f"[Timezone OAuth] Exchange failed: {err.get('error','')}: {error_desc[:200]}")
+            return jsonify({'success': False, 'error': 'Token exchange failed', 'detail': error_desc[:200]})
 
-        data = resp.json()
-        access_token = data.get('access_token')
-        refresh_token = data.get('refresh_token')
-        expires_in = int(data.get('expires_in', 900))
+        tokens = resp.json()
+        access_token = tokens.get('access_token')
+        refresh_token = tokens.get('refresh_token')
+        expires_in = int(tokens.get('expires_in', 900))
 
         if not access_token:
-            flash('No access token in response.', 'error')
-            return redirect(url_for('timezone_start'))
+            return jsonify({'success': False, 'error': 'No access token in response'})
 
-        print(f"[Timezone OAuth] Got tokens! access={access_token[:20]}... refresh={'yes' if refresh_token else 'no'} expires={expires_in}s")
+        print(f"[Timezone OAuth] Got tokens for user {user['id']}: expires={expires_in}s refresh={'yes' if refresh_token else 'no'}")
 
-        # Calculate expiry
         token_exp = (datetime.utcnow() + timedelta(seconds=expires_in)).strftime('%Y-%m-%d %H:%M:%S')
         sess_exp = (datetime.utcnow() + timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')
 
-        # Save session with mobile client_id
         save_timezone_session(user['id'], access_token, {}, token_exp, sess_exp,
                               refresh_token=refresh_token, ms_client_id=TZ_PKCE_CLIENT_ID)
 
-        # Fetch guest data to get cards
         guest = fetch_timezone_guest(access_token, {}, user_id=user['id'])
         if guest:
             conn = get_db()
             conn.execute('UPDATE timezone_sessions SET guest_id=? WHERE user_id=?', (guest.get('id'), user['id']))
             conn.commit(); conn.close()
             cards = _format_tz_cards(guest)
-            print(f"[Timezone OAuth] Success for user {user['id']}: {len(cards)} cards found")
-            # Store card data in session for the landing page
-            session['tz_oauth_cards'] = cards
-            session['tz_oauth_name'] = guest.get('givenName', '')
-            return redirect(url_for('timezone_oauth_success'))
+            print(f"[Timezone OAuth] Success for user {user['id']}: {len(cards)} cards, mobile client_id")
+            return jsonify({'success': True, 'cards': cards, 'name': guest.get('givenName', '')})
         else:
-            flash('Connected but could not fetch card data. Try refreshing the dashboard.', 'error')
-            return redirect(url_for('dashboard'))
+            return jsonify({'success': False, 'error': 'Connected but could not fetch card data. Dashboard will update on next poll.'})
 
     except Exception as e:
-        print(f"[Timezone OAuth] Token exchange error: {e}")
-        flash(f'Connection error: {str(e)[:100]}', 'error')
-        return redirect(url_for('timezone_start'))
-
-
-@app.route('/timezone/oauth-success')
-@login_required
-def timezone_oauth_success():
-    """Show success page after OAuth login."""
-    cards = session.pop('tz_oauth_cards', [])
-    name = session.pop('tz_oauth_name', '')
-    return render_template('timezone_landing.html', user=get_current_user(),
-                          oauth_success=True, oauth_cards=cards, oauth_name=name)
+        print(f"[Timezone OAuth] Exchange error: {e}")
+        return jsonify({'success': False, 'error': str(e)[:200]})
 
 
 @app.route('/timezone/connect')
