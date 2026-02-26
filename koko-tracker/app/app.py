@@ -1731,6 +1731,146 @@ def card_detail(card_id):
     return render_template('card_detail.html', user=user, card=card, poll_logs=logs, last_updated=last_updated)
 
 # ─── Routes: Timezone ─────────────────────────────────────────────────────────
+
+# ─── Timezone: Direct OAuth Login (mobile client_id — long-lived tokens) ──────
+# Uses Authorization Code + PKCE against the mobile app's B2C user flow.
+# This gives refresh tokens with a much longer lifetime than the web portal.
+
+TZ_B2C_AUTHORIZE  = 'https://identity.teeg.cloud/guests.teeg.cloud/B2C_1_SignupSignin/oauth2/v2.0/authorize'
+TZ_B2C_TOKEN      = 'https://identity.teeg.cloud/guests.teeg.cloud/B2C_1_SignupSignin/oauth2/v2.0/token'
+TZ_PKCE_CLIENT_ID = TZ_MOBILE_CLIENT_ID  # '8791e440-a74b-482e-8089-9ccb16fd718b'
+# Azure B2C public clients accept this redirect for native apps
+TZ_PKCE_REDIRECT  = 'https://login.microsoftonline.com/common/oauth2/nativeclient'
+
+import hashlib as _hashlib
+
+@app.route('/timezone/login')
+@login_required
+def timezone_oauth_start():
+    """Redirect user to Azure B2C login using mobile app's client_id + PKCE."""
+    # Generate PKCE code_verifier and code_challenge
+    code_verifier = secrets.token_urlsafe(64)[:128]
+    code_challenge = base64.urlsafe_b64encode(
+        _hashlib.sha256(code_verifier.encode('ascii')).digest()
+    ).rstrip(b'=').decode('ascii')
+    # Generate state for CSRF
+    state = secrets.token_urlsafe(32)
+    # Store in session
+    session['tz_pkce_verifier'] = code_verifier
+    session['tz_pkce_state'] = state
+
+    params = {
+        'client_id': TZ_PKCE_CLIENT_ID,
+        'response_type': 'code',
+        'redirect_uri': f'{APP_URL}/timezone/oauth-callback',
+        'scope': TZ_SCOPE,
+        'state': state,
+        'code_challenge': code_challenge,
+        'code_challenge_method': 'S256',
+        'response_mode': 'query',
+    }
+    auth_url = TZ_B2C_AUTHORIZE + '?' + '&'.join(f'{k}={requests.utils.quote(str(v))}' for k, v in params.items())
+    print(f"[Timezone OAuth] Redirecting user {session.get('user_id')} to B2C login")
+    return redirect(auth_url)
+
+
+@app.route('/timezone/oauth-callback')
+@login_required
+def timezone_oauth_callback():
+    """Handle the OAuth2 callback from Azure B2C, exchange code for tokens."""
+    user = get_current_user()
+    error = request.args.get('error')
+    error_desc = request.args.get('error_description', '')
+
+    if error:
+        print(f"[Timezone OAuth] Error from B2C: {error}: {error_desc[:200]}")
+        flash(f'Timezone login failed: {error_desc[:100]}', 'error')
+        return redirect(url_for('timezone_start'))
+
+    code = request.args.get('code')
+    state = request.args.get('state')
+
+    if not code:
+        flash('No authorization code received.', 'error')
+        return redirect(url_for('timezone_start'))
+
+    # Validate state
+    expected_state = session.pop('tz_pkce_state', None)
+    code_verifier = session.pop('tz_pkce_verifier', None)
+    if not expected_state or state != expected_state:
+        flash('Invalid state — possible CSRF. Please try again.', 'error')
+        return redirect(url_for('timezone_start'))
+
+    # Exchange code for tokens
+    try:
+        resp = requests.post(TZ_B2C_TOKEN, data={
+            'client_id': TZ_PKCE_CLIENT_ID,
+            'grant_type': 'authorization_code',
+            'code': code,
+            'redirect_uri': f'{APP_URL}/timezone/oauth-callback',
+            'code_verifier': code_verifier,
+            'scope': TZ_SCOPE,
+        }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
+
+        print(f"[Timezone OAuth] Token exchange: HTTP {resp.status_code}")
+
+        if resp.status_code != 200:
+            err = resp.json() if resp.headers.get('content-type','').startswith('application/json') else {}
+            print(f"[Timezone OAuth] Token exchange failed: {err.get('error','')}: {err.get('error_description','')[:200]}")
+            flash(f'Token exchange failed: {err.get("error_description", "Unknown error")[:100]}', 'error')
+            return redirect(url_for('timezone_start'))
+
+        data = resp.json()
+        access_token = data.get('access_token')
+        refresh_token = data.get('refresh_token')
+        expires_in = int(data.get('expires_in', 900))
+
+        if not access_token:
+            flash('No access token in response.', 'error')
+            return redirect(url_for('timezone_start'))
+
+        print(f"[Timezone OAuth] Got tokens! access={access_token[:20]}... refresh={'yes' if refresh_token else 'no'} expires={expires_in}s")
+
+        # Calculate expiry
+        token_exp = (datetime.utcnow() + timedelta(seconds=expires_in)).strftime('%Y-%m-%d %H:%M:%S')
+        sess_exp = (datetime.utcnow() + timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')
+
+        # Save session with mobile client_id
+        save_timezone_session(user['id'], access_token, {}, token_exp, sess_exp,
+                              refresh_token=refresh_token, ms_client_id=TZ_PKCE_CLIENT_ID)
+
+        # Fetch guest data to get cards
+        guest = fetch_timezone_guest(access_token, {}, user_id=user['id'])
+        if guest:
+            conn = get_db()
+            conn.execute('UPDATE timezone_sessions SET guest_id=? WHERE user_id=?', (guest.get('id'), user['id']))
+            conn.commit(); conn.close()
+            cards = _format_tz_cards(guest)
+            print(f"[Timezone OAuth] Success for user {user['id']}: {len(cards)} cards found")
+            # Store card data in session for the landing page
+            session['tz_oauth_cards'] = cards
+            session['tz_oauth_name'] = guest.get('givenName', '')
+            return redirect(url_for('timezone_oauth_success'))
+        else:
+            flash('Connected but could not fetch card data. Try refreshing the dashboard.', 'error')
+            return redirect(url_for('dashboard'))
+
+    except Exception as e:
+        print(f"[Timezone OAuth] Token exchange error: {e}")
+        flash(f'Connection error: {str(e)[:100]}', 'error')
+        return redirect(url_for('timezone_start'))
+
+
+@app.route('/timezone/oauth-success')
+@login_required
+def timezone_oauth_success():
+    """Show success page after OAuth login."""
+    cards = session.pop('tz_oauth_cards', [])
+    name = session.pop('tz_oauth_name', '')
+    return render_template('timezone_landing.html', user=get_current_user(),
+                          oauth_success=True, oauth_cards=cards, oauth_name=name)
+
+
 @app.route('/timezone/connect')
 @login_required
 def timezone_connect():

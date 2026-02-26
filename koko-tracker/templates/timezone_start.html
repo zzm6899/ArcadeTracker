@@ -11,8 +11,31 @@
         <div class="text-center mb-6">
             <div class="text-5xl mb-3">🕹️</div>
             <h1 class="text-2xl font-bold text-white mb-1">Connect Timezone</h1>
-            <p class="text-slate-400 text-sm">Takes about 1 minute</p>
+            <p class="text-slate-400 text-sm">Link your Timezone account to track card balances</p>
         </div>
+
+        <!-- Option 1: Direct Login (recommended) -->
+        <div class="mb-6">
+            <a href="/timezone/login"
+               class="block w-full btn-primary py-4 rounded-xl text-white font-semibold text-center text-lg transition hover:brightness-110">
+                🔐 Sign in with Timezone
+            </a>
+            <p class="text-slate-500 text-xs mt-2 text-center">Recommended — sign in directly for a long-lived session</p>
+        </div>
+
+        <div class="flex items-center gap-3 mb-6">
+            <div class="flex-1 h-px bg-slate-700"></div>
+            <span class="text-slate-500 text-xs">or connect manually</span>
+            <div class="flex-1 h-px bg-slate-700"></div>
+        </div>
+
+        <!-- Option 2: Bookmarklet (fallback) -->
+        <details class="group">
+            <summary class="flex items-center justify-between cursor-pointer text-slate-400 hover:text-white transition text-sm font-medium mb-4">
+                <span>📋 Manual connect (bookmarklet)</span>
+                <svg class="w-4 h-4 transition group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+            </summary>
+            <p class="text-slate-500 text-xs mb-4">Session lasts ~24 hours. Use the direct login above for longer sessions.</p>
 
         <!-- Steps -->
         <div class="space-y-5 mb-8">
@@ -64,6 +87,7 @@
         <div class="bg-slate-800 rounded-xl p-4 text-xs text-slate-400">
             <strong class="text-slate-300">📱 On mobile?</strong> After copying the code, go to the Timezone portal tab, tap the address bar, <strong class="text-slate-300">clear it</strong>, paste the code, and tap Go.
         </div>
+        </details>
     </div>
 </div>
 
