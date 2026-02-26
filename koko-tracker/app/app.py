@@ -368,10 +368,15 @@ TZ_HEADERS = {
     'x-app-version': '20210722',
 }
 
-# Timezone B2C constants — verified from browser network tab
-TZ_TOKEN_URL  = 'https://identity.teeg.cloud/guests.teeg.cloud/b2c_1a_signupsignin/oauth2/v2.0/token'
-TZ_CLIENT_ID  = 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # azp claim
-TZ_SCOPE      = 'https://guests.teeg.cloud/api/all-apis openid profile offline_access'
+# Timezone B2C constants
+# Web portal (bookmarklet captures tokens from this app registration)
+TZ_TOKEN_URL       = 'https://identity.teeg.cloud/guests.teeg.cloud/b2c_1a_signupsignin/oauth2/v2.0/token'
+TZ_CLIENT_ID       = 'ca0e4868-177b-49d2-8c63-f1044e3edc63'  # web portal azp
+TZ_SCOPE           = 'https://guests.teeg.cloud/api/all-apis openid profile offline_access'
+
+# Mobile app (longer-lived refresh tokens — extracted from APK)
+TZ_MOBILE_TOKEN_URL = 'https://identity.teeg.cloud/guests.teeg.cloud/B2C_1_SignupSignin/oauth2/v2.0/token'
+TZ_MOBILE_CLIENT_ID = '8791e440-a74b-482e-8089-9ccb16fd718b'  # mobile app azp
 
 # Sentinel returned when the refresh token itself has expired — user must reconnect
 TZ_REFRESH_TOKEN_EXPIRED = 'REFRESH_TOKEN_EXPIRED'
@@ -379,49 +384,70 @@ TZ_REFRESH_TOKEN_EXPIRED = 'REFRESH_TOKEN_EXPIRED'
 def tz_refresh_ms_token(refresh_token, ms_client_id=None):
     """
     Refresh Timezone bearer token.
+    Tries the original client_id first, then attempts the mobile app's endpoint
+    which may have a longer refresh token lifetime.
     Returns (new_access_token, new_refresh_token, expires_in) on success.
     Returns (TZ_REFRESH_TOKEN_EXPIRED, None, None) when the refresh token has DEFINITIVELY expired (AADB2C90080).
     Returns (None, None, None) on other/transient errors.
     """
-    try:
-        resp = requests.post(TZ_TOKEN_URL, data={
-            'grant_type': 'refresh_token',
-            'client_id': TZ_CLIENT_ID,
-            'scope': TZ_SCOPE,
-            'refresh_token': refresh_token,
-        }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
-        print(f"[Timezone] MS refresh: HTTP {resp.status_code}")
-        if resp.status_code == 200:
-            data = resp.json()
-            new_token   = data.get('access_token')
-            # Always capture the new refresh token — Azure B2C issues a rolling refresh token
-            # that resets the 7-hour expiry window on each successful refresh
-            new_refresh = data.get('refresh_token') or refresh_token
-            expires_in  = int(data.get('expires_in', 840))
-            if data.get('refresh_token'):
-                print(f"[Timezone] MS refresh SUCCESS — new refresh token issued, expires {expires_in}s")
+    # Build list of (token_url, client_id, label) to try
+    attempts = []
+    effective_cid = ms_client_id or TZ_CLIENT_ID
+    if effective_cid == TZ_MOBILE_CLIENT_ID:
+        # Token was issued by mobile app — only try mobile endpoint
+        attempts.append((TZ_MOBILE_TOKEN_URL, TZ_MOBILE_CLIENT_ID, 'mobile'))
+    else:
+        # Token from web portal — try web first, then mobile as fallback
+        attempts.append((TZ_TOKEN_URL, effective_cid, 'web'))
+        attempts.append((TZ_MOBILE_TOKEN_URL, TZ_MOBILE_CLIENT_ID, 'mobile-fallback'))
+
+    last_error_desc = ''
+    for token_url, client_id, label in attempts:
+        try:
+            resp = requests.post(token_url, data={
+                'grant_type': 'refresh_token',
+                'client_id': client_id,
+                'scope': TZ_SCOPE,
+                'refresh_token': refresh_token,
+            }, headers={'Content-Type': 'application/x-www-form-urlencoded'}, timeout=15)
+            print(f"[Timezone] MS refresh ({label}, cid={client_id[:8]}...): HTTP {resp.status_code}")
+            if resp.status_code == 200:
+                data = resp.json()
+                new_token   = data.get('access_token')
+                new_refresh = data.get('refresh_token') or refresh_token
+                expires_in  = int(data.get('expires_in', 840))
+                print(f"[Timezone] MS refresh SUCCESS ({label}) — expires {expires_in}s, new RT: {'yes' if data.get('refresh_token') else 'no'}")
+                return new_token, new_refresh, expires_in
             else:
-                print(f"[Timezone] MS refresh SUCCESS — no new refresh token in response, expires {expires_in}s")
-            return new_token, new_refresh, expires_in
-        else:
-            try:
-                err = resp.json()
-            except Exception:
-                err = {}
-            error_code = err.get('error', '')
-            error_desc = err.get('error_description', '')
-            print(f"[Timezone] MS refresh fail ({resp.status_code}): {error_code}: {error_desc[:200]}")
-            # ONLY mark as definitively expired if Azure explicitly says so via AADB2C90080.
-            # Do NOT treat generic 'invalid_grant' as expired — that code is also returned for
-            # transient server errors and token clock-skew. Those should retry next cycle.
-            if 'AADB2C90080' in error_desc:
-                print(f"[Timezone] Refresh token has definitively expired (AADB2C90080) — user must reconnect")
-                return TZ_REFRESH_TOKEN_EXPIRED, None, None
-            # All other errors (invalid_grant, server errors, etc.) are treated as transient
+                try:
+                    err = resp.json()
+                except Exception:
+                    err = {}
+                error_code = err.get('error', '')
+                error_desc = err.get('error_description', '')
+                last_error_desc = error_desc
+                print(f"[Timezone] MS refresh fail ({label}, {resp.status_code}): {error_code}: {error_desc[:200]}")
+                # Definitively expired — don't try fallback
+                if 'AADB2C90080' in error_desc:
+                    print(f"[Timezone] Refresh token has definitively expired (AADB2C90080) — user must reconnect")
+                    return TZ_REFRESH_TOKEN_EXPIRED, None, None
+                # Wrong client_id for this token — try next
+                if 'AADB2C90222' in error_desc or 'AADB2C90057' in error_desc:
+                    print(f"[Timezone] Client mismatch ({label}), trying next...")
+                    continue
+                # Other error on first attempt — try fallback
+                if label == 'web':
+                    continue
+                return None, None, None
+        except Exception as e:
+            print(f"[Timezone] MS refresh error ({label}): {e}")
+            if label == 'web':
+                continue
             return None, None, None
-    except Exception as e:
-        print(f"[Timezone] MS refresh error: {e}")
-        return None, None, None
+    # All attempts failed
+    if 'AADB2C90080' in last_error_desc:
+        return TZ_REFRESH_TOKEN_EXPIRED, None, None
+    return None, None, None
 
 def tz_refresh_token(cookies_dict):
     """Use session cookies to get a fresh bearer token."""
@@ -705,7 +731,6 @@ def save_timezone_session(user_id, bearer_token, cookies_dict, token_exp, sess_e
 def tz_session_status(tzs):
     """Return status string for a timezone session."""
     if not tzs or not tzs['bearer_token']:
-        # Check if it was deliberately cleared due to expired refresh token
         if tzs and tzs['last_poll_status'] == 'needs_reconnect':
             return 'needs_reconnect'
         return 'disconnected'
@@ -716,6 +741,15 @@ def tz_session_status(tzs):
     # Explicit needs_reconnect always wins
     if tzs['last_poll_status'] == 'needs_reconnect':
         return 'needs_reconnect'
+    # Expiring soon — session within 2 hours of absolute expiry
+    if tzs['last_poll_status'] == 'expiring_soon':
+        return 'expiring_soon'
+    if tzs['session_expires_at']:
+        try:
+            sess_exp = datetime.strptime(tzs['session_expires_at'], '%Y-%m-%d %H:%M:%S')
+            if (sess_exp - now_dt).total_seconds() < 7200:
+                return 'expiring_soon'
+        except: pass
     if tzs['last_poll_at']:
         try:
             last = datetime.strptime(tzs['last_poll_at'], '%Y-%m-%d %H:%M:%S')
@@ -725,8 +759,6 @@ def tz_session_status(tzs):
             age = (now_dt - last).total_seconds()
             if tzs['last_poll_status'] == 'error' and age < TIMEZONE_POLL_INTERVAL * 2:
                 return 'error'
-            # Only call stale if updated_at is also old — a recent reauth/token refresh
-            # touches updated_at, so we shouldn't flag stale if the session was recently active
             if age > TIMEZONE_POLL_INTERVAL * 3:
                 updated_at = None
                 if tzs['updated_at']:
@@ -735,11 +767,21 @@ def tz_session_status(tzs):
                     except: pass
                 if updated_at:
                     updated_age = (now_dt - updated_at).total_seconds()
-                    # If session was touched (reauth/token refresh) within 2x poll interval, not stale
                     if updated_age < TIMEZONE_POLL_INTERVAL * 2:
                         return 'connected'
                 return 'stale'
     return 'connected'
+
+def tz_session_hours_remaining(tzs):
+    """Return hours remaining on a Timezone session, or None if unknown."""
+    if not tzs or not tzs['session_expires_at']:
+        return None
+    try:
+        exp = datetime.strptime(tzs['session_expires_at'], '%Y-%m-%d %H:%M:%S')
+        secs = (exp - datetime.utcnow()).total_seconds()
+        return max(0, secs / 3600)
+    except:
+        return None
 
 
 # ─── Discord Webhook ──────────────────────────────────────────────────────────
@@ -958,24 +1000,63 @@ def log_poll(card_id, success, message=''):
     except: pass
 
 def _refresh_tz_tokens(label):
-    """Refresh any Timezone tokens that are expired or expiring within 10 minutes."""
+    """Refresh any Timezone tokens that are expired or expiring within 10 minutes.
+    Also check session_expires_at (Azure B2C absolute refresh token lifetime ~24h)
+    and warn when approaching expiry."""
     try:
         conn = get_db()
         # Exclude sessions already marked needs_reconnect — nothing we can do until user reconnects
         sessions = conn.execute(
-            "SELECT * FROM timezone_sessions WHERE refresh_token IS NOT NULL "
-            "AND last_poll_status != 'needs_reconnect'"
+            "SELECT ts.*, u.username, u.discord_webhook FROM timezone_sessions ts "
+            "JOIN users u ON ts.user_id = u.id "
+            "WHERE ts.refresh_token IS NOT NULL "
+            "AND ts.last_poll_status != 'needs_reconnect'"
         ).fetchall()
         conn.close()
         now = datetime.utcnow()
         for tzs in sessions:
+            # Check session absolute expiry (Azure B2C ~24h refresh token lifetime)
+            if tzs['session_expires_at']:
+                try:
+                    sess_exp = datetime.strptime(tzs['session_expires_at'], '%Y-%m-%d %H:%M:%S')
+                    secs_until_sess_exp = (sess_exp - now).total_seconds()
+
+                    # Warn at 2 hours remaining (only once — set status to 'expiring_soon')
+                    if 0 < secs_until_sess_exp < 7200 and tzs['last_poll_status'] not in ('expiring_soon', 'needs_reconnect'):
+                        hrs_left = secs_until_sess_exp / 3600
+                        print(f"[{label}] ⚠️ Session for user {tzs['user_id']} ({tzs['username']}) expires in {hrs_left:.1f}h")
+                        try:
+                            conn2 = get_db()
+                            conn2.execute("UPDATE timezone_sessions SET last_poll_status='expiring_soon' WHERE user_id=?", (tzs['user_id'],))
+                            conn2.commit(); conn2.close()
+                        except: pass
+                        # Fire user webhook warning if configured
+                        if tzs['discord_webhook']:
+                            try:
+                                import requests as _req
+                                _req.post(tzs['discord_webhook'], json={
+                                    'embeds': [{'title': '⚠️ Timezone Session Expiring',
+                                        'description': f'Your Timezone session expires in **{hrs_left:.1f} hours**.\n\nReconnect at the dashboard to keep tracking.',
+                                        'color': 0xfbbf24}]
+                                }, timeout=5)
+                            except: pass
+
+                    # Session has actually expired — don't wait for AADB2C90080
+                    if secs_until_sess_exp <= 0 and tzs['last_poll_status'] != 'needs_reconnect':
+                        print(f"[{label}] Session expired for user {tzs['user_id']} ({tzs['username']}) — marking needs_reconnect")
+                        _mark_needs_reconnect(tzs['user_id'])
+                        continue
+                except:
+                    pass
+
+            # Check access token expiry
             needs_refresh = False
             if not tzs['token_expires_at']:
                 needs_refresh = True
             else:
                 try:
                     exp = datetime.strptime(tzs['token_expires_at'], '%Y-%m-%d %H:%M:%S')
-                    if (exp - now).total_seconds() < 600:  # 10 min window (was 5)
+                    if (exp - now).total_seconds() < 600:  # 10 min window
                         needs_refresh = True
                 except:
                     needs_refresh = True
@@ -1483,9 +1564,10 @@ def dashboard():
     tzs = conn.execute('SELECT * FROM timezone_sessions WHERE user_id=?', (user['id'],)).fetchone()
     conn.close()
     tz_status = tz_session_status(tzs)
+    tz_hours_left = tz_session_hours_remaining(tzs)
     return render_template('dashboard.html', user=user, cards=cards,
                           tz_connected=tz_status=='connected', tz_session=tzs,
-                          tz_status=tz_status)
+                          tz_status=tz_status, tz_hours_left=tz_hours_left)
 
 # ─── Routes: Cards ────────────────────────────────────────────────────────────
 @app.route('/cards/add', methods=['POST'])
@@ -1679,7 +1761,7 @@ def timezone_callback():
         token_exp = datetime.utcfromtimestamp(claims['exp']).strftime('%Y-%m-%d %H:%M:%S')
     except:
         token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
-    sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+    sess_exp = (datetime.utcnow() + timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')
     refresh_token = data.get('refresh_token') or data.get('refreshToken')
     ms_client_id  = data.get('ms_client_id') or data.get('clientId')
     save_timezone_session(user['id'], bearer_token, cookies, token_exp, sess_exp,
@@ -1709,7 +1791,7 @@ def timezone_extract_token():
                 token_exp = datetime.utcfromtimestamp(claims['exp']).strftime('%Y-%m-%d %H:%M:%S')
             except:
                 token_exp = (datetime.utcnow() + timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
-            sess_exp = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+            sess_exp = (datetime.utcnow() + timedelta(days=90)).strftime('%Y-%m-%d %H:%M:%S')
             rt  = data.get('refresh_token') or data.get('refreshToken')
             cid = data.get('client_id') or data.get('clientId')
             save_timezone_session(user['id'], bearer_token, cookies_from_browser, token_exp, sess_exp, guest.get('id'), refresh_token=rt, ms_client_id=cid)
