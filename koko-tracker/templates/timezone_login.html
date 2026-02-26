@@ -66,7 +66,7 @@
 const CLIENT_ID     = {{ client_id | tojson }};
 const SCOPE         = {{ scope | tojson }};
 const AUTHORIZE_URL = {{ authorize_url | tojson }};
-const REDIRECT_URI  = 'https://login.microsoftonline.com/common/oauth2/nativeclient';
+const REDIRECT_URI  = 'https://portal.timezonegames.com/authentication/login-callback';
 
 // Pre-computed auth URL (ready before user clicks — avoids async popup blocking)
 let readyUrl = null;
@@ -118,7 +118,7 @@ async function prepare() {
         state: st,
         code_challenge: ch,
         code_challenge_method: 'S256',
-        response_mode: 'query',
+        response_mode: 'fragment',
     }).toString();
     const btn = document.getElementById('login-btn');
     if (btn) { btn.disabled = false; btn.textContent = 'Open Timezone Login →'; }
@@ -126,28 +126,18 @@ async function prepare() {
 
 // ── Click handler: opens popup SYNCHRONOUSLY (no async = no blocker) ──
 function doLogin() {
-    if (!readyUrl) {
-        setState('error', 'Still preparing — please wait a moment and try again.');
-        return;
-    }
+    if (!readyUrl) return;
 
     // Capture current values before regenerating
     const url = readyUrl;
     const verifier = readyVerifier;
 
     // Open popup immediately in the click handler (synchronous!)
-    // Use a unique window name each time to avoid a stale named window
-    // that won't re-navigate (the root cause of the about:blank bug).
     const w = 500, h = 700;
     const left = (screen.width - w) / 2;
     const top = (screen.height - h) / 2;
-    const winName = 'tz_login_' + Date.now();
-    const popup = window.open('about:blank', winName,
+    const popup = window.open(url, 'tz_login',
         `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`);
-
-    // Navigate the popup immediately after opening (still within the same
-    // synchronous click handler tick — browsers allow this).
-    if (popup) popup.location.href = url;
 
     // Regenerate for next attempt
     prepare();
@@ -160,6 +150,7 @@ function doLogin() {
     setState('waiting');
 
     // Poll popup URL to detect redirect back from B2C
+    // Response comes back as fragment (#code=...) to portal.timezonegames.com/authentication/login-callback
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(function() {
         try {
@@ -169,27 +160,30 @@ function doLogin() {
                 return;
             }
             var href = popup.location.href;
-            if (href && href.indexOf('login.microsoftonline.com/common/oauth2/nativeclient') !== -1) {
+            if (href && href.indexOf('portal.timezonegames.com/authentication/login-callback') !== -1) {
                 clearInterval(pollTimer);
-                var u = new URL(href);
                 popup.close();
 
-                var err = u.searchParams.get('error');
+                // Code is in the hash fragment (#code=...&state=...)
+                var hash = new URL(href).hash.slice(1); // strip leading #
+                var params = new URLSearchParams(hash);
+
+                var err = params.get('error');
                 if (err) {
                     setState('error',
-                        u.searchParams.get('error_description') || err,
+                        decodeURIComponent(params.get('error_description') || err),
                         'Error: ' + err);
                     return;
                 }
-                var code = u.searchParams.get('code');
+                var code = params.get('code');
                 if (code) {
                     exchangeCode(code, verifier);
                 } else {
-                    setState('error', 'No authorization code received.');
+                    setState('error', 'No authorization code received. Hash: ' + hash.slice(0,80));
                 }
             }
         } catch(e) {
-            // Cross-origin — popup still on B2C domain, keep waiting
+            // Cross-origin — popup still on B2C/identity domain, keep waiting
         }
     }, 300);
 }
