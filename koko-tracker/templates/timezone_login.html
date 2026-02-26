@@ -72,7 +72,6 @@ const REDIRECT_URI  = 'https://portal.timezonegames.com/authentication/login-cal
 let readyUrl = null;
 let readyVerifier = null;
 let pollTimer = null;
-let activePopup = null;
 
 function setState(name, msg, detail) {
     ['init','waiting','exchanging','success','error'].forEach(s =>
@@ -137,13 +136,12 @@ function doLogin() {
     const w = 500, h = 700;
     const left = (screen.width - w) / 2;
     const top = (screen.height - h) / 2;
-    const popup = window.open(url, 'tz_login_' + Date.now(),
+    const popup = window.open(url, 'tz_login',
         `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`);
 
     // Regenerate for next attempt
     prepare();
 
-    activePopup = popup;
     if (!popup) {
         setState('error', 'Popup was blocked. Please allow popups for this site, then try again.');
         return;
@@ -158,7 +156,6 @@ function doLogin() {
 
     function tryExtractCode(href) {
         if (codeHandled) return;
-        console.log('[TZ] tryExtractCode:', href ? href.slice(0,80) : 'null');
         if (!href || href.indexOf('portal.timezonegames.com/authentication/login-callback') === -1) return;
         var u = new URL(href);
         // Support both ?code= (query mode) and #code= (fragment mode)
@@ -181,6 +178,41 @@ function doLogin() {
         }
     }
 
+    // Blazor reads ?code= then immediately navigates to about:blank.
+    // Strategy: the instant the popup becomes same-origin, inject a script
+    // that postMessages the URL back to us BEFORE Blazor JS can run.
+    var injected = false;
+    var lastHref = null;
+
+    function tryInject() {
+        if (injected) return;
+        try {
+            var doc = popup.document;
+            var href = popup.location.href;
+            if (href && href.indexOf('login-callback') !== -1) {
+                injected = true;
+                console.log('[TZ] Injecting into popup at:', href.slice(0,100));
+                // postMessage the URL immediately
+                window.postMessage({tzCode: href}, '*');
+                // Also try to freeze Blazor navigation
+                try {
+                    var s = doc.createElement('script');
+                    s.textContent = 'window.opener.postMessage({tzCode:location.href},"*");';
+                    doc.head.insertBefore(s, doc.head.firstChild);
+                } catch(e) {}
+            }
+        } catch(e) { /* cross-origin, keep waiting */ }
+    }
+
+    // Listen for postMessage from injected script or self
+    window.addEventListener('message', function onMsg(e) {
+        var href = e.data && e.data.tzCode;
+        if (href) {
+            console.log('[TZ] postMessage caught:', href.slice(0,100));
+            tryExtractCode(href);
+        }
+    });
+
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(function() {
         try {
@@ -190,17 +222,24 @@ function doLogin() {
                 return;
             }
             var href = popup.location.href;
+            if (href !== lastHref) {
+                lastHref = href;
+                console.log('[TZ] Poll URL changed:', href.slice(0,100));
+            }
+            tryInject();
             tryExtractCode(href);
         } catch(e) {
-            // Cross-origin — popup still on B2C/identity domain, keep waiting
+            // Cross-origin — keep waiting
         }
-    }, 50);
+    }, 10);
 
-    // Hook beforeunload on the popup to catch the URL at the exact moment
-    // it starts navigating away — fires before the 404 page replaces the URL
     try {
         popup.addEventListener('beforeunload', function() {
-            try { tryExtractCode(popup.location.href); } catch(e) {}
+            try {
+                var href = popup.location.href;
+                console.log('[TZ] beforeunload:', href.slice(0,100));
+                tryExtractCode(href);
+            } catch(e) {}
         });
     } catch(e) {}
 }
