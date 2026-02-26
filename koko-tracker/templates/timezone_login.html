@@ -72,6 +72,7 @@ const REDIRECT_URI  = 'https://portal.timezonegames.com/authentication/login-cal
 let readyUrl = null;
 let readyVerifier = null;
 let pollTimer = null;
+let activePopup = null;
 
 function setState(name, msg, detail) {
     ['init','waiting','exchanging','success','error'].forEach(s =>
@@ -136,12 +137,13 @@ function doLogin() {
     const w = 500, h = 700;
     const left = (screen.width - w) / 2;
     const top = (screen.height - h) / 2;
-    const popup = window.open(url, 'tz_login',
+    const popup = window.open(url, 'tz_login_' + Date.now(),
         `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no,scrollbars=yes`);
 
     // Regenerate for next attempt
     prepare();
 
+    activePopup = popup;
     if (!popup) {
         setState('error', 'Popup was blocked. Please allow popups for this site, then try again.');
         return;
@@ -156,6 +158,7 @@ function doLogin() {
 
     function tryExtractCode(href) {
         if (codeHandled) return;
+        console.log('[TZ] tryExtractCode:', href ? href.slice(0,80) : 'null');
         if (!href || href.indexOf('portal.timezonegames.com/authentication/login-callback') === -1) return;
         var u = new URL(href);
         // Support both ?code= (query mode) and #code= (fragment mode)
@@ -183,10 +186,11 @@ function doLogin() {
         try {
             if (!popup || popup.closed) {
                 clearInterval(pollTimer);
-                if (!codeHandled) setState('init');
+                if (!codeHandled) { console.log('[TZ] Popup closed without code'); setState('init'); }
                 return;
             }
-            tryExtractCode(popup.location.href);
+            var href = popup.location.href;
+            tryExtractCode(href);
         } catch(e) {
             // Cross-origin — popup still on B2C/identity domain, keep waiting
         }
