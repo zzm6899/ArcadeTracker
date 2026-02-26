@@ -149,45 +149,56 @@ function doLogin() {
 
     setState('waiting');
 
-    // Poll popup URL to detect redirect back from B2C
-    // Response comes back as fragment (#code=...) to portal.timezonegames.com/authentication/login-callback
+    // Poll popup URL to detect redirect back from B2C.
+    // The callback page returns 404 (Blazor SPA — no server-side route), so we must
+    // grab ?code= the instant the URL changes, before the 404 renders and navigates away.
+    var codeHandled = false;
+
+    function tryExtractCode(href) {
+        if (codeHandled) return;
+        if (!href || href.indexOf('portal.timezonegames.com/authentication/login-callback') === -1) return;
+        var u = new URL(href);
+        // Support both ?code= (query mode) and #code= (fragment mode)
+        var params = u.searchParams.get('code')
+            ? u.searchParams
+            : new URLSearchParams(u.hash.slice(1));
+        var err = params.get('error');
+        var code = params.get('code');
+        if (err || code) {
+            codeHandled = true;
+            clearInterval(pollTimer);
+            try { popup.close(); } catch(e) {}
+            if (err) {
+                setState('error',
+                    decodeURIComponent(params.get('error_description') || err),
+                    'Error: ' + err);
+            } else {
+                exchangeCode(code, verifier);
+            }
+        }
+    }
+
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(function() {
         try {
             if (!popup || popup.closed) {
                 clearInterval(pollTimer);
-                setState('init');
+                if (!codeHandled) setState('init');
                 return;
             }
-            var href = popup.location.href;
-            if (href && href.indexOf('portal.timezonegames.com/authentication/login-callback') !== -1) {
-                clearInterval(pollTimer);
-                popup.close();
-
-                // Try query params first (?code=), fall back to hash fragment (#code=)
-                var u = new URL(href);
-                var params = u.searchParams.get('code')
-                    ? u.searchParams
-                    : new URLSearchParams(u.hash.slice(1));
-
-                var err = params.get('error');
-                if (err) {
-                    setState('error',
-                        decodeURIComponent(params.get('error_description') || err),
-                        'Error: ' + err);
-                    return;
-                }
-                var code = params.get('code');
-                if (code) {
-                    exchangeCode(code, verifier);
-                } else {
-                    setState('error', 'No authorization code received. URL: ' + href.slice(0,120));
-                }
-            }
+            tryExtractCode(popup.location.href);
         } catch(e) {
             // Cross-origin — popup still on B2C/identity domain, keep waiting
         }
-    }, 300);
+    }, 50);
+
+    // Hook beforeunload on the popup to catch the URL at the exact moment
+    // it starts navigating away — fires before the 404 page replaces the URL
+    try {
+        popup.addEventListener('beforeunload', function() {
+            try { tryExtractCode(popup.location.href); } catch(e) {}
+        });
+    } catch(e) {}
 }
 
 async function exchangeCode(code, verifier) {
