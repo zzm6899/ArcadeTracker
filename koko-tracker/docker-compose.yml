@@ -18,7 +18,7 @@ services:
       - DISCORD_BOT_TOKEN=           # Get from discord.com/developers/applications
       - DISCORD_GUILD_ID=            # Your server ID (right-click server → Copy ID)
       # ── Transport NSW (optional) ───────────────────────────────────────────
-      - TFNSW_API_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJWcU5IOWRZUExJTmFjRFV5MTFRM0J3aWg1TmJReU92SjB4T1JpUjZhaWh3IiwiaWF0IjoxNzc0NzA2ODc4fQ.tNDWLRM5Xd7Y___nfS3CuMdQeCHXdKW2azSecdR3ac0
+      - TFNSW_API_KEY=           # Get from https://opendata.transport.nsw.gov.au
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 30s
