@@ -98,14 +98,19 @@ def _normalise_query(query: str) -> str:
     return " ".join((w[0].upper() + w[1:]) for w in query.strip().split() if w)
 
 
-async def _stop_finder_raw(query: str) -> list:
+async def _stop_finder_raw(query: str, type_sf: str = "any") -> list:
     """
     Hit the stop_finder endpoint and return filtered locations list.
     Shared by find_stops and its fuzzy-retry path.
+
+    type_sf controls the TfNSW server-side search scope:
+      "any"  – search all location types (addresses, localities, stops, POIs).
+               Can return locality/suburb results that our type filter strips out.
+      "stop" – search only for transit stops/platforms, avoiding locality noise.
     """
     params = {
         "outputFormat": "rapidJSON",
-        "type_sf": "any",
+        "type_sf": type_sf,
         "name_sf": _normalise_query(query),
         "coordOutputFormat": "EPSG:4326",
         "TfNSWSF": "true",
@@ -119,10 +124,12 @@ async def _stop_finder_raw(query: str) -> list:
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             if resp.status != 200:
-                return []
+                text = await resp.text()
+                preview = text[:200] + ("…" if len(text) > 200 else "")
+                raise RuntimeError(f"TfNSW API error {resp.status}: {preview}")
             data = await resp.json()
 
-    all_locations = data.get("locations", [])
+    all_locations = data.get("locations") or []
     return [
         l for l in all_locations
         if l.get("type") in ("stop", "platform")
@@ -212,7 +219,25 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
         if station_locs:
             locations = station_locs
 
-    # Fallback 2: fuzzy spelling correction for clear misspellings.
+    # Fallback 2: explicit stop-type search.
+    # The TfNSW type_sf=any search ranks suburb/locality results highly for
+    # well-known suburb names (e.g. "Central", "Rhodes"). Those locality entries
+    # are filtered out by our type check, leaving locations empty even though the
+    # actual train station exists. Using type_sf=stop forces the API to return
+    # only transit stops, so the station appears at the top of results.
+    if not locations:
+        stop_locs = await _stop_finder_raw(query, type_sf="stop")
+        if stop_locs:
+            locations = stop_locs
+        elif not q_lower.endswith("station"):
+            # Also retry with the station suffix and type_sf=stop (mirrors Fallback 1
+            # but with the stop-specific scope, which can surface stations that the
+            # any-type search missed entirely).
+            stop_station_locs = await _stop_finder_raw(query + " station", type_sf="stop")
+            if stop_station_locs:
+                locations = stop_station_locs
+
+    # Fallback 3: fuzzy spelling correction for clear misspellings.
     # Triggers when top result quality is low (< 500), meaning the API matched
     # something unrelated (e.g. "rodes" → Rodeo Dr, quality ~200).
     best_quality = max((l.get("matchQuality", 0) for l in locations), default=0)
