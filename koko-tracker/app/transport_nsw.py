@@ -400,6 +400,21 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
         location = ev.get("location", {})
         stop_name = location.get("name", "")
 
+        # Platform identifier at this stop (e.g. "Platform 3", "Stand A")
+        platform = ""
+        disassembled_loc = location.get("disassembledName", "") or ""
+        _PLAT_KW = ("platform", "stop", "stand", "bay", "wharf", "berth")
+        if disassembled_loc and any(
+            disassembled_loc.lower().startswith(kw) for kw in _PLAT_KW
+        ):
+            platform = disassembled_loc
+
+        # Service origin — where this vehicle started its journey
+        origin_name = (transport.get("origin") or {}).get("name", "") or ""
+
+        # Cancellation flag
+        cancelled = bool(ev.get("cancelledDeparture") or ev.get("isCancelled"))
+
         # Is this running on time?
         on_time = abs(delay) <= 1
 
@@ -415,6 +430,9 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
             "on_time": on_time,
             "stop_name": stop_name,
             "mode": mode_id,
+            "platform": platform,
+            "origin_name": origin_name,
+            "cancelled": cancelled,
         })
 
         if len(departures) >= limit:
@@ -526,12 +544,23 @@ async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
 
 # ─── Service Alerts ───────────────────────────────────────────────────────────
 
-async def get_alerts(stop_ids: list[str] | None = None, line_names: list[str] | None = None) -> list[dict]:
+async def get_alerts(keywords: list[str] | None = None) -> list[dict]:
     """
-    Fetch current service alerts from TfNSW.
-    Optionally filter to alerts relevant to given stop IDs or line names.
-    Returns list of dicts: {priority, title, content, url, is_replacement}
+    Fetch current service alerts from TfNSW and return only those relevant to
+    the queried route or stop.
+
+    ``keywords`` should contain stop names and route/line numbers (e.g.
+    ["Central", "Rhodes", "T9"]).  Alerts whose title or body do not mention
+    at least one keyword are suppressed.  Passing an empty list or None
+    suppresses *all* alerts so generic system-wide notices never leak into
+    unrelated queries.
+
+    Returns list of dicts: {priority, title, body, url, is_replacement}
     """
+    # No keywords → caller explicitly wants no alerts shown
+    if not keywords:
+        return []
+
     import re as _re
     params = {
         "outputFormat": "rapidJSON",
@@ -582,11 +611,19 @@ async def get_alerts(stop_ids: list[str] | None = None, line_names: list[str] | 
             "is_replacement": is_replacement,
         })
 
-    # If filters given, try to narrow down — best effort (API doesn't return structured stop/line refs)
-    # We just return all current alerts if no reliable filter data available
-    # Cap at 5 to avoid embed spam
-    high_priority = [a for a in results if a["priority"] in ("high", "veryHigh")]
-    normal = [a for a in results if a["priority"] not in ("high", "veryHigh")]
+    # Keep only alerts that mention at least one of the requested keywords.
+    # Match against both title and body (case-insensitive).
+    kw_lower = {k.strip().lower() for k in keywords if k and k.strip()}
+    if kw_lower:
+        relevant = [
+            a for a in results
+            if any(kw in (a["title"] + " " + a["body"]).lower() for kw in kw_lower)
+        ]
+    else:
+        relevant = []
+
+    high_priority = [a for a in relevant if a["priority"] in ("high", "veryHigh")]
+    normal = [a for a in relevant if a["priority"] not in ("high", "veryHigh")]
     return (high_priority + normal)[:5]
 
 
@@ -597,14 +634,60 @@ def format_departure_line(dep: dict, index: int | None = None) -> str:
     icon = MODE_ICONS.get(dep["mode"], "🚌")
     route = dep["route"]
     dest = dep["destination"]
+    prefix = f"`{index}.` " if index is not None else ""
+
+    if dep.get("cancelled"):
+        return f"{prefix}{icon} ~~**{route}** → {dest}~~ 🚫 Cancelled"
+
     mins_str = _format_mins(dep["mins"])
     delay_str = ""
     if not dep["on_time"]:
         sign = "+" if dep["delay"] > 0 else ""
-        delay_str = f" ⚠️ {sign}{dep['delay']}m late"
+        delay_str = f" ⚠️ {sign}{dep['delay']}m"
     rt_indicator = " 🔴" if dep["realtime"] is not None else ""
-    prefix = f"`{index}.` " if index is not None else ""
-    return f"{prefix}{icon} **{route}** → {dest} — {mins_str}{rt_indicator}{delay_str}"
+
+    extras = []
+    platform = dep.get("platform", "")
+    if platform:
+        extras.append(platform)
+    origin = dep.get("origin_name", "")
+    if origin:
+        # Shorten to the principal name before any comma / "Station" suffix
+        short = origin.split(",")[0].strip()
+        short = short.replace(" Station", "").replace(" station", "").strip()
+        if short:
+            extras.append(f"↑ {short[:18]}")
+
+    extras_str = (" · " + " · ".join(extras)) if extras else ""
+    return f"{prefix}{icon} **{route}** → {dest} — {mins_str}{rt_indicator}{delay_str}{extras_str}"
+
+
+def format_stop_stats(deps: list[dict]) -> str:
+    """Return a compact one-line statistics string for a departure list."""
+    if not deps:
+        return ""
+    total = len(deps)
+    cancelled = sum(1 for d in deps if d.get("cancelled"))
+    running = total - cancelled
+    on_time_count = sum(1 for d in deps if d.get("on_time") and not d.get("cancelled"))
+    rt_count = sum(1 for d in deps if d.get("realtime") is not None and not d.get("cancelled"))
+    delay_vals = [
+        d["delay"] for d in deps
+        if d.get("realtime") is not None and not d.get("cancelled") and d["delay"] != 0
+    ]
+
+    parts = []
+    if cancelled:
+        parts.append(f"🚫 {cancelled} cancelled")
+    if running > 0:
+        parts.append(f"✅ {on_time_count}/{running} on time")
+    if rt_count:
+        parts.append(f"🔴 {rt_count} live")
+    if delay_vals:
+        avg = sum(delay_vals) / len(delay_vals)
+        sign = "+" if avg > 0 else ""
+        parts.append(f"avg {sign}{avg:.0f}m")
+    return " · ".join(parts)
 
 
 def format_trip_summary(trip: dict, index: int) -> str:

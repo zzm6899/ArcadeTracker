@@ -22,6 +22,7 @@ from transport_nsw import (
     plan_trip,
     get_alerts,
     format_departure_line,
+    format_stop_stats,
     MODE_ICONS,
     MODE_NAMES,
     _format_mins,
@@ -162,6 +163,31 @@ ERROR_COLOR = 0xE74C3C
 
 def _err_embed(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
+
+
+def _alert_keywords(from_stop: dict, to_stop: dict, trips: list[dict] | None = None) -> list[str]:
+    """
+    Build the keyword list used to filter service alerts to only those relevant
+    to the queried route.  Includes stop names and every route/line number that
+    appears in the planned trip legs.
+    """
+    kws: set[str] = set()
+    for stop in (from_stop, to_stop):
+        name = (stop.get("short_name") or stop.get("name") or "").strip()
+        main = re.split(r"[,(]", name)[0].strip()
+        if len(main) > 2:
+            kws.add(main)
+    for trip in (trips or []):
+        for leg in trip.get("legs", []):
+            if leg.get("mode") == "walk":
+                continue
+            route = (leg.get("route") or "").strip()
+            if route:
+                kws.add(route)
+            dest = (leg.get("destination") or "").split(",")[0].strip()
+            if len(dest) > 2:
+                kws.add(dest)
+    return list(kws)
 
 
 def _stop_select_label(s: dict) -> str:
@@ -544,10 +570,8 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 if not to_result:
                     return
 
-            trips, alerts = await asyncio.gather(
-                plan_trip(from_result["id"], to_result["id"], limit=5),
-                get_alerts(),
-            )
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=5)
+            alerts = await get_alerts(_alert_keywords(from_result, to_result, trips))
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
