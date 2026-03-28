@@ -98,7 +98,7 @@ async def _stop_finder_raw(query: str) -> list:
     params = {
         "outputFormat": "rapidJSON",
         "type_sf": "any",
-        "name_sf": query,
+        "name_sf": " ".join(w[0].upper() + w[1:] if w else w for w in query.strip().split()),
         "coordOutputFormat": "EPSG:4326",
         "TfNSWSF": "true",
         "version": "10.2.1.42",
