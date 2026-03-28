@@ -9,6 +9,7 @@ SQLite database as the main bot (DB_PATH env var).
 import asyncio
 import sqlite3
 import os
+from collections import defaultdict
 from datetime import datetime
 
 import discord
@@ -161,51 +162,123 @@ def _err_embed(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
 
 
+def _stop_select_label(s: dict) -> str:
+    """Build a compact Select label for a stop — max 100 chars."""
+    icons = "".join(MODE_ICONS.get(m, "") for m in s["modes"]) or "🚏"
+    if s["platform_hint"]:
+        # e.g. "🚌 Rhodes Station — Stop B"
+        label = f"{icons} {s['parent_name']} — {s['platform_hint']}"
+    else:
+        label = f"{icons} {s['short_name']}"
+        if s["suburb"] and s["suburb"] not in label:
+            label += f", {s['suburb']}"
+    return label[:100]
+
+
+def _stop_select_description(s: dict) -> str:
+    """Secondary line shown under the label in the Select menu."""
+    mode_names = ", ".join(MODE_NAMES.get(m, m) for m in s["modes"]) or "Stop"
+    suburb = s["suburb"] or ""
+    if s["platform_hint"] and suburb:
+        return f"{mode_names} · {suburb}"[:100]
+    elif s["platform_hint"]:
+        return mode_names[:100]
+    elif suburb:
+        return f"{mode_names} · {suburb}"[:100]
+    return mode_names[:100]
+
+
 async def _pick_stop(
     interaction: discord.Interaction,
     query: str,
     role: str = "origin",
 ) -> dict | None:
     """
-    Search for stops matching query.
-    If exactly one result → return it.
-    If multiple → send an ephemeral picker and wait for selection via a Select menu.
-    Returns None on failure or timeout.
+    'Did you mean?' stop picker.
+
+    - Single result → return immediately, no prompt.
+    - Exact name match → return immediately.
+    - Multiple results → ephemeral embed with a Select dropdown showing
+      mode icons, suburb, and platform hint (Stop A/B/C etc.).
+    Returns None on failure/timeout.
     """
-    stops = await find_stops(query, limit=5)
+    stops = await find_stops(query, limit=8)
     if not stops:
         await interaction.followup.send(
-            embed=_err_embed(f"No stops found matching **{query}**. Try a more specific name."),
+            embed=_err_embed(
+                f"No stops found matching **{query}**.\n"
+                "Try a suburb or full station name (e.g. *Rhodes Station*, *Central*)."
+            ),
             ephemeral=True,
         )
         return None
+
+    # Auto-confirm: single result OR an exact case-insensitive name match
     if len(stops) == 1:
         return stops[0]
+    q_lower = query.strip().lower()
+    exact = [s for s in stops if s["short_name"].lower() == q_lower
+             or s["parent_name"].lower() == q_lower]
+    if len(exact) == 1:
+        return exact[0]
 
-    # Multiple results — show a picker
-    options = [
-        discord.SelectOption(
-            label=s["name"][:100],
-            value=str(i),
-            description=f"Stop ID: {s['id']}"[:100],
-        )
-        for i, s in enumerate(stops)
-    ]
+    # ── Build "Did you mean?" picker ──────────────────────────────────────────
+    # Group by parent station to make bus stop lists readable
+    # e.g. "Rhodes Station" → [Stop A, Stop B, Stop C]
+    groups: dict[str, list[dict]] = defaultdict(list)
+    ungrouped = []
+    for s in stops:
+        if s["platform_hint"] and s["parent_name"]:
+            groups[s["parent_name"]].append(s)
+        else:
+            ungrouped.append(s)
+
+    # Build embed description
+    lines = []
+    option_list: list[dict] = []  # ordered list that matches Select option values
+
+    for station, platform_stops in groups.items():
+        mode_icons = "".join(
+            MODE_ICONS.get(m, "")
+            for m in sorted({m for s in platform_stops for m in s["modes"]})
+        ) or "🚏"
+        lines.append(f"**{mode_icons} {station}**")
+        for s in platform_stops:
+            idx = len(option_list)
+            lines.append(f"  › {s['platform_hint']}")
+            option_list.append(s)
+
+    for s in ungrouped:
+        idx = len(option_list)
+        icons = "".join(MODE_ICONS.get(m, "") for m in s["modes"]) or "🚏"
+        suburb = f", {s['suburb']}" if s["suburb"] and s["suburb"] not in s["short_name"] else ""
+        lines.append(f"**{icons} {s['short_name']}{suburb}**")
+        option_list.append(s)
 
     embed = discord.Embed(
-        title=f'\U0001f50d Multiple stops found for "{query}"',
-        description=f"Please select the **{role}** stop:",
+        title=f"Did you mean…? ({role})",
+        description="\n".join(lines),
         color=TRAIN_COLOR,
     )
-    for i, s in enumerate(stops):
-        modes = ", ".join(MODE_NAMES.get(m, m) for m in s["modes"]) or "Unknown"
-        embed.add_field(name=f"{i+1}. {s['name']}", value=f"ID: `{s['id']}` · {modes}", inline=False)
+    embed.set_footer(text="Select a stop below · times out in 30s")
 
-    select = discord.ui.Select(placeholder=f"Choose {role} stop…", options=options)
+    options = [
+        discord.SelectOption(
+            label=_stop_select_label(s),
+            value=str(i),
+            description=_stop_select_description(s),
+        )
+        for i, s in enumerate(option_list)
+    ]
+
+    select = discord.ui.Select(
+        placeholder=f"Choose {role} stop…",
+        options=options[:25],  # Discord limit
+    )
     chosen: list[dict] = []
 
     async def on_select(select_interaction: discord.Interaction):
-        chosen.append(stops[int(select.values[0])])
+        chosen.append(option_list[int(select.values[0])])
         await select_interaction.response.defer()
         view.stop()
 
@@ -366,15 +439,14 @@ def register_transport_commands(tree: app_commands.CommandTree):
     # ── /transport next ───────────────────────────────────────────────────────
 
     @transport_group.command(name="next", description="Show next departure from your saved station or route")
-    @app_commands.describe(slot="Your saved trip/stop slot number (default: 1)")
-    async def cmd_next(interaction: discord.Interaction, slot: int = 1):
+    @app_commands.describe(name="Saved trip/stop name or slot number (e.g. 'morning commute' or '1')")
+    async def cmd_next(interaction: discord.Interaction, name: str = "1"):
         await interaction.response.defer(ephemeral=False)
 
         routes = await asyncio.to_thread(db_get_routes, interaction.user.id)
         stops = await asyncio.to_thread(db_get_stops, interaction.user.id)
 
-        # Combine routes + stops, ordered by creation time (slot 1 = first saved)
-        # Routes take priority in numbering, then stops
+        # Combine routes + stops, routes first (slot 1 = first saved route, then stops)
         all_items = list(routes) + list(stops)
         if not all_items:
             embed = discord.Embed(
@@ -387,15 +459,37 @@ def register_transport_commands(tree: app_commands.CommandTree):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        idx = slot - 1
-        if idx < 0 or idx >= len(all_items):
-            await interaction.followup.send(
-                embed=_err_embed(f"Slot {slot} doesn't exist. You have {len(all_items)} saved item(s)."),
-                ephemeral=True,
-            )
-            return
+        # Try numeric slot first, then fuzzy label match
+        item = None
+        slot_display = name
+        query = name.strip()
 
-        item = all_items[idx]
+        if query.isdigit():
+            idx = int(query) - 1
+            if 0 <= idx < len(all_items):
+                item = all_items[idx]
+                slot_display = query
+            else:
+                await interaction.followup.send(
+                    embed=_err_embed(f"Slot {query} doesn't exist. You have {len(all_items)} saved item(s)."),
+                    ephemeral=True,
+                )
+                return
+        else:
+            # Case-insensitive substring match on label
+            q_lower = query.lower()
+            matches = [it for it in all_items if q_lower in it["label"].lower()]
+            if not matches:
+                labels = ", ".join(f"**{it['label']}**" for it in all_items)
+                await interaction.followup.send(
+                    embed=_err_embed(
+                        f'No saved trip/stop matching "{query}".\n\nYour saved items: {labels}'
+                    ),
+                    ephemeral=True,
+                )
+                return
+            item = matches[0]  # best match = first (earliest saved)
+            slot_display = item["label"]
 
         try:
             if "from_id" in item.keys():
@@ -431,7 +525,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
                         value=f"{leg_icons}\nArrives {arr_str} · {dur}m{change_str}",
                         inline=False,
                     )
-                embed.set_footer(text="🔴 = real-time · Slot " + str(slot))
+                embed.set_footer(text=f"🔴 = real-time · {slot_display}")
             else:
                 # It's a saved stop
                 deps = await get_departures(item["stop_id"], limit=6)
@@ -449,7 +543,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 )
                 lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
                 embed.description += "\n\n" + "\n".join(lines)
-                embed.set_footer(text="🔴 = real-time · Slot " + str(slot))
+                embed.set_footer(text=f"🔴 = real-time · {slot_display}")
 
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
@@ -518,7 +612,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
         for r in routes:
             embed.add_field(
                 name=f"Slot {slot} · 🚆 {r['label']}",
-                value=f"{r['from_name']} → {r['to_name']}\n`/transport next {slot}`  ·  ID: {r['id']}",
+                value=f"{r['from_name']} → {r['to_name']}\n`/transport next {slot}`  or  `/transport next {r['label']}`  ·  ID: {r['id']}",
                 inline=False,
             )
             slot += 1
@@ -526,7 +620,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
         for s in stops:
             embed.add_field(
                 name=f"Slot {slot} · 🚏 {s['label']}",
-                value=f"Stop: {s['stop_name']}\n`/transport next {slot}`  ·  ID: {s['id']}",
+                value=f"Stop: {s['stop_name']}\n`/transport next {slot}`  or  `/transport next {s['label']}`  ·  ID: {s['id']}",
                 inline=False,
             )
             slot += 1

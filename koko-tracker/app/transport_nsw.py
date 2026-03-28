@@ -94,13 +94,29 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
     results = []
     for loc in locations[:limit]:
         stop_id = loc.get("id", "")
-        name = loc.get("disassembledName") or loc.get("name", "Unknown")
-        parent = loc.get("parent", {})
-        parent_name = parent.get("name", "") if parent else ""
-        if parent_name and parent_name not in name:
-            display_name = f"{name}, {parent_name}"
+
+        # disassembledName splits the stop cleanly: e.g. "Stop A" vs "Rhodes Station"
+        disassembled = loc.get("disassembledName", "") or ""
+        full_name = loc.get("name", "Unknown")
+
+        parent = loc.get("parent", {}) or {}
+        parent_name = parent.get("name", "") or ""
+        suburb = parent.get("name", "") or ""
+
+        # platform_hint = the bit that distinguishes bus stops at the same station
+        # e.g. disassembledName="Stop B" when parent="Rhodes Station"
+        platform_hint = ""
+        if disassembled and parent_name and disassembled != parent_name:
+            platform_hint = disassembled  # e.g. "Stop B", "Platform 1", "Stand A"
+
+        # Human display name: "Rhodes Station, Stop B" or just "Central Station"
+        if platform_hint:
+            display_name = f"{parent_name}, {platform_hint}" if parent_name else disassembled
+        elif parent_name and parent_name not in full_name:
+            display_name = f"{full_name}, {parent_name}"
         else:
-            display_name = name
+            display_name = full_name
+
         # Determine transport modes available at this stop
         assigned_stops = loc.get("assignedStops", [])
         modes = set()
@@ -108,13 +124,24 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
             for mode in s.get("modes", []):
                 modes.add(str(mode))
         if not modes:
-            # fallback: guess from stop id
-            if stop_id.startswith("21"):
-                modes.add("4")  # train
+            # Fallback: infer from stop ID prefix
+            # 2xxxxxxx = train, 2000xxxx = metro, 3xxxxxxx = bus, etc.
+            if stop_id.startswith("21") or stop_id.startswith("20"):
+                modes.add("4")   # train / metro
+            elif stop_id.startswith("3"):
+                modes.add("1")   # bus
+            elif stop_id.startswith("4"):
+                modes.add("2")   # ferry
+            elif stop_id.startswith("6"):
+                modes.add("5")   # light rail
+
         results.append({
             "id": stop_id,
             "name": display_name,
-            "short_name": name,
+            "short_name": disassembled or full_name,
+            "parent_name": parent_name,
+            "suburb": suburb,
+            "platform_hint": platform_hint,
             "modes": sorted(modes),
         })
     return results
