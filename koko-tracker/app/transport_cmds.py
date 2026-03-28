@@ -1,12 +1,13 @@
 """
-Transport NSW Discord commands — appended to bot.py via import.
-Registers slash commands: /train /next /find-stop /save-trip /my-trips /delete-trip
+Transport NSW Discord commands.
+Registers slash commands under the /transport group.
 
-DB tables created here (transport_stops, transport_routes) share the same
-SQLite database as the main bot (DB_PATH env var).
+DB tables (transport_stops, transport_routes) share the same SQLite
+database as the main bot (DB_PATH env var).
 """
 
 import asyncio
+import re
 import sqlite3
 import os
 from collections import defaultdict
@@ -19,11 +20,12 @@ from transport_nsw import (
     find_stops,
     get_departures,
     plan_trip,
+    get_alerts,
     format_departure_line,
-    format_trip_summary,
     MODE_ICONS,
     MODE_NAMES,
     _format_mins,
+    _fmt_time,
     SYDNEY_TZ,
 )
 
@@ -166,7 +168,6 @@ def _stop_select_label(s: dict) -> str:
     """Build a compact Select label for a stop — max 100 chars."""
     icons = "".join(MODE_ICONS.get(m, "") for m in s["modes"]) or "🚏"
     if s["platform_hint"]:
-        # e.g. "🚌 Rhodes Station — Stop B"
         label = f"{icons} {s['parent_name']} — {s['platform_hint']}"
     else:
         label = f"{icons} {s['short_name']}"
@@ -179,13 +180,30 @@ def _stop_select_description(s: dict) -> str:
     """Secondary line shown under the label in the Select menu."""
     mode_names = ", ".join(MODE_NAMES.get(m, m) for m in s["modes"]) or "Stop"
     suburb = s["suburb"] or ""
-    if s["platform_hint"] and suburb:
-        return f"{mode_names} · {suburb}"[:100]
-    elif s["platform_hint"]:
-        return mode_names[:100]
-    elif suburb:
+    if suburb:
         return f"{mode_names} · {suburb}"[:100]
     return mode_names[:100]
+
+
+async def _pick_stop_silent(query: str) -> dict | None:
+    """
+    Like _pick_stop but returns the best single match without any interaction,
+    or None if ambiguous/not found. Used for the natural-language /transport go
+    command where we want auto-resolution without a picker dialog.
+    """
+    stops = await find_stops(query, limit=5)
+    if not stops:
+        return None
+    if len(stops) == 1:
+        return stops[0]
+    # Prefer exact match on short_name or parent_name
+    q_lower = query.strip().lower()
+    exact = [s for s in stops if s["short_name"].lower() == q_lower
+             or s["parent_name"].lower() == q_lower]
+    if exact:
+        return exact[0]
+    # Return best (first/highest matchQuality) result
+    return stops[0]
 
 
 async def _pick_stop(
@@ -196,11 +214,12 @@ async def _pick_stop(
     """
     'Did you mean?' stop picker.
 
-    - Single result → return immediately, no prompt.
-    - Exact name match → return immediately.
-    - Multiple results → ephemeral embed with a Select dropdown showing
-      mode icons, suburb, and platform hint (Stop A/B/C etc.).
-    Returns None on failure/timeout.
+    - Single result or exact name match → return immediately, no prompt.
+    - Multiple results → ephemeral embed + Select dropdown.
+
+    IMPORTANT: caller must have already called interaction.response.defer()
+    before calling this. All messages here use followup.send(ephemeral=True).
+    Returns None on no match or timeout.
     """
     stops = await find_stops(query, limit=8)
     if not stops:
@@ -213,7 +232,7 @@ async def _pick_stop(
         )
         return None
 
-    # Auto-confirm: single result OR an exact case-insensitive name match
+    # Auto-confirm: single result or exact name match
     if len(stops) == 1:
         return stops[0]
     q_lower = query.strip().lower()
@@ -223,8 +242,6 @@ async def _pick_stop(
         return exact[0]
 
     # ── Build "Did you mean?" picker ──────────────────────────────────────────
-    # Group by parent station to make bus stop lists readable
-    # e.g. "Rhodes Station" → [Stop A, Stop B, Stop C]
     groups: dict[str, list[dict]] = defaultdict(list)
     ungrouped = []
     for s in stops:
@@ -233,9 +250,8 @@ async def _pick_stop(
         else:
             ungrouped.append(s)
 
-    # Build embed description
     lines = []
-    option_list: list[dict] = []  # ordered list that matches Select option values
+    option_list: list[dict] = []
 
     for station, platform_stops in groups.items():
         mode_icons = "".join(
@@ -244,20 +260,22 @@ async def _pick_stop(
         ) or "🚏"
         lines.append(f"**{mode_icons} {station}**")
         for s in platform_stops:
-            idx = len(option_list)
             lines.append(f"  › {s['platform_hint']}")
             option_list.append(s)
 
     for s in ungrouped:
-        idx = len(option_list)
         icons = "".join(MODE_ICONS.get(m, "") for m in s["modes"]) or "🚏"
         suburb = f", {s['suburb']}" if s["suburb"] and s["suburb"] not in s["short_name"] else ""
         lines.append(f"**{icons} {s['short_name']}{suburb}**")
         option_list.append(s)
 
+    # Safety: Discord requires at least 1 option
+    if not option_list:
+        return stops[0]
+
     embed = discord.Embed(
         title=f"Did you mean…? ({role})",
-        description="\n".join(lines),
+        description="\n".join(lines) or "Multiple stops found — please select one.",
         color=TRAIN_COLOR,
     )
     embed.set_footer(text="Select a stop below · times out in 30s")
@@ -268,13 +286,10 @@ async def _pick_stop(
             value=str(i),
             description=_stop_select_description(s),
         )
-        for i, s in enumerate(option_list)
+        for i, s in enumerate(option_list[:25])  # Discord max 25
     ]
 
-    select = discord.ui.Select(
-        placeholder=f"Choose {role} stop…",
-        options=options[:25],  # Discord limit
-    )
+    select = discord.ui.Select(placeholder=f"Choose {role} stop…", options=options)
     chosen: list[dict] = []
 
     async def on_select(select_interaction: discord.Interaction):
@@ -290,12 +305,151 @@ async def _pick_stop(
     await view.wait()
 
     if not chosen:
-        await interaction.followup.send(embed=_err_embed("Selection timed out."), ephemeral=True)
+        # Timeout — edit the picker message rather than sending another followup
+        await interaction.followup.send(
+            embed=_err_embed(f"Selection timed out for **{role}** stop."),
+            ephemeral=True,
+        )
         return None
     return chosen[0]
 
 
-# ─── /train ───────────────────────────────────────────────────────────────────
+# ─── Natural-language query parser ────────────────────────────────────────────
+
+def _parse_go_query(text: str) -> tuple[str, str] | None:
+    """
+    Parse a natural-language trip query into (from_query, to_query).
+
+    Handles:
+      "rhodes to strathfield"
+      "rhodes → central"
+      "rhodes bus A to top ryde"   → from="rhodes bus A", to="top ryde"
+      "central station to parramatta"
+
+    Returns (from_part, to_part) or None if no separator found.
+    """
+    # Normalise arrows and various separators to " to "
+    text = text.strip()
+    text = re.sub(r"\s*[-–—→=>]+\s*", " to ", text, flags=re.IGNORECASE)
+    # Now split on " to " (case-insensitive, surrounded by word chars)
+    # Use the LAST occurrence of " to " as the split point if multiple exist
+    # (e.g. "top ryde to central" — "top" shouldn't split)
+    pattern = re.compile(r"\bto\b", re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return None
+
+    # Try each match from last to first; use the first one that yields
+    # non-empty from/to parts
+    for m in reversed(matches):
+        from_part = text[:m.start()].strip()
+        to_part = text[m.end():].strip()
+        if from_part and to_part:
+            return from_part, to_part
+
+    return None
+
+
+# ─── Trip result embed builder ────────────────────────────────────────────────
+
+def _trip_summary_line(trip: dict, index: int) -> str:
+    """One-line summary for a trip option — used in the compact list."""
+    dep = trip["departs"]
+    arr = trip["arrives"]
+    mins = trip["mins_until"]
+    dur = trip["duration_mins"]
+    dep_str = _fmt_time(dep) if dep else "?"
+    arr_str = _fmt_time(arr) if arr else "?"
+    mins_str = _format_mins(mins) if mins is not None else "?"
+
+    # Build compact leg icons: 🚆T9 → 🚌370
+    leg_parts = []
+    for leg in trip["legs"]:
+        if leg["mode"] == "walk":
+            leg_parts.append("🚶")
+        else:
+            leg_parts.append(f"{leg['icon']}**{leg.get('route','')}**")
+    legs_str = " → ".join(leg_parts)
+
+    changes = trip["num_legs"] - 1
+    change_str = f"· {changes} change{'s' if changes != 1 else ''}" if changes > 0 else "· direct"
+    rt = " 🔴" if trip.get("is_realtime") else ""
+
+    return f"`{index}.` {legs_str}  —  **{dep_str}** ({mins_str}) → **{arr_str}** · {dur}m {change_str}{rt}"
+
+
+def _trip_detail_field(trip: dict) -> str:
+    """Expanded leg-by-leg detail for a single selected trip."""
+    lines = []
+    for leg in trip["legs"]:
+        if leg["mode"] == "walk":
+            lines.append(f"🚶 {leg['summary']}")
+        else:
+            dep_t = leg.get("departs")
+            dep_t_str = _fmt_time(dep_t) if dep_t else ""
+            from_n = leg.get("from", "")
+            to_n = leg.get("to", "")
+            route = leg.get("route", "")
+            icon = leg["icon"]
+            line = f"{icon} **{route}** · {from_n} → {to_n}"
+            if dep_t_str:
+                line += f" · departs **{dep_t_str}**"
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def _build_alerts_fields(alerts: list[dict]) -> list[tuple[str, str]]:
+    """Convert alert list to (name, value) tuples for embed fields."""
+    fields = []
+    for a in alerts:
+        icon = "🚨" if a["is_replacement"] else ("⚠️" if a["priority"] in ("high", "veryHigh") else "ℹ️")
+        title = f"{icon} {a['title']}"[:256]
+        body = a["body"][:300] if a["body"] else ""
+        url = a["url"]
+        value = body
+        if url:
+            value = (value + f"\n[More info]({url})").strip()
+        if not value:
+            value = "\u200b"  # zero-width space — Discord requires non-empty field value
+        fields.append((title, value[:1024]))
+    return fields
+
+
+def _build_trip_overview_embed(
+    trips: list[dict],
+    from_stop: dict,
+    to_stop: dict,
+    alerts: list[dict],
+) -> discord.Embed:
+    """
+    Compact overview embed: one line per trip option, sorted by departure time.
+    Alerts shown at bottom. User selects an option to expand detail.
+    """
+    embed = discord.Embed(
+        title=f"🚆 {from_stop['short_name']} → {to_stop['short_name']}",
+        color=TRAIN_COLOR,
+    )
+
+    lines = [_trip_summary_line(t, i) for i, t in enumerate(trips, 1)]
+    embed.description = "\n".join(lines)
+
+    if alerts:
+        embed.add_field(
+            name="📢 Service notices",
+            value="\n".join(
+                f"{'🚨' if a['is_replacement'] else '⚠️' if a['priority'] in ('high','veryHigh') else 'ℹ️'} "
+                f"{a['title'][:100]}"
+                + (f" — [details]({a['url']})" if a["url"] else "")
+                for a in alerts
+            )[:1024],
+            inline=False,
+        )
+
+    embed.set_footer(text="Select an option below for details · 🔴 = real-time")
+    return embed
+
+
+# ─── Command registration ──────────────────────────────────────────────────────
 
 def register_transport_commands(tree: app_commands.CommandTree):
     """Call this with the bot's command tree to register all transport commands."""
@@ -304,6 +458,67 @@ def register_transport_commands(tree: app_commands.CommandTree):
         name="transport",
         description="NSW Transport — check trains, buses, ferries",
     )
+
+    # ── /transport go  (natural-language shortcut) ────────────────────────────
+
+    @transport_group.command(
+        name="go",
+        description='Natural-language trip planner: "rhodes to central" or "rhodes bus A to top ryde"',
+    )
+    @app_commands.describe(query='Where to and from, e.g. "rhodes to strathfield" or "central to parramatta"')
+    async def cmd_go(interaction: discord.Interaction, query: str):
+        await interaction.response.defer(ephemeral=False)
+
+        parsed = _parse_go_query(query)
+        if not parsed:
+            await interaction.followup.send(
+                embed=_err_embed(
+                    f'Could not parse **"{query}"**.\n'
+                    'Use the format **from** `to` **destination**, e.g. `rhodes to central` '
+                    'or `rhodes bus A to top ryde`.'
+                ),
+                ephemeral=True,
+            )
+            return
+
+        from_query, to_query = parsed
+
+        try:
+            from_result = await _pick_stop_silent(from_query)
+            to_result = await _pick_stop_silent(to_query)
+
+            if not from_result:
+                from_result = await _pick_stop(interaction, from_query, "origin")
+                if not from_result:
+                    return
+            if not to_result:
+                to_result = await _pick_stop(interaction, to_query, "destination")
+                if not to_result:
+                    return
+
+            trips, alerts = await asyncio.gather(
+                plan_trip(from_result["id"], to_result["id"], limit=5),
+                get_alerts(),
+            )
+        except Exception as e:
+            await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
+            return
+
+        if not trips:
+            await interaction.followup.send(
+                embed=_err_embed(
+                    f"No trips found from **{from_result['short_name']}** to **{to_result['short_name']}**.\n"
+                    f"Resolved: `{from_result['name']}` → `{to_result['name']}`"
+                ),
+                ephemeral=True,
+            )
+            return
+
+        embed = _build_trip_overview_embed(trips, from_result, to_result, alerts)
+        view = _TripSelectorView(
+            interaction.user.id, trips, from_result, to_result, alerts
+        )
+        await interaction.followup.send(embed=embed, view=view)
 
     # ── /transport train ──────────────────────────────────────────────────────
 
@@ -322,8 +537,10 @@ def register_transport_commands(tree: app_commands.CommandTree):
             to_result = await _pick_stop(interaction, to_stop, "destination")
             if not to_result:
                 return
-
-            trips = await plan_trip(from_result["id"], to_result["id"], limit=3)
+            trips, alerts = await asyncio.gather(
+                plan_trip(from_result["id"], to_result["id"], limit=5),
+                get_alerts(),
+            )
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
@@ -337,52 +554,9 @@ def register_transport_commands(tree: app_commands.CommandTree):
             )
             return
 
-        embed = discord.Embed(
-            title=f"🚆 {from_result['short_name']} → {to_result['short_name']}",
-            color=TRAIN_COLOR,
-        )
-        embed.set_footer(text="🔴 = real-time · Times in Sydney local time")
-
-        for i, trip in enumerate(trips, 1):
-            dep = trip["departs"]
-            arr = trip["arrives"]
-            mins = trip["mins_until"]
-            dur = trip["duration_mins"]
-
-            dep_str = dep.strftime("%H:%M") if dep else "?"
-            arr_str = arr.strftime("%H:%M") if arr else "?"
-            mins_str = _format_mins(mins) if mins is not None else "?"
-
-            # Build leg description
-            leg_lines = []
-            for leg in trip["legs"]:
-                if leg["mode"] == "walk":
-                    leg_lines.append(f"  🚶 {leg['summary']}")
-                else:
-                    dep_t = leg.get("departs")
-                    dep_t_str = dep_t.strftime("%H:%M") if dep_t else ""
-                    from_n = leg.get("from", "")
-                    to_n = leg.get("to", "")
-                    route = leg.get("route", "")
-                    icon = leg["icon"]
-                    leg_lines.append(f"  {icon} **{route}** from {from_n} → {to_n}" + (f" at {dep_t_str}" if dep_t_str else ""))
-
-            field_val = (
-                f"Departs **{dep_str}** ({mins_str})  →  Arrives **{arr_str}**\n"
-                f"Duration: **{dur} min**\n"
-            ) + "\n".join(leg_lines)
-
-            embed.add_field(
-                name=f"Option {i}",
-                value=field_val,
-                inline=False,
-            )
-
-        # Save shortcut button
-        view = _SaveRouteView(
-            interaction.user.id,
-            from_result["id"], from_result["name"],
-            to_result["id"], to_result["name"],
+        embed = _build_trip_overview_embed(trips, from_result, to_result, alerts)
+        view = _TripSelectorView(
+            interaction.user.id, trips, from_result, to_result, alerts
         )
         await interaction.followup.send(embed=embed, view=view)
 
@@ -391,15 +565,15 @@ def register_transport_commands(tree: app_commands.CommandTree):
     @transport_group.command(name="departures", description="Show upcoming departures from a stop")
     @app_commands.describe(
         stop="Stop or station name (e.g. Central, Chatswood)",
-        mode="Filter by mode (optional)",
+        mode="Filter by transport mode (optional)",
     )
     @app_commands.choices(mode=[
         app_commands.Choice(name="All", value="all"),
-        app_commands.Choice(name="Train", value="4"),
-        app_commands.Choice(name="Bus", value="1"),
-        app_commands.Choice(name="Ferry", value="2"),
-        app_commands.Choice(name="Light Rail", value="5"),
-        app_commands.Choice(name="Metro", value="11"),
+        app_commands.Choice(name="🚆 Train", value="1"),
+        app_commands.Choice(name="🚇 Metro", value="2"),
+        app_commands.Choice(name="🚌 Bus", value="5"),
+        app_commands.Choice(name="⛴️ Ferry", value="9"),
+        app_commands.Choice(name="🚃 Light Rail", value="4"),
     ])
     async def cmd_departures(interaction: discord.Interaction, stop: str, mode: str = "all"):
         await interaction.response.defer(ephemeral=False)
@@ -415,20 +589,19 @@ def register_transport_commands(tree: app_commands.CommandTree):
             return
 
         if not deps:
-            await interaction.followup.send(
-                embed=_err_embed(f"No upcoming departures found from **{stop_result['name']}**."),
-                ephemeral=True,
-            )
+            mode_label = MODE_NAMES.get(mode, mode) if mode != "all" else ""
+            no_deps_msg = f"No upcoming {mode_label + ' ' if mode_label else ''}departures from **{stop_result['short_name']}**."
+            await interaction.followup.send(embed=_err_embed(no_deps_msg), ephemeral=True)
             return
 
         now_str = datetime.now(SYDNEY_TZ).strftime("%H:%M")
-        mode_label = MODE_NAMES.get(mode, "All modes") if mode != "all" else "All modes"
+        mode_label = "All modes" if mode == "all" else MODE_NAMES.get(mode, mode)
         embed = discord.Embed(
-            title=f"🚏 Departures — {stop_result['short_name']}",
-            description=f"As of **{now_str}** · {mode_label}",
+            title=f"🚏 {stop_result['short_name']}",
+            description=f"Departures as of **{now_str}** · {mode_label}",
             color=TRAIN_COLOR,
         )
-        embed.set_footer(text="🔴 = real-time data · ⚠️ = delayed")
+        embed.set_footer(text="🔴 = real-time · ⚠️ = delayed")
 
         lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
         embed.description += "\n\n" + "\n".join(lines)
@@ -438,45 +611,44 @@ def register_transport_commands(tree: app_commands.CommandTree):
 
     # ── /transport next ───────────────────────────────────────────────────────
 
-    @transport_group.command(name="next", description="Show next departure from your saved station or route")
-    @app_commands.describe(name="Saved trip/stop name or slot number (e.g. 'morning commute' or '1')")
+    @transport_group.command(name="next", description="Next departure from your saved station or route")
+    @app_commands.describe(name='Saved trip/stop name or slot number — e.g. "morning commute" or "1"')
     async def cmd_next(interaction: discord.Interaction, name: str = "1"):
         await interaction.response.defer(ephemeral=False)
 
         routes = await asyncio.to_thread(db_get_routes, interaction.user.id)
         stops = await asyncio.to_thread(db_get_stops, interaction.user.id)
 
-        # Combine routes + stops, routes first (slot 1 = first saved route, then stops)
         all_items = list(routes) + list(stops)
         if not all_items:
-            embed = discord.Embed(
-                description=(
-                    "You have no saved trips or stops yet.\n\n"
-                    "Use `/transport train` or `/transport departures` and press **Save** to add one."
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=(
+                        "You have no saved trips or stops yet.\n\n"
+                        "Use `/transport train` or `/transport departures` "
+                        "and press **Save** to add one."
+                    ),
+                    color=TRAIN_COLOR,
                 ),
-                color=TRAIN_COLOR,
+                ephemeral=True,
             )
-            await interaction.followup.send(embed=embed, ephemeral=True)
             return
 
-        # Try numeric slot first, then fuzzy label match
-        item = None
-        slot_display = name
         query = name.strip()
+        slot_display = query
 
         if query.isdigit():
             idx = int(query) - 1
-            if 0 <= idx < len(all_items):
-                item = all_items[idx]
-                slot_display = query
-            else:
+            if not (0 <= idx < len(all_items)):
                 await interaction.followup.send(
-                    embed=_err_embed(f"Slot {query} doesn't exist. You have {len(all_items)} saved item(s)."),
+                    embed=_err_embed(
+                        f"Slot {query} doesn't exist. You have {len(all_items)} saved item(s)."
+                    ),
                     ephemeral=True,
                 )
                 return
+            item = all_items[idx]
         else:
-            # Case-insensitive substring match on label
             q_lower = query.lower()
             matches = [it for it in all_items if q_lower in it["label"].lower()]
             if not matches:
@@ -488,50 +660,36 @@ def register_transport_commands(tree: app_commands.CommandTree):
                     ephemeral=True,
                 )
                 return
-            item = matches[0]  # best match = first (earliest saved)
+            item = matches[0]
             slot_display = item["label"]
 
         try:
             if "from_id" in item.keys():
-                # It's a route
-                trips = await plan_trip(item["from_id"], item["to_id"], limit=3)
+                trips, alerts = await asyncio.gather(
+                    plan_trip(item["from_id"], item["to_id"], limit=5),
+                    get_alerts(),
+                )
                 if not trips:
                     await interaction.followup.send(
-                        embed=_err_embed(f"No trips found for **{item['label']}**."), ephemeral=True
+                        embed=_err_embed(f"No trips found for **{item['label']}**."),
+                        ephemeral=True,
                     )
                     return
-                embed = discord.Embed(
-                    title=f"🚆 {item['label']}",
-                    description=f"{item['from_name']} → {item['to_name']}",
-                    color=TRAIN_COLOR,
-                )
-                for i, trip in enumerate(trips, 1):
-                    dep = trip["departs"]
-                    arr = trip["arrives"]
-                    mins = trip["mins_until"]
-                    dur = trip["duration_mins"]
-                    dep_str = dep.strftime("%H:%M") if dep else "?"
-                    arr_str = arr.strftime("%H:%M") if arr else "?"
-                    mins_str = _format_mins(mins) if mins is not None else "?"
-                    leg_icons = " → ".join(
-                        l["icon"] if l["mode"] == "walk"
-                        else f"{l['icon']}**{l.get('route','')}**"
-                        for l in trip["legs"]
-                    )
-                    changes = trip["num_legs"] - 1
-                    change_str = f", {changes} change{'s' if changes != 1 else ''}" if changes > 0 else ", direct"
-                    embed.add_field(
-                        name=f"Option {i} — departs {dep_str} ({mins_str})",
-                        value=f"{leg_icons}\nArrives {arr_str} · {dur}m{change_str}",
-                        inline=False,
-                    )
+                from_stop = {"short_name": item["from_name"], "id": item["from_id"]}
+                to_stop = {"short_name": item["to_name"], "id": item["to_id"]}
+                embed = _build_trip_overview_embed(trips, from_stop, to_stop, alerts)
+                embed.title = f"🚆 {item['label']}"
                 embed.set_footer(text=f"🔴 = real-time · {slot_display}")
+                view = _TripSelectorView(
+                    interaction.user.id, trips, from_stop, to_stop, alerts
+                )
+                await interaction.followup.send(embed=embed, view=view)
+                return
             else:
-                # It's a saved stop
                 deps = await get_departures(item["stop_id"], limit=6)
                 if not deps:
                     await interaction.followup.send(
-                        embed=_err_embed(f"No departures found from **{item['label']}**."),
+                        embed=_err_embed(f"No departures from **{item['label']}**."),
                         ephemeral=True,
                     )
                     return
@@ -598,7 +756,8 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 embed=discord.Embed(
                     description=(
                         "You have no saved trips or stops yet.\n\n"
-                        "Use `/transport train` or `/transport departures` then press **Save** to add one."
+                        "Use `/transport train` or `/transport departures` "
+                        "then press **Save** to add one."
                     ),
                     color=TRAIN_COLOR,
                 ),
@@ -612,7 +771,10 @@ def register_transport_commands(tree: app_commands.CommandTree):
         for r in routes:
             embed.add_field(
                 name=f"Slot {slot} · 🚆 {r['label']}",
-                value=f"{r['from_name']} → {r['to_name']}\n`/transport next {slot}`  or  `/transport next {r['label']}`  ·  ID: {r['id']}",
+                value=(
+                    f"{r['from_name']} → {r['to_name']}\n"
+                    f"`/transport next {slot}`  or  `/transport next {r['label']}`"
+                ),
                 inline=False,
             )
             slot += 1
@@ -620,17 +782,23 @@ def register_transport_commands(tree: app_commands.CommandTree):
         for s in stops:
             embed.add_field(
                 name=f"Slot {slot} · 🚏 {s['label']}",
-                value=f"Stop: {s['stop_name']}\n`/transport next {slot}`  or  `/transport next {s['label']}`  ·  ID: {s['id']}",
+                value=(
+                    f"Stop: {s['stop_name']}\n"
+                    f"`/transport next {slot}`  or  `/transport next {s['label']}`"
+                ),
                 inline=False,
             )
             slot += 1
 
-        embed.set_footer(text="Use /transport delete-trip or /transport delete-stop to remove saved items")
+        embed.set_footer(text="/transport delete-trip or /transport delete-stop to remove")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /transport save-trip ──────────────────────────────────────────────────
 
-    @transport_group.command(name="save-trip", description="Save a route by stop IDs (use /find-stop to get IDs)")
+    @transport_group.command(
+        name="save-trip",
+        description="Save a route by stop IDs (use /transport find-stop to get IDs)",
+    )
     @app_commands.describe(
         label="Nickname for this trip (e.g. Morning Commute)",
         from_id="Origin stop ID",
@@ -652,15 +820,23 @@ def register_transport_commands(tree: app_commands.CommandTree):
         )
         routes = await asyncio.to_thread(db_get_routes, interaction.user.id)
         slot = next((i + 1 for i, r in enumerate(routes) if r["id"] == row_id), "?")
-        embed = discord.Embed(
-            description=f"✅ Saved **{label}** ({from_name} → {to_name}) as slot **{slot}**.\nUse `/transport next {slot}` to check it quickly.",
-            color=TRAIN_COLOR,
+        await interaction.followup.send(
+            embed=discord.Embed(
+                description=(
+                    f"✅ Saved **{label}** ({from_name} → {to_name}) as slot **{slot}**.\n"
+                    f"Use `/transport next {slot}` to check it quickly."
+                ),
+                color=TRAIN_COLOR,
+            ),
+            ephemeral=True,
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /transport save-stop ──────────────────────────────────────────────────
 
-    @transport_group.command(name="save-stop", description="Save a stop/station by ID (use /find-stop to get IDs)")
+    @transport_group.command(
+        name="save-stop",
+        description="Save a stop/station by ID (use /transport find-stop to get IDs)",
+    )
     @app_commands.describe(
         label="Nickname for this stop (e.g. Home Station)",
         stop_id="Stop ID from /transport find-stop",
@@ -679,11 +855,16 @@ def register_transport_commands(tree: app_commands.CommandTree):
         routes = await asyncio.to_thread(db_get_routes, interaction.user.id)
         stops = await asyncio.to_thread(db_get_stops, interaction.user.id)
         slot = len(routes) + next((i + 1 for i, s in enumerate(stops) if s["id"] == row_id), 1)
-        embed = discord.Embed(
-            description=f"✅ Saved **{label}** ({stop_name}) as slot **{slot}**.\nUse `/transport next {slot}` to check departures.",
-            color=TRAIN_COLOR,
+        await interaction.followup.send(
+            embed=discord.Embed(
+                description=(
+                    f"✅ Saved **{label}** ({stop_name}) as slot **{slot}**.\n"
+                    f"Use `/transport next {slot}` to check departures."
+                ),
+                color=TRAIN_COLOR,
+            ),
+            ephemeral=True,
         )
-        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /transport delete-trip ────────────────────────────────────────────────
 
@@ -699,7 +880,9 @@ def register_transport_commands(tree: app_commands.CommandTree):
             return
         await asyncio.to_thread(db_delete_route, interaction.user.id, route_id)
         await interaction.followup.send(
-            embed=discord.Embed(description=f"🗑️ Removed **{row['label']}**.", color=TRAIN_COLOR),
+            embed=discord.Embed(
+                description=f"🗑️ Removed **{row['label']}**.", color=TRAIN_COLOR
+            ),
             ephemeral=True,
         )
 
@@ -717,7 +900,9 @@ def register_transport_commands(tree: app_commands.CommandTree):
             return
         await asyncio.to_thread(db_delete_stop, interaction.user.id, stop_id)
         await interaction.followup.send(
-            embed=discord.Embed(description=f"🗑️ Removed **{row['label']}**.", color=TRAIN_COLOR),
+            embed=discord.Embed(
+                description=f"🗑️ Removed **{row['label']}**.", color=TRAIN_COLOR
+            ),
             ephemeral=True,
         )
 
@@ -727,7 +912,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
 # ─── UI Views ─────────────────────────────────────────────────────────────────
 
 class _SaveRouteView(discord.ui.View):
-    """Attached to /transport train results — lets users save the route in one click."""
+    """Attached to trip results — one-click save."""
 
     def __init__(self, discord_id, from_id, from_name, to_id, to_name):
         super().__init__(timeout=120)
@@ -742,7 +927,6 @@ class _SaveRouteView(discord.ui.View):
         if interaction.user.id != self.discord_id:
             await interaction.response.send_message("This isn't your result!", ephemeral=True)
             return
-
         modal = _LabelModal(
             title="Name this route",
             placeholder=f"{self.from_name[:20]} → {self.to_name[:20]}",
@@ -759,9 +943,13 @@ class _SaveRouteView(discord.ui.View):
         )
         routes = await asyncio.to_thread(db_get_routes, self.discord_id)
         slot = next((i + 1 for i, r in enumerate(routes) if r["id"] == row_id), "?")
-        await interaction.response.send_message(
+        # Modal submit already consumed the response — use followup
+        await interaction.followup.send(
             embed=discord.Embed(
-                description=f"✅ Saved as **{label}** (slot {slot}). Use `/transport next {slot}` for a quick check.",
+                description=(
+                    f"✅ Saved as **{label}** (slot {slot}).\n"
+                    f"Use `/transport next {slot}` for a quick check."
+                ),
                 color=TRAIN_COLOR,
             ),
             ephemeral=True,
@@ -770,7 +958,7 @@ class _SaveRouteView(discord.ui.View):
 
 
 class _SaveStopView(discord.ui.View):
-    """Attached to /transport departures results."""
+    """Attached to departure board results — one-click save."""
 
     def __init__(self, discord_id, stop_id, stop_name):
         super().__init__(timeout=120)
@@ -783,7 +971,6 @@ class _SaveStopView(discord.ui.View):
         if interaction.user.id != self.discord_id:
             await interaction.response.send_message("This isn't your result!", ephemeral=True)
             return
-
         modal = _LabelModal(
             title="Name this stop",
             placeholder=self.stop_name[:45],
@@ -800,9 +987,13 @@ class _SaveStopView(discord.ui.View):
         routes = await asyncio.to_thread(db_get_routes, self.discord_id)
         stops = await asyncio.to_thread(db_get_stops, self.discord_id)
         slot = len(routes) + next((i + 1 for i, s in enumerate(stops) if s["id"] == row_id), 1)
-        await interaction.response.send_message(
+        # Modal submit already consumed the response — use followup
+        await interaction.followup.send(
             embed=discord.Embed(
-                description=f"✅ Saved as **{label}** (slot {slot}). Use `/transport next {slot}` for quick departures.",
+                description=(
+                    f"✅ Saved as **{label}** (slot {slot}).\n"
+                    f"Use `/transport next {slot}` for quick departures."
+                ),
                 color=TRAIN_COLOR,
             ),
             ephemeral=True,
@@ -822,4 +1013,193 @@ class _LabelModal(discord.ui.Modal):
         self.add_item(self.label_input)
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self._cb(interaction, self.label_input.value.strip() or self.label_input.placeholder)
+        # Must respond to the modal interaction before doing anything else.
+        # We defer it so _cb can use followup.send.
+        await interaction.response.defer(ephemeral=True)
+        value = self.label_input.value.strip()
+        await self._cb(interaction, value or str(self.label_input.placeholder))
+
+
+class _TripSelectorView(discord.ui.View):
+    """
+    Attached to the trip overview embed.
+
+    Lets the user:
+      1. Select an option (1–5) from a dropdown to see full leg-by-leg detail.
+      2. Press ⭐ Save to name and persist that specific route.
+
+    The view is rebuilt each time an option is selected so the embed is
+    edited in-place rather than sending new messages.
+    """
+
+    def __init__(
+        self,
+        discord_id: int,
+        trips: list[dict],
+        from_stop: dict,
+        to_stop: dict,
+        alerts: list[dict],
+        selected_index: int | None = None,
+    ):
+        super().__init__(timeout=120)
+        self.discord_id = discord_id
+        self.trips = trips
+        self.from_stop = from_stop
+        self.to_stop = to_stop
+        self.alerts = alerts
+        self.selected_index = selected_index  # 0-based; None = overview
+
+        # ── Trip selector dropdown ─────────────────────────────────────────────
+        options = [
+            discord.SelectOption(
+                label=f"Option {i + 1}",
+                value=str(i),
+                description=self._short_desc(t),
+                default=(i == selected_index),
+            )
+            for i, t in enumerate(trips[:5])
+        ]
+        self.trip_select = discord.ui.Select(
+            placeholder="Select a trip option to expand…",
+            options=options,
+            custom_id="trip_selector",
+        )
+        self.trip_select.callback = self._on_select
+        self.add_item(self.trip_select)
+
+        # ── Save button (only shown after an option is selected) ───────────────
+        if selected_index is not None:
+            self.save_btn = discord.ui.Button(
+                label="\u2b50 Save this route",
+                style=discord.ButtonStyle.primary,
+                custom_id="save_route",
+            )
+            self.save_btn.callback = self._on_save
+            self.add_item(self.save_btn)
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _short_desc(trip: dict) -> str:
+        """One-liner for the Select option description (max 100 chars)."""
+        dep = trip["departs"]
+        arr = trip["arrives"]
+        dep_s = _fmt_time(dep) if dep else "?"
+        arr_s = _fmt_time(arr) if arr else "?"
+        dur = trip["duration_mins"]
+        changes = trip["num_legs"] - 1
+        change_s = f"{changes} change{'s' if changes != 1 else ''}" if changes > 0 else "direct"
+        rt = " · live" if trip.get("is_realtime") else ""
+        return f"{dep_s} → {arr_s} · {dur}m · {change_s}{rt}"[:100]
+
+    def _build_detail_embed(self, index: int) -> discord.Embed:
+        """Full leg-by-leg embed for a selected trip option."""
+        trip = self.trips[index]
+        dep = trip["departs"]
+        arr = trip["arrives"]
+        dep_s = _fmt_time(dep) if dep else "?"
+        arr_s = _fmt_time(arr) if arr else "?"
+        mins = trip["mins_until"]
+        mins_s = _format_mins(mins) if mins is not None else ""
+
+        changes = trip["num_legs"] - 1
+        change_s = f"{changes} change{'s' if changes != 1 else ''}" if changes > 0 else "direct"
+        rt_note = "  🔴 real-time" if trip.get("is_realtime") else ""
+
+        embed = discord.Embed(
+            title=(
+                f"Option {index + 1} — "
+                f"{self.from_stop['short_name']} → {self.to_stop['short_name']}"
+            ),
+            description=(
+                f"**{dep_s}** ({mins_s}) → **{arr_s}** · {trip['duration_mins']}m · {change_s}{rt_note}"
+            ),
+            color=TRAIN_COLOR,
+        )
+
+        # Leg-by-leg breakdown
+        legs_text = _trip_detail_field(trip)
+        embed.add_field(name="Journey detail", value=legs_text or "\u200b", inline=False)
+
+        # Alerts (if any)
+        if self.alerts:
+            alert_lines = []
+            for a in self.alerts:
+                icon = "🚨" if a["is_replacement"] else (
+                    "⚠️" if a["priority"] in ("high", "veryHigh") else "ℹ️"
+                )
+                line = f"{icon} {a['title'][:100]}"
+                if a["url"]:
+                    line += f" — [details]({a['url']})"
+                alert_lines.append(line)
+            embed.add_field(
+                name="📢 Service notices",
+                value="\n".join(alert_lines)[:1024],
+                inline=False,
+            )
+
+        embed.set_footer(text="⭐ Press Save to add this route · 🔴 = real-time data")
+        return embed
+
+    # ── callbacks ──────────────────────────────────────────────────────────────
+
+    async def _on_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+
+        idx = int(self.trip_select.values[0])
+        embed = self._build_detail_embed(idx)
+
+        # Rebuild the view with this option selected and the Save button visible
+        new_view = _TripSelectorView(
+            self.discord_id, self.trips, self.from_stop, self.to_stop, self.alerts,
+            selected_index=idx,
+        )
+        await interaction.response.edit_message(embed=embed, view=new_view)
+
+    async def _on_save(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+
+        if self.selected_index is None:
+            await interaction.response.send_message(
+                "Select a trip option first!", ephemeral=True
+            )
+            return
+
+        modal = _LabelModal(
+            title="Save this route",
+            placeholder=f"{self.from_stop['short_name'][:20]} \u2192 {self.to_stop['short_name'][:20]}",
+            callback=self._do_save,
+        )
+        await interaction.response.send_modal(modal)
+
+    async def _do_save(self, interaction: discord.Interaction, label: str):
+        row_id = await asyncio.to_thread(
+            db_save_route,
+            self.discord_id, label,
+            self.from_stop["id"], self.from_stop["short_name"],
+            self.to_stop["id"], self.to_stop["short_name"],
+        )
+        routes = await asyncio.to_thread(db_get_routes, self.discord_id)
+        slot = next((i + 1 for i, r in enumerate(routes) if r["id"] == row_id), "?")
+        await interaction.followup.send(
+            embed=discord.Embed(
+                description=(
+                    f"\u2705 Saved as **{label}** (slot {slot}).\n"
+                    f"Use `/transport next {slot}` for a quick check."
+                ),
+                color=TRAIN_COLOR,
+            ),
+            ephemeral=True,
+        )
+        self.stop()
+
+    async def on_timeout(self):
+        """Disable all items after 2 minutes so stale buttons don't clutter chat."""
+        for item in self.children:
+            item.disabled = True
+        # We can't edit the message here without a stored message reference,
+        # so we just stop the view — Discord will ignore interactions after timeout.

@@ -7,7 +7,7 @@ API key is read from the TFNSW_API_KEY environment variable.
 import os
 import asyncio
 import aiohttp
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 TFNSW_API_KEY = os.environ.get("TFNSW_API_KEY", "")
@@ -15,19 +15,34 @@ BASE_URL = "https://api.transport.nsw.gov.au/v1/tp"
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 
 # ─── Mode mappings ────────────────────────────────────────────────────────────
+# These are the product.class values returned by departure_mon and trip APIs.
+# (Different from the stop_finder modes[] array — that uses a separate numbering.)
 MODE_ICONS = {
-    "1": "🚌",   # Bus
-    "2": "🚢",   # Ferry
-    "4": "🚆",   # Train
-    "5": "🚃",   # Light Rail
-    "7": "🚌",   # Coach
-    "9": "🚌",   # Express Bus
-    "11": "🚆",  # Metro
-    "99": "🚌",  # On demand
+    "1": "🚆",   # Train
+    "2": "🚇",   # Metro
+    "4": "🚃",   # Light Rail
+    "5": "🚌",   # Bus
+    "7": "🚌",   # Coach / Express Bus
+    "9": "⛴️",   # Ferry
+    "11": "🚌",  # On-demand / Night bus
+    "99": "🚌",  # Other bus
 }
 MODE_NAMES = {
-    "1": "Bus", "2": "Ferry", "4": "Train", "5": "Light Rail",
-    "7": "Coach", "9": "Express Bus", "11": "Metro", "99": "On Demand",
+    "1": "Train", "2": "Metro", "4": "Light Rail", "5": "Bus",
+    "7": "Coach", "9": "Ferry", "11": "Bus", "99": "Bus",
+}
+
+# Map from stop_finder modes[] integers to departure product.class strings
+# stop_finder uses: 1=Bus 2=Ferry 4=Train 5=LightRail 7=Coach 11=Metro 99=OnDemand
+# departure_mon uses: 1=Train 2=Metro 4=LightRail 5=Bus 9=Ferry
+STOPFINDER_TO_PRODUCT_CLASS = {
+    "1": "5",    # Bus
+    "2": "9",    # Ferry
+    "4": "1",    # Train
+    "5": "4",    # Light Rail
+    "7": "7",    # Coach
+    "11": "2",   # Metro
+    "99": "11",  # On-demand
 }
 
 
@@ -40,20 +55,29 @@ def _sydney_now():
 
 
 def _parse_tfnsw_time(ts: str) -> datetime | None:
-    """Parse a TfNSW ISO timestamp like '2025-03-29T14:35:00+11:00'."""
+    """Parse a TfNSW ISO timestamp.
+    Handles both offset form ('2025-03-29T14:35:00+11:00') and UTC Z form
+    ('2026-03-28T14:54:00Z') — the Z suffix isn't supported by fromisoformat
+    until Python 3.11, so we normalise it to +00:00 first.
+    """
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts)
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except ValueError:
         return None
 
 
 def _minutes_until(dt: datetime) -> int:
-    """Minutes from now (Sydney time) until dt."""
+    """Minutes from now until dt."""
     now = datetime.now(timezone.utc)
     diff = dt.astimezone(timezone.utc) - now
     return max(0, int(diff.total_seconds() / 60))
+
+
+def _fmt_time(dt: datetime) -> str:
+    """Format a datetime as HH:MM in Sydney local time."""
+    return dt.astimezone(SYDNEY_TZ).strftime("%H:%M")
 
 
 def _format_mins(mins: int) -> str:
@@ -73,7 +97,7 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
     """
     params = {
         "outputFormat": "rapidJSON",
-        "type_sf": "stop",
+        "type_sf": "any",          # "stop" is rejected by this API version; "any" works
         "name_sf": query,
         "coordOutputFormat": "EPSG:4326",
         "TfNSWSF": "true",
@@ -90,7 +114,10 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
                 return []
             data = await resp.json()
 
-    locations = data.get("locations", [])
+    # Filter to only actual transit stops/platforms — the "any" search also returns
+    # streets, POIs, and suburbs which are not useful for departure lookups
+    all_locations = data.get("locations", [])
+    locations = [l for l in all_locations if l.get("type") in ("stop", "platform")]
     results = []
     for loc in locations[:limit]:
         stop_id = loc.get("id", "")
@@ -103,13 +130,19 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
         parent_name = parent.get("name", "") or ""
         suburb = parent.get("name", "") or ""
 
-        # platform_hint = the bit that distinguishes bus stops at the same station
-        # e.g. disassembledName="Stop B" when parent="Rhodes Station"
+        # platform_hint = the sub-stop identifier that distinguishes bus stops/stands
+        # at the same station, e.g. "Stand A", "Stop B", "Platform 3".
+        # We only set it when disassembledName looks like a platform label — NOT when
+        # it is just the station name itself (e.g. "Rhodes Station" is NOT a hint).
+        PLATFORM_KEYWORDS = ("stop", "stand", "platform", "bay", "wharf", "berth")
         platform_hint = ""
         if disassembled and parent_name and disassembled != parent_name:
-            platform_hint = disassembled  # e.g. "Stop B", "Platform 1", "Stand A"
+            d_lower = disassembled.lower()
+            # Is it a short platform label like "Stop B", "Stand A", "Platform 3"?
+            if any(d_lower.startswith(kw) for kw in PLATFORM_KEYWORDS):
+                platform_hint = disassembled
 
-        # Human display name: "Rhodes Station, Stop B" or just "Central Station"
+        # Human display name
         if platform_hint:
             display_name = f"{parent_name}, {platform_hint}" if parent_name else disassembled
         elif parent_name and parent_name not in full_name:
@@ -117,28 +150,38 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
         else:
             display_name = full_name
 
-        # Determine transport modes available at this stop
-        assigned_stops = loc.get("assignedStops", [])
-        modes = set()
-        for s in assigned_stops:
-            for mode in s.get("modes", []):
-                modes.add(str(mode))
-        if not modes:
-            # Fallback: infer from stop ID prefix
-            # 2xxxxxxx = train, 2000xxxx = metro, 3xxxxxxx = bus, etc.
+        # Determine transport modes available at this stop.
+        # The API returns modes as integers directly on the location object — use that first.
+        # TfNSW mode codes: 1=Bus, 2=Ferry, 4=Train, 5=LightRail, 7=Coach, 11=Metro, 99=OnDemand
+        # stop_finder returns modes as its own numbering (1=Bus,2=Ferry,4=Train,5=LR,11=Metro).
+        # Translate to departure product.class numbers for consistent display.
+        raw_modes = loc.get("modes", [])
+        sf_modes = {str(m) for m in raw_modes if m is not None}
+        if not sf_modes:
+            for s in loc.get("assignedStops", []):
+                for mode in s.get("modes", []):
+                    sf_modes.add(str(mode))
+        if not sf_modes:
+            # Last resort: infer from stop ID prefix
             if stop_id.startswith("21") or stop_id.startswith("20"):
-                modes.add("4")   # train / metro
+                sf_modes.add("4")
             elif stop_id.startswith("3"):
-                modes.add("1")   # bus
+                sf_modes.add("1")
             elif stop_id.startswith("4"):
-                modes.add("2")   # ferry
+                sf_modes.add("2")
             elif stop_id.startswith("6"):
-                modes.add("5")   # light rail
+                sf_modes.add("5")
+        # Translate stop_finder mode numbers → product.class numbers for display
+        modes = {STOPFINDER_TO_PRODUCT_CLASS.get(m, m) for m in sf_modes}
+
+        # short_name = the station name for display (without suburb suffix)
+        # Use disassembledName unless it's a platform label, then use full_name
+        short_name = disassembled if disassembled and not platform_hint else full_name
 
         results.append({
             "id": stop_id,
             "name": display_name,
-            "short_name": disassembled or full_name,
+            "short_name": short_name,
             "parent_name": parent_name,
             "suburb": suburb,
             "platform_hint": platform_hint,
@@ -156,6 +199,8 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
     mode_filter: '4' = trains only, '1' = buses, etc.
     """
     now_syd = _sydney_now()
+    # Fetch a larger buffer so client-side mode filtering still returns enough results
+    fetch_limit = limit * 5 if mode_filter else limit * 2
     params = {
         "outputFormat": "rapidJSON",
         "coordOutputFormat": "EPSG:4326",
@@ -167,10 +212,10 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
         "itdTime": now_syd.strftime("%H%M"),
         "TfNSWDM": "true",
         "version": "10.2.1.42",
+        "maxResults": str(fetch_limit),
     }
-    if mode_filter:
-        params["ptOptionsActive"] = "-1"
-        params[f"inclMOT_{mode_filter}"] = "1"
+    # Note: the TfNSW API ignores inclMOT_X / ptOptionsActive in this version.
+    # We fetch a buffer and filter client-side instead.
 
     async with aiohttp.ClientSession() as session:
         async with session.get(
@@ -187,6 +232,10 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
     stop_events = data.get("stopEvents", [])
     departures = []
     for ev in stop_events:
+        # Client-side mode filter (API ignores server-side inclMOT params)
+        ev_mode = str((ev.get("transportation", {}).get("product") or {}).get("class", "?"))
+        if mode_filter and ev_mode != mode_filter:
+            continue
         transport = ev.get("transportation", {})
         route_num = transport.get("number", "?")
         line_name = transport.get("description", "") or transport.get("name", "")
@@ -337,6 +386,72 @@ async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
     return trips
 
 
+# ─── Service Alerts ───────────────────────────────────────────────────────────
+
+async def get_alerts(stop_ids: list[str] | None = None, line_names: list[str] | None = None) -> list[dict]:
+    """
+    Fetch current service alerts from TfNSW.
+    Optionally filter to alerts relevant to given stop IDs or line names.
+    Returns list of dicts: {priority, title, content, url, is_replacement}
+    """
+    import re as _re
+    params = {
+        "outputFormat": "rapidJSON",
+        "version": "10.2.1.42",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{BASE_URL}/add_info",
+                params=params,
+                headers=_headers(),
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+    except Exception:
+        return []
+
+    current = data.get("infos", {}).get("current", [])
+    results = []
+    for alert in current:
+        content_html = alert.get("content", "") or ""
+        subtitle = alert.get("subtitle", "") or ""
+        url = alert.get("url", "") or ""
+        priority = alert.get("priority", "normal")
+
+        # Strip HTML tags for plain text
+        content_text = _re.sub(r"<[^>]+>", " ", content_html).strip()
+        content_text = _re.sub(r"\s+", " ", content_text).strip()
+
+        if not content_text and not subtitle:
+            continue
+
+        title = subtitle[:120] if subtitle else content_text[:80]
+        body = content_text[:300] if content_text != title else ""
+
+        is_replacement = any(
+            kw in content_text.lower() or kw in subtitle.lower()
+            for kw in ("bus replacement", "road coach", "replaced by", "coach replacement")
+        )
+
+        results.append({
+            "priority": priority,
+            "title": title,
+            "body": body,
+            "url": url,
+            "is_replacement": is_replacement,
+        })
+
+    # If filters given, try to narrow down — best effort (API doesn't return structured stop/line refs)
+    # We just return all current alerts if no reliable filter data available
+    # Cap at 5 to avoid embed spam
+    high_priority = [a for a in results if a["priority"] in ("high", "veryHigh")]
+    normal = [a for a in results if a["priority"] not in ("high", "veryHigh")]
+    return (high_priority + normal)[:5]
+
+
 # ─── Formatting helpers ────────────────────────────────────────────────────────
 
 def format_departure_line(dep: dict, index: int | None = None) -> str:
@@ -349,7 +464,7 @@ def format_departure_line(dep: dict, index: int | None = None) -> str:
     if not dep["on_time"]:
         sign = "+" if dep["delay"] > 0 else ""
         delay_str = f" ⚠️ {sign}{dep['delay']}m late"
-    rt_indicator = " 🔴" if dep["realtime"] else ""
+    rt_indicator = " 🔴" if dep["realtime"] is not None else ""
     prefix = f"`{index}.` " if index is not None else ""
     return f"{prefix}{icon} **{route}** → {dest} — {mins_str}{rt_indicator}{delay_str}"
 
@@ -361,7 +476,7 @@ def format_trip_summary(trip: dict, index: int) -> str:
     dur = trip["duration_mins"]
     legs = trip["legs"]
 
-    dep_str = dep.strftime("%H:%M") if dep else "?"
+    dep_str = _fmt_time(dep) if dep else "?"
     mins_str = _format_mins(mins) if mins is not None else "?"
 
     # Build leg icons string
