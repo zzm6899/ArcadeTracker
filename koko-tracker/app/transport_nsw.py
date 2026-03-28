@@ -90,6 +90,14 @@ def _format_mins(mins: int) -> str:
 
 # ─── Stop Finder ──────────────────────────────────────────────────────────────
 
+def _normalise_query(query: str) -> str:
+    """Capitalise the first letter of each word while preserving the rest.
+    Unlike str.title(), this leaves acronyms like 'NSW' or 'CBD' intact,
+    e.g. 'top ryde' → 'Top Ryde', 'NSW trains' → 'NSW Trains'.
+    """
+    return " ".join((w[0].upper() + w[1:]) for w in query.strip().split() if w)
+
+
 async def _stop_finder_raw(query: str) -> list:
     """
     Hit the stop_finder endpoint and return filtered locations list.
@@ -98,7 +106,7 @@ async def _stop_finder_raw(query: str) -> list:
     params = {
         "outputFormat": "rapidJSON",
         "type_sf": "any",
-        "name_sf": " ".join(w[0].upper() + w[1:] if w else w for w in query.strip().split()),
+        "name_sf": _normalise_query(query),
         "coordOutputFormat": "EPSG:4326",
         "TfNSWSF": "true",
         "version": "10.2.1.42",
@@ -191,18 +199,17 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
     """
     locations = await _stop_finder_raw(query)
 
-    # Fallback 1: retry with " station" appended.
-    # Handles two cases:
-    #   (a) "rhodes" → zero stops (swamped by cafes) → "rhodes station" finds it
-    #   (b) "parramatta" → returns light rail stops, not Parramatta Station
-    # We try this whenever the query doesn't already end in "station".
+    # Fallback 1: retry with " station" appended, but only when the initial query
+    # returned no transit stops at all.
+    # Handles queries like "rhodes" where the API returns only cafes/POIs that are
+    # filtered out, leaving locations empty.
+    # We intentionally skip this when locations is already non-empty — appending
+    # "station" for suburb names like "top ryde" would redirect to a different stop
+    # (e.g. "top ryde station" → Ryde Station) instead of the correct bus stops.
     q_lower = query.strip().lower()
-    if not q_lower.endswith("station"):
+    if not q_lower.endswith("station") and not locations:
         station_locs = await _stop_finder_raw(query + " station")
-        station_quality = max((l.get("matchQuality", 0) for l in station_locs), default=0)
-        current_quality = max((l.get("matchQuality", 0) for l in locations), default=0)
-        # Prefer "station" results if they score higher or current results are absent/poor
-        if station_locs and station_quality >= current_quality:
+        if station_locs:
             locations = station_locs
 
     # Fallback 2: fuzzy spelling correction for clear misspellings.
