@@ -281,12 +281,20 @@ async def cmd_help(interaction: discord.Interaction):
     embed.add_field(name="🛠 /setup", value="Quick start guide", inline=True)
     if TRANSPORT_ENABLED:
         embed.add_field(name="\u200b", value="**🚆 NSW Transport**", inline=False)
-        embed.add_field(name="🚆 /transport train", value="Plan a trip A → B", inline=True)
+        embed.add_field(
+            name="⚡ /transport go",
+            value='Natural-language planner — `"rhodes to chatswood"`, `"central to parramatta bus"`',
+            inline=False,
+        )
+        embed.add_field(name="🚆 /transport train", value="Plan a trip — pick stops interactively", inline=True)
         embed.add_field(name="🚏 /transport departures", value="Live departures from a stop", inline=True)
-        embed.add_field(name="⚡ /transport next", value="Quick check saved route/stop", inline=True)
-        embed.add_field(name="🔍 /transport find-stop", value="Look up a stop ID by name", inline=True)
-        embed.add_field(name="🗺️ /transport my-trips", value="View saved routes & stops", inline=True)
-        embed.add_field(name="⭐ Save buttons", value="Save any result with one click", inline=True)
+        embed.add_field(name="🔔 /transport next", value='Quick check saved route — `"1"` or `"morning commute"`', inline=False)
+        embed.add_field(name="🔍 /transport find-stop", value="Search stop/station by name → get ID", inline=True)
+        embed.add_field(name="🗺️ /transport my-trips", value="List all saved routes & stops with slot numbers", inline=True)
+        embed.add_field(name="\u200b", value="**Saving & managing**", inline=False)
+        embed.add_field(name="⭐ Save buttons", value="After any trip result — select option then press Save", inline=True)
+        embed.add_field(name="🗑️ /transport delete-trip", value="Remove a saved route by ID", inline=True)
+        embed.add_field(name="🗑️ /transport delete-stop", value="Remove a saved stop by ID", inline=True)
     embed.set_footer(text=f"Dashboard: {APP_URL}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
