@@ -319,7 +319,8 @@ async def _pick_stop(
 _NOISE_WORDS = re.compile(
     r"\b(timezone|koko|arcade|casino|shopping\s+centre|shopping\s+center|"
     r"shopping|mall|westfield|centre|center|plaza|square|park|reserve|"
-    r"hospital|university|uni|tafe|school|college|hotel|station\b)\s*$",
+    r"hospital|university|uni|tafe|school|college|hotel|station|"
+    r"bus|train|ferry|tram|metro|coach|light\s+rail)\b\s*$",
     re.IGNORECASE,
 )
 
