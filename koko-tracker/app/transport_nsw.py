@@ -518,6 +518,7 @@ async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
             "mins_until": _minutes_until(display_dep) if display_dep else None,
             "legs": parsed_legs,
             "num_legs": len([l for l in parsed_legs if l["mode"] != "walk"]),
+            "is_realtime": rt_dep is not None,
         })
 
     return trips

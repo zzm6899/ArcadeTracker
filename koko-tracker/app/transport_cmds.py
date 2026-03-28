@@ -654,7 +654,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
         lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
         embed.description += "\n\n" + "\n".join(lines)
 
-        view = _SaveStopView(interaction.user.id, stop_result["id"], stop_result["name"])
+        view = _SaveStopView(interaction.user.id, stop_result["id"], stop_result["name"], mode_filter)
         await interaction.followup.send(embed=embed, view=view)
 
     # ── /transport next ───────────────────────────────────────────────────────
@@ -1006,16 +1006,30 @@ class _SaveRouteView(discord.ui.View):
 
 
 class _SaveStopView(discord.ui.View):
-    """Attached to departure board results — one-click save."""
+    """Attached to departure board results — one-click save and refresh."""
 
-    def __init__(self, discord_id, stop_id, stop_name):
+    def __init__(self, discord_id, stop_id, stop_name, mode_filter: str | None = None):
         super().__init__(timeout=120)
         self.discord_id = discord_id
         self.stop_id = stop_id
         self.stop_name = stop_name
+        self.mode_filter = mode_filter
 
-    @discord.ui.button(label="⭐ Save this stop", style=discord.ButtonStyle.primary)
-    async def save_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        refresh_btn = discord.ui.Button(
+            label="🔄 Refresh",
+            style=discord.ButtonStyle.secondary,
+        )
+        refresh_btn.callback = self._on_refresh
+        self.add_item(refresh_btn)
+
+        save_btn = discord.ui.Button(
+            label="⭐ Save this stop",
+            style=discord.ButtonStyle.primary,
+        )
+        save_btn.callback = self._on_save
+        self.add_item(save_btn)
+
+    async def _on_save(self, interaction: discord.Interaction):
         if interaction.user.id != self.discord_id:
             await interaction.response.send_message("This isn't your result!", ephemeral=True)
             return
@@ -1025,6 +1039,43 @@ class _SaveStopView(discord.ui.View):
             callback=self._do_save,
         )
         await interaction.response.send_modal(modal)
+
+    async def _on_refresh(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        try:
+            deps = await get_departures(self.stop_id, limit=8, mode_filter=self.mode_filter)
+        except Exception as e:
+            await interaction.followup.send(embed=_err_embed(f"Refresh failed: {e}"), ephemeral=True)
+            return
+
+        if not deps:
+            mode_label = MODE_NAMES.get(self.mode_filter, self.mode_filter) if self.mode_filter else ""
+            await interaction.followup.send(
+                embed=_err_embed(
+                    f"No upcoming {mode_label + ' ' if mode_label else ''}departures from **{self.stop_name}**."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        now_str = datetime.now(SYDNEY_TZ).strftime("%H:%M")
+        mode_label = "All modes" if not self.mode_filter else MODE_NAMES.get(self.mode_filter, self.mode_filter)
+        embed = discord.Embed(
+            title=f"🚏 {self.stop_name}",
+            description=f"Departures as of **{now_str}** · {mode_label}",
+            color=TRAIN_COLOR,
+        )
+        embed.set_footer(text="🔴 = real-time · ⚠️ = delayed")
+        lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
+        embed.description += "\n\n" + "\n".join(lines)
+
+        new_view = _SaveStopView(self.discord_id, self.stop_id, self.stop_name, self.mode_filter)
+        self.stop()
+        await interaction.edit_original_response(embed=embed, view=new_view)
 
     async def _do_save(self, interaction: discord.Interaction, label: str):
         row_id = await asyncio.to_thread(
@@ -1075,6 +1126,8 @@ class _TripSelectorView(discord.ui.View):
     Lets the user:
       1. Select an option (1–5) from a dropdown to see full leg-by-leg detail.
       2. Press ⭐ Save to name and persist that specific route.
+      3. Press 🔄 Refresh to re-fetch live trip data.
+      4. Press ⬅️ Back to return to the compact overview after viewing a detail.
 
     The view is rebuilt each time an option is selected so the embed is
     edited in-place rather than sending new messages.
@@ -1110,17 +1163,30 @@ class _TripSelectorView(discord.ui.View):
         self.trip_select = discord.ui.Select(
             placeholder="Select a trip option to expand…",
             options=options,
-            custom_id="trip_selector",
         )
         self.trip_select.callback = self._on_select
         self.add_item(self.trip_select)
 
-        # ── Save button (only shown after an option is selected) ───────────────
+        # ── Action buttons row ─────────────────────────────────────────────────
+        if selected_index is not None:
+            back_btn = discord.ui.Button(
+                label="⬅️ Back to Overview",
+                style=discord.ButtonStyle.secondary,
+            )
+            back_btn.callback = self._on_overview
+            self.add_item(back_btn)
+
+        refresh_btn = discord.ui.Button(
+            label="🔄 Refresh",
+            style=discord.ButtonStyle.secondary,
+        )
+        refresh_btn.callback = self._on_refresh
+        self.add_item(refresh_btn)
+
         if selected_index is not None:
             self.save_btn = discord.ui.Button(
-                label="\u2b50 Save this route",
+                label="⭐ Save this route",
                 style=discord.ButtonStyle.primary,
-                custom_id="save_route",
             )
             self.save_btn.callback = self._on_save
             self.add_item(self.save_btn)
@@ -1199,12 +1265,52 @@ class _TripSelectorView(discord.ui.View):
         idx = int(self.trip_select.values[0])
         embed = self._build_detail_embed(idx)
 
-        # Rebuild the view with this option selected and the Save button visible
         new_view = _TripSelectorView(
             self.discord_id, self.trips, self.from_stop, self.to_stop, self.alerts,
             selected_index=idx,
         )
+        self.stop()
         await interaction.response.edit_message(embed=embed, view=new_view)
+
+    async def _on_overview(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+
+        embed = _build_trip_overview_embed(self.trips, self.from_stop, self.to_stop, self.alerts)
+        new_view = _TripSelectorView(
+            self.discord_id, self.trips, self.from_stop, self.to_stop, self.alerts,
+        )
+        self.stop()
+        await interaction.response.edit_message(embed=embed, view=new_view)
+
+    async def _on_refresh(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        try:
+            trips, alerts = await asyncio.gather(
+                plan_trip(self.from_stop["id"], self.to_stop["id"], limit=5),
+                get_alerts(),
+            )
+        except Exception as e:
+            await interaction.followup.send(embed=_err_embed(f"Refresh failed: {e}"), ephemeral=True)
+            return
+
+        if not trips:
+            await interaction.followup.send(
+                embed=_err_embed("No trips found after refresh."), ephemeral=True
+            )
+            return
+
+        embed = _build_trip_overview_embed(trips, self.from_stop, self.to_stop, alerts)
+        new_view = _TripSelectorView(
+            self.discord_id, trips, self.from_stop, self.to_stop, alerts,
+        )
+        self.stop()
+        await interaction.edit_original_response(embed=embed, view=new_view)
 
     async def _on_save(self, interaction: discord.Interaction):
         if interaction.user.id != self.discord_id:
