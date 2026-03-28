@@ -17,6 +17,7 @@ RUN mkdir -p /data
 
 ENV DB_PATH=/data/koko.db
 ENV POLL_INTERVAL=60
+ENV PYTHONPATH=/koko/app
 
 EXPOSE 5000
 
