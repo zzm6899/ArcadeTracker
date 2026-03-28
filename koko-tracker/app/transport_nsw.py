@@ -204,12 +204,29 @@ def _fuzzy_correct(query: str) -> str | None:
     return None
 
 
+# Station names that share their name with a suburb/locality, causing the API to
+# return non-station results when the bare name is queried.  For these queries we
+# search with " station" appended *first* so the correct station is returned even
+# when the API would otherwise rank a suburb or unrelated stop higher.
+_PREFER_STATION_SUFFIX = frozenset({"central"})
+
+
 async def find_stops(query: str, limit: int = 5) -> list[dict]:
     """
     Search for stops/stations by name.
     Returns list of dicts: {id, name, type, modes}
     """
-    locations = await _stop_finder_raw(query)
+    q_lower = query.strip().lower()
+
+    # Pre-emptive station search: for names that are ambiguous with suburb/locality
+    # names (e.g. "central"), always try "<name> station" first so the main station
+    # is returned instead of an unrelated stop or locality.
+    if q_lower in _PREFER_STATION_SUFFIX:
+        locations = await _stop_finder_raw(query + " station")
+        if not locations:
+            locations = await _stop_finder_raw(query)
+    else:
+        locations = await _stop_finder_raw(query)
 
     # Fallback 1: retry with " station" appended, but only when the initial query
     # returned no transit stops at all.
@@ -218,7 +235,6 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
     # We intentionally skip this when locations is already non-empty — appending
     # "station" for suburb names like "top ryde" would redirect to a different stop
     # (e.g. "top ryde station" → Ryde Station) instead of the correct bus stops.
-    q_lower = query.strip().lower()
     if not q_lower.endswith("station") and not locations:
         station_locs = await _stop_finder_raw(query + " station")
         if station_locs:
