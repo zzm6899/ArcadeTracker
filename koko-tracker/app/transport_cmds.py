@@ -226,7 +226,7 @@ async def _pick_stop(
         await interaction.followup.send(
             embed=_err_embed(
                 f"No stops found matching **{query}**.\n"
-                "Try a suburb or full station name (e.g. *Rhodes Station*, *Central*)."
+                "Try the suburb name alone (e.g. *Parramatta*, *Strathfield*, *Chatswood*)."
             ),
             ephemeral=True,
         )
