@@ -90,14 +90,14 @@ def _format_mins(mins: int) -> str:
 
 # ─── Stop Finder ──────────────────────────────────────────────────────────────
 
-async def find_stops(query: str, limit: int = 5) -> list[dict]:
+async def _stop_finder_raw(query: str) -> list:
     """
-    Search for stops/stations by name.
-    Returns list of dicts: {id, name, type, modes}
+    Hit the stop_finder endpoint and return filtered locations list.
+    Shared by find_stops and its fuzzy-retry path.
     """
     params = {
         "outputFormat": "rapidJSON",
-        "type_sf": "any",          # "stop" is rejected by this API version; "any" works
+        "type_sf": "any",
         "name_sf": query,
         "coordOutputFormat": "EPSG:4326",
         "TfNSWSF": "true",
@@ -114,10 +114,110 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
                 return []
             data = await resp.json()
 
-    # Filter to only actual transit stops/platforms — the "any" search also returns
-    # streets, POIs, and suburbs which are not useful for departure lookups
     all_locations = data.get("locations", [])
-    locations = [l for l in all_locations if l.get("type") in ("stop", "platform")]
+    return [
+        l for l in all_locations
+        if l.get("type") in ("stop", "platform")
+        or (l.get("type") == "poi" and l.get("productClasses"))
+    ]
+
+
+# Common station/suburb names used for fuzzy correction
+_KNOWN_PLACES = [
+    "central", "rhodes", "chatswood", "parramatta", "strathfield", "burwood",
+    "redfern", "newtown", "bondi", "circular quay", "wynyard", "town hall",
+    "museum", "st james", "kings cross", "edgecliff", "bondi junction",
+    "mascot", "green square", "sydenham", "tempe", "wolli creek", "arncliffe",
+    "rockdale", "kogarah", "hurstville", "mortdale", "penshurst", "beverly hills",
+    "narwee", "riverwood", "padstow", "revesby", "panania", "east hills",
+    "liverpool", "cabramatta", "fairfield", "yennora", "guildford", "merrylands",
+    "granville", "clyde", "auburn", "lidcombe", "olympic park", "homebush",
+    "flemington", "north strathfield", "concord west", "rhodes", "meadowbank",
+    "west ryde", "ryde", "top ryde", "epping", "cheltenham", "beecroft",
+    "pennant hills", "thornleigh", "normanhurst", "hornsby", "asquith",
+    "mount colah", "mount kuring-gai", "berowra", "cowan", "hawkesbury river",
+    "brooklyn", "wondabyne", "gosford", "wyong", "tuggerah", "wyee",
+    "morisset", "awaba", "booragul", "teralba", "cockle creek", "cardiff",
+    "glendale", "broadmeadow", "hamilton", "newcastle", "newcastle interchange",
+    "macquarie fields", "glenfield", "leppington", "campbelltown", "penrith",
+    "blacktown", "seven hills", "toongabbie", "wentworthville", "westmead",
+    "harris park", "northmead", "north parramatta", "carlingford",
+    "macquarie university", "macquarie park", "lane cove", "artarmon",
+    "st leonards", "waverton", "north sydney", "milsons point", "wynyard",
+    "martin place", "central", "redfern", "macdonaldtown", "erskineville",
+    "st peters", "sydenham", "marrickville", "dulwich hill", "hurlstone park",
+    "canterbury", "campsie", "lakemba", "wiley park", "punchbowl", "bankstown",
+    "yagoona", "birrong", "sefton", "chester hill", "leightonfield",
+    "villawood", "carramar", "cabramatta", "warwick farm", "liverpool",
+    "cronulla", "miranda", "sutherland", "jannali", "como", "oatley",
+    "hurstville", "allawah", "carlton", "kogarah", "st george",
+    "sydney airport", "domestic airport", "international airport",
+]
+
+
+def _fuzzy_correct(query: str) -> str | None:
+    """
+    Return a spelling-corrected version of query if a close match is found
+    in our known places list, otherwise None.
+    Uses difflib — no extra dependencies.
+    """
+    from difflib import get_close_matches
+    q = query.strip().lower()
+    # Try whole query first
+    matches = get_close_matches(q, _KNOWN_PLACES, n=1, cutoff=0.72)
+    if matches:
+        return matches[0]
+    # Try each word individually (handles "paramatta station" → "parramatta")
+    words = q.split()
+    if len(words) > 1:
+        corrected = []
+        changed = False
+        for w in words:
+            m = get_close_matches(w, _KNOWN_PLACES, n=1, cutoff=0.78)
+            if m and m[0] != w:
+                corrected.append(m[0])
+                changed = True
+            else:
+                corrected.append(w)
+        if changed:
+            return " ".join(corrected)
+    return None
+
+
+async def find_stops(query: str, limit: int = 5) -> list[dict]:
+    """
+    Search for stops/stations by name.
+    Returns list of dicts: {id, name, type, modes}
+    """
+    locations = await _stop_finder_raw(query)
+
+    # Fallback 1: retry with " station" appended.
+    # Handles two cases:
+    #   (a) "rhodes" → zero stops (swamped by cafes) → "rhodes station" finds it
+    #   (b) "parramatta" → returns light rail stops, not Parramatta Station
+    # We try this whenever the query doesn't already end in "station".
+    q_lower = query.strip().lower()
+    if not q_lower.endswith("station"):
+        station_locs = await _stop_finder_raw(query + " station")
+        station_quality = max((l.get("matchQuality", 0) for l in station_locs), default=0)
+        current_quality = max((l.get("matchQuality", 0) for l in locations), default=0)
+        # Prefer "station" results if they score higher or current results are absent/poor
+        if station_locs and station_quality >= current_quality:
+            locations = station_locs
+
+    # Fallback 2: fuzzy spelling correction for clear misspellings.
+    # Triggers when top result quality is low (< 500), meaning the API matched
+    # something unrelated (e.g. "rodes" → Rodeo Dr, quality ~200).
+    best_quality = max((l.get("matchQuality", 0) for l in locations), default=0)
+    if best_quality < 500:
+        corrected = _fuzzy_correct(query)
+        if corrected and corrected.lower() != q_lower:
+            fuzzy_locs = await _stop_finder_raw(corrected + " station")
+            if not fuzzy_locs:
+                fuzzy_locs = await _stop_finder_raw(corrected)
+            fuzzy_quality = max((l.get("matchQuality", 0) for l in fuzzy_locs), default=0)
+            if fuzzy_locs and fuzzy_quality > best_quality:
+                locations = fuzzy_locs
     results = []
     for loc in locations[:limit]:
         stop_id = loc.get("id", "")

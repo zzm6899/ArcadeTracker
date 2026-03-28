@@ -191,7 +191,7 @@ async def _pick_stop_silent(query: str) -> dict | None:
     or None if ambiguous/not found. Used for the natural-language /transport go
     command where we want auto-resolution without a picker dialog.
     """
-    stops = await find_stops(query, limit=5)
+    stops = await find_stops(_clean_stop_query(query), limit=5)
     if not stops:
         return None
     if len(stops) == 1:
@@ -221,7 +221,7 @@ async def _pick_stop(
     before calling this. All messages here use followup.send(ephemeral=True).
     Returns None on no match or timeout.
     """
-    stops = await find_stops(query, limit=8)
+    stops = await find_stops(_clean_stop_query(query), limit=8)
     if not stops:
         await interaction.followup.send(
             embed=_err_embed(
@@ -314,6 +314,22 @@ async def _pick_stop(
     return chosen[0]
 
 
+# Words that users append for context but that aren't part of a stop name.
+# Strip these (case-insensitive, whole-word) from query parts before stop lookup.
+_NOISE_WORDS = re.compile(
+    r"\b(timezone|koko|arcade|casino|shopping\s+centre|shopping\s+center|"
+    r"shopping|mall|westfield|centre|center|plaza|square|park|reserve|"
+    r"hospital|university|uni|tafe|school|college|hotel|station\b)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_stop_query(q: str) -> str:
+    """Strip trailing noise words that aren't part of a stop name."""
+    cleaned = _NOISE_WORDS.sub("", q).strip()
+    return cleaned if cleaned else q  # don't return empty string
+
+
 # ─── Natural-language query parser ────────────────────────────────────────────
 
 def _parse_go_query(text: str) -> tuple[str, str] | None:
@@ -379,22 +395,53 @@ def _trip_summary_line(trip: dict, index: int) -> str:
 
 
 def _trip_detail_field(trip: dict) -> str:
-    """Expanded leg-by-leg detail for a single selected trip."""
+    """
+    Expanded leg-by-leg detail for a single selected trip.
+    For multi-leg trips, shows a transfer line between legs:
+      ↳ Change at <stop> — catch <icon><route> at <time>
+    """
     lines = []
-    for leg in trip["legs"]:
+    legs = trip["legs"]
+    for i, leg in enumerate(legs):
         if leg["mode"] == "walk":
-            lines.append(f"🚶 {leg['summary']}")
+            lines.append(f"🚶 *{leg['summary']}*")
         else:
             dep_t = leg.get("departs")
             dep_t_str = _fmt_time(dep_t) if dep_t else ""
             from_n = leg.get("from", "")
             to_n = leg.get("to", "")
             route = leg.get("route", "")
+            dest = leg.get("destination", "")
             icon = leg["icon"]
-            line = f"{icon} **{route}** · {from_n} → {to_n}"
+
+            # Board line
+            board_line = f"{icon} **{route}**"
+            if dest:
+                board_line += f" towards {dest}"
             if dep_t_str:
-                line += f" · departs **{dep_t_str}**"
-            lines.append(line)
+                board_line += f" — departs **{dep_t_str}**"
+            board_line += f"\n\u3000from **{from_n}**"
+            lines.append(board_line)
+
+            # Transfer hint to next transit leg
+            next_transit = [l for l in legs[i + 1:] if l["mode"] != "walk"]
+            if next_transit:
+                nl = next_transit[0]
+                nl_dep = nl.get("departs")
+                nl_dep_str = _fmt_time(nl_dep) if nl_dep else ""
+                nl_from = nl.get("from", "")
+                nl_icon = nl["icon"]
+                nl_route = nl.get("route", "")
+                transfer = f"\u3000\u2192 arrives **{to_n}**"
+                transfer += f"\n\u3000🔀 catch {nl_icon} **{nl_route}**"
+                if nl_dep_str:
+                    transfer += f" at **{nl_dep_str}**"
+                if nl_from and nl_from != to_n:
+                    transfer += f" from **{nl_from}**"
+                lines.append(transfer)
+            else:
+                lines.append(f"\u3000\u2192 arrives **{to_n}**")
+
     return "\n".join(lines)
 
 
