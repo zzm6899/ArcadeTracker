@@ -11,6 +11,15 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+# ─── Transport NSW ────────────────────────────────────────────────────────────
+try:
+    from transport_cmds import register_transport_commands, transport_db_init
+    TRANSPORT_ENABLED = True
+    print("[Bot] Transport NSW module loaded.")
+except Exception as _transport_err:
+    TRANSPORT_ENABLED = False
+    print(f"[Bot] Transport NSW module not available: {_transport_err}")
+
 DB_PATH   = os.environ.get('DB_PATH', '/data/koko.db')
 BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '')
 GUILD_ID  = os.environ.get('DISCORD_GUILD_ID', '')
@@ -210,6 +219,11 @@ class BalanceBot(discord.Client):
         self.tree.allowed_contexts = discord.app_commands.AppCommandContext(
             guild=True, dm_channel=True, private_channel=True
         )
+        # Register Transport NSW commands if module is available
+        if TRANSPORT_ENABLED:
+            await asyncio.to_thread(transport_db_init)
+            register_transport_commands(self.tree)
+            print("[Bot] Transport NSW commands registered.")
         guild = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
         if guild:
             self.tree.copy_global_to(guild=guild)
@@ -265,6 +279,14 @@ async def cmd_help(interaction: discord.Interaction):
     embed.add_field(name="🔒 /privacy", value="Toggle public/private per command", inline=True)
     embed.add_field(name="ℹ️ /info", value="Bot & account info", inline=True)
     embed.add_field(name="🛠 /setup", value="Quick start guide", inline=True)
+    if TRANSPORT_ENABLED:
+        embed.add_field(name="\u200b", value="**🚆 NSW Transport**", inline=False)
+        embed.add_field(name="🚆 /transport train", value="Plan a trip A → B", inline=True)
+        embed.add_field(name="🚏 /transport departures", value="Live departures from a stop", inline=True)
+        embed.add_field(name="⚡ /transport next", value="Quick check saved route/stop", inline=True)
+        embed.add_field(name="🔍 /transport find-stop", value="Look up a stop ID by name", inline=True)
+        embed.add_field(name="🗺️ /transport my-trips", value="View saved routes & stops", inline=True)
+        embed.add_field(name="⭐ Save buttons", value="Save any result with one click", inline=True)
     embed.set_footer(text=f"Dashboard: {APP_URL}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
