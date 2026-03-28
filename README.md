@@ -170,6 +170,7 @@ ArcadeTracker/
 | `APP_URL` | No | `http://localhost:5055` | Public URL for bot messages and OAuth redirects |
 | `POLL_INTERVAL` | No | `300` | Default Koko poll interval in seconds |
 | `TIMEZONE_POLL_INTERVAL` | No | `900` | Default Timezone poll interval in seconds |
+| `TFNSW_API_KEY` | No | — | TfNSW Open Data Hub API key for Transport NSW commands — obtain from [opendata.transport.nsw.gov.au](https://opendata.transport.nsw.gov.au) |
 | `MAIL_SERVER` | No | — | SMTP server for password reset emails |
 | `MAIL_PORT` | No | `587` | SMTP port |
 | `MAIL_USERNAME` | No | — | SMTP username |

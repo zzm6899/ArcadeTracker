@@ -10,7 +10,6 @@ import aiohttp
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-TFNSW_API_KEY = os.environ.get("TFNSW_API_KEY", "")
 BASE_URL = "https://api.transport.nsw.gov.au/v1/tp"
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 
@@ -47,7 +46,13 @@ STOPFINDER_TO_PRODUCT_CLASS = {
 
 
 def _headers():
-    return {"Authorization": f"apikey {TFNSW_API_KEY}"}
+    api_key = os.environ.get("TFNSW_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "TFNSW_API_KEY environment variable is not set. "
+            "Obtain a key from https://opendata.transport.nsw.gov.au and set it."
+        )
+    return {"Authorization": f"apikey {api_key}"}
 
 
 def _sydney_now():
