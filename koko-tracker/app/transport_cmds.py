@@ -511,9 +511,9 @@ def register_transport_commands(tree: app_commands.CommandTree):
 
     @transport_group.command(
         name="go",
-        description='Natural-language trip planner: "rhodes to central" or "rhodes bus A to top ryde"',
+        description='Natural-language trip planner: "rhodes to central station" or "rhodes bus A to top ryde"',
     )
-    @app_commands.describe(query='Where to and from, e.g. "rhodes to strathfield" or "central to parramatta"')
+    @app_commands.describe(query='Where to and from, e.g. "rhodes to strathfield" or "central station to parramatta"')
     async def cmd_go(interaction: discord.Interaction, query: str):
         await interaction.response.defer(ephemeral=False)
 
@@ -522,7 +522,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
             await interaction.followup.send(
                 embed=_err_embed(
                     f'Could not parse **"{query}"**.\n'
-                    'Use the format **from** `to` **destination**, e.g. `rhodes to central` '
+                    'Use the format **from** `to` **destination**, e.g. `rhodes to central station` '
                     'or `rhodes bus A to top ryde`.'
                 ),
                 ephemeral=True,
