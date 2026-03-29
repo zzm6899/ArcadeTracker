@@ -11,7 +11,7 @@ import re
 import sqlite3
 import os
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -442,13 +442,33 @@ def _trip_detail_field(trip: dict) -> str:
             dest = leg.get("destination", "")
             icon = leg["icon"]
 
+            # Build "from" with optional platform and suburb
+            platform_from = leg.get("platform_from", "")
+            suburb_from = leg.get("suburb_from", "")
+            from_parts = [from_n]
+            if platform_from:
+                from_parts.append(platform_from)
+            if suburb_from and suburb_from not in from_n:
+                from_parts.append(suburb_from)
+            from_detail = ", ".join(from_parts)
+
+            # Build "arrives" with optional platform and suburb
+            platform_to = leg.get("platform_to", "")
+            suburb_to = leg.get("suburb_to", "")
+            to_parts = [to_n]
+            if platform_to:
+                to_parts.append(platform_to)
+            if suburb_to and suburb_to not in to_n:
+                to_parts.append(suburb_to)
+            to_detail = ", ".join(to_parts)
+
             # Board line
             board_line = f"{icon} **{route}**"
             if dest:
                 board_line += f" towards {dest}"
             if dep_t_str:
                 board_line += f" — departs **{dep_t_str}**"
-            board_line += f"\n\u3000from **{from_n}**"
+            board_line += f"\n\u3000from **{from_detail}**"
             lines.append(board_line)
 
             # Transfer hint to next transit leg
@@ -460,7 +480,7 @@ def _trip_detail_field(trip: dict) -> str:
                 nl_from = nl.get("from", "")
                 nl_icon = nl["icon"]
                 nl_route = nl.get("route", "")
-                transfer = f"\u3000\u2192 arrives **{to_n}**"
+                transfer = f"\u3000\u2192 arrives **{to_detail}**"
                 transfer += f"\n\u3000🔀 catch {nl_icon} **{nl_route}**"
                 if nl_dep_str:
                     transfer += f" at **{nl_dep_str}**"
@@ -468,7 +488,23 @@ def _trip_detail_field(trip: dict) -> str:
                     transfer += f" from **{nl_from}**"
                 lines.append(transfer)
             else:
-                lines.append(f"\u3000\u2192 arrives **{to_n}**")
+                lines.append(f"\u3000\u2192 arrives **{to_detail}**")
+
+            # Live position indicator — only shown when the vehicle has
+            # departed at least one stop (i.e. the trip is currently in progress)
+            current_stop = leg.get("current_stop")
+            if current_stop:
+                leg_arrives = leg.get("arrives")
+                if leg_arrives:
+                    now_utc = datetime.now(timezone.utc)
+                    eta_mins = max(0, int(
+                        (leg_arrives.astimezone(timezone.utc) - now_utc).total_seconds() / 60
+                    ))
+                    lines.append(
+                        f"\u3000📍 Currently at **{current_stop}** · ETA {eta_mins}m"
+                    )
+                else:
+                    lines.append(f"\u3000📍 Currently at **{current_stop}**")
 
     return "\n".join(lines)
 

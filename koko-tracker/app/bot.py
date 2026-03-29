@@ -367,8 +367,7 @@ async def cmd_help(interaction: discord.Interaction):
         embed.add_field(name="\u200b", value="**Saving & managing**", inline=False)
         embed.add_field(name="⭐ Save buttons", value="After any trip result — select option then press Save", inline=True)
         embed.add_field(name="🔔 Remind me buttons", value="On any departure board or trip detail — get a DM before it leaves", inline=True)
-        embed.add_field(name="🗑️ /transport delete-trip", value="Remove a saved route by ID", inline=True)
-        embed.add_field(name="🗑️ /transport delete-stop", value="Remove a saved stop by ID", inline=True)
+        embed.add_field(name="🗑️ /transport delete-trip / delete-stop", value="Remove a saved route or stop by ID", inline=True)
     embed.set_footer(text=f"Dashboard: {APP_URL}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
