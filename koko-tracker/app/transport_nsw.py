@@ -13,6 +13,9 @@ from zoneinfo import ZoneInfo
 BASE_URL = "https://api.transport.nsw.gov.au/v1/tp"
 SYDNEY_TZ = ZoneInfo("Australia/Sydney")
 
+# Platform label keywords — used to identify disassembledName as a platform hint
+_PLATFORM_KEYWORDS = ("platform", "stop", "stand", "bay", "wharf", "berth")
+
 # ─── Mode mappings ────────────────────────────────────────────────────────────
 # These are the product.class values returned by departure_mon and trip APIs.
 # (Different from the stop_finder modes[] array — that uses a separate numbering.)
@@ -403,9 +406,8 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
         # Platform identifier at this stop (e.g. "Platform 3", "Stand A")
         platform = ""
         disassembled_loc = location.get("disassembledName", "") or ""
-        _PLAT_KW = ("platform", "stop", "stand", "bay", "wharf", "berth")
         if disassembled_loc and any(
-            disassembled_loc.lower().startswith(kw) for kw in _PLAT_KW
+            disassembled_loc.lower().startswith(kw) for kw in _PLATFORM_KEYWORDS
         ):
             platform = disassembled_loc
 
