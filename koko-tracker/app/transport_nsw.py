@@ -459,6 +459,52 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
     return departures
 
 
+# ─── Trip leg helpers ─────────────────────────────────────────────────────────
+
+def _extract_leg_stop_info(loc: dict) -> tuple[str, str, str]:
+    """
+    Extract (name, platform, suburb) from a trip leg origin/destination dict.
+
+    ``platform`` is a label like "Platform 1" when the disassembledName or
+    properties contain one.  ``suburb`` is the parent locality name.
+    """
+    name = loc.get("name", "")
+
+    # Platform label from disassembledName when it looks like a platform
+    dname = (loc.get("disassembledName") or "").strip()
+    platform = ""
+    if dname and any(dname.lower().startswith(kw) for kw in _PLATFORM_KEYWORDS):
+        platform = dname
+    if not platform:
+        props = loc.get("properties") or {}
+        platform = (props.get("PlatformName") or "").strip()
+
+    # Suburb from parent locality
+    parent = loc.get("parent") or {}
+    suburb = (parent.get("name") or "").strip()
+
+    return name, platform, suburb
+
+
+def _find_current_stop_in_leg(stop_seq: list[dict]) -> str | None:
+    """
+    Return the name of the most recently departed stop in a transit leg's
+    stop sequence, or None if the vehicle has not yet departed from any stop.
+
+    Stops are compared against UTC now using timezone-aware datetime comparison,
+    which correctly handles times in any offset (e.g. +11:00 vs UTC).
+    """
+    now = datetime.now(timezone.utc)
+    last_name: str | None = None
+    for stop in stop_seq:
+        dep = stop.get("departure")
+        if dep and dep < now:
+            last_name = stop["name"]
+        else:
+            break
+    return last_name
+
+
 # ─── Trip Planner ─────────────────────────────────────────────────────────────
 
 async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
@@ -535,6 +581,39 @@ async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
                 dep_dt = _parse_tfnsw_time(dep_str)
                 from_name = leg.get("origin", {}).get("name", "")
                 to_name = leg.get("destination", {}).get("name", "")
+
+                # Platform and suburb for origin and destination
+                _from_name, platform_from, suburb_from = _extract_leg_stop_info(
+                    leg.get("origin", {})
+                )
+                _to_name, platform_to, suburb_to = _extract_leg_stop_info(
+                    leg.get("destination", {})
+                )
+
+                # Destination arrival time (real-time preferred)
+                arr_rt_str = leg.get("destination", {}).get("arrivalTimeEstimated", "")
+                arr_pl_str = leg.get("destination", {}).get("arrivalTimePlanned", "")
+                arr_rt = _parse_tfnsw_time(arr_rt_str) if arr_rt_str else None
+                arr_pl = _parse_tfnsw_time(arr_pl_str) if arr_pl_str else None
+                leg_arrives = arr_rt or arr_pl
+
+                # Parse stop sequence for real-time vehicle position
+                raw_stops = leg.get("stopSequence", [])
+                stop_seq: list[dict] = []
+                for s in raw_stops:
+                    dep_rt_s = _parse_tfnsw_time(s.get("departureTimeEstimated", ""))
+                    dep_pl_s = _parse_tfnsw_time(s.get("departureTimePlanned", ""))
+                    dep_s = dep_rt_s or dep_pl_s
+                    s_name = s.get("name", "")
+                    if s_name and dep_s:
+                        stop_seq.append({
+                            "name": s_name,
+                            "departure": dep_s,
+                            "is_realtime": dep_rt_s is not None,
+                        })
+
+                current_stop = _find_current_stop_in_leg(stop_seq)
+
                 parsed_legs.append({
                     "mode": mode_id,
                     "icon": MODE_ICONS.get(mode_id, "🚌"),
@@ -542,8 +621,15 @@ async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
                     "destination": dest,
                     "from": from_name,
                     "to": to_name,
+                    "platform_from": platform_from,
+                    "platform_to": platform_to,
+                    "suburb_from": suburb_from,
+                    "suburb_to": suburb_to,
+                    "arrives": leg_arrives,
                     "departs": dep_dt,
                     "summary": f"{MODE_ICONS.get(mode_id, '🚌')} {route_num} → {dest}",
+                    "current_stop": current_stop,
+                    "stop_sequence": stop_seq,
                 })
 
         trips.append({
