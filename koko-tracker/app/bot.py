@@ -20,6 +20,20 @@ except Exception as _transport_err:
     TRANSPORT_ENABLED = False
     print(f"[Bot] Transport NSW module not available: {_transport_err}")
 
+# ─── Reminders ────────────────────────────────────────────────────────────────
+try:
+    from reminder_cmds import (
+        register_reminder_commands,
+        reminder_db_init,
+        db_get_due_reminders,
+        db_mark_delivered,
+    )
+    REMINDERS_ENABLED = True
+    print("[Bot] Reminders module loaded.")
+except Exception as _reminder_err:
+    REMINDERS_ENABLED = False
+    print(f"[Bot] Reminders module not available: {_reminder_err}")
+
 DB_PATH   = os.environ.get('DB_PATH', '/data/koko.db')
 BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '')
 GUILD_ID  = os.environ.get('DISCORD_GUILD_ID', '')
@@ -224,6 +238,11 @@ class BalanceBot(discord.Client):
             await asyncio.to_thread(transport_db_init)
             register_transport_commands(self.tree)
             print("[Bot] Transport NSW commands registered.")
+        # Register Reminders commands
+        if REMINDERS_ENABLED:
+            await asyncio.to_thread(reminder_db_init)
+            register_reminder_commands(self.tree)
+            print("[Bot] Reminder commands registered.")
         guild = discord.Object(id=int(GUILD_ID)) if GUILD_ID else None
         if guild:
             self.tree.copy_global_to(guild=guild)
@@ -237,6 +256,51 @@ class BalanceBot(discord.Client):
         if not self.status_loop.is_running():
             self.status_loop.start()
             print("[Bot] Status loop started.")
+        if REMINDERS_ENABLED and not self.reminder_loop.is_running():
+            self.reminder_loop.start()
+            print("[Bot] Reminder loop started.")
+
+    @tasks.loop(seconds=30)
+    async def reminder_loop(self):
+        """Fire any reminders that are now due — DM the user, or mention in channel."""
+        if not REMINDERS_ENABLED:
+            return
+        try:
+            due = await asyncio.to_thread(db_get_due_reminders)
+        except Exception as e:
+            print(f"[Bot] reminder_loop DB error: {e}")
+            return
+        for row in due:
+            try:
+                user = await self.fetch_user(int(row["discord_id"]))
+                embed = discord.Embed(
+                    title="🔔 Reminder",
+                    description=row["message"],
+                    color=0x6366F1,
+                )
+                embed.set_footer(text="This reminder was set by you via the bot.")
+                sent = False
+                # Try DM first
+                try:
+                    await user.send(embed=embed)
+                    sent = True
+                except discord.Forbidden:
+                    pass
+                # Fallback: mention in original channel
+                if not sent and row["channel_id"]:
+                    try:
+                        channel = self.get_channel(int(row["channel_id"]))
+                        if channel is None:
+                            channel = await self.fetch_channel(int(row["channel_id"]))
+                        await channel.send(content=f"<@{row['discord_id']}>", embed=embed)
+                        sent = True
+                    except Exception:
+                        pass
+                if sent:
+                    await asyncio.to_thread(db_mark_delivered, row["id"])
+                    print(f"[Bot] Delivered reminder #{row['id']} to user {row['discord_id']}")
+            except Exception as e:
+                print(f"[Bot] reminder delivery error for #{row['id']}: {e}")
 
     @tasks.loop(seconds=45)
     async def status_loop(self):
@@ -279,6 +343,15 @@ async def cmd_help(interaction: discord.Interaction):
     embed.add_field(name="🔒 /privacy", value="Toggle public/private per command", inline=True)
     embed.add_field(name="ℹ️ /info", value="Bot & account info", inline=True)
     embed.add_field(name="🛠 /setup", value="Quick start guide", inline=True)
+    if REMINDERS_ENABLED:
+        embed.add_field(name="\u200b", value="**🔔 Reminders**", inline=False)
+        embed.add_field(
+            name="🔔 /reminder set",
+            value='Set a timed reminder — `"in 10 minutes"`, `"in 2 hours"`, `"30"`',
+            inline=False,
+        )
+        embed.add_field(name="📋 /reminder list", value="List your pending reminders", inline=True)
+        embed.add_field(name="🗑️ /reminder delete", value="Cancel a reminder by ID", inline=True)
     if TRANSPORT_ENABLED:
         embed.add_field(name="\u200b", value="**🚆 NSW Transport**", inline=False)
         embed.add_field(
@@ -287,12 +360,13 @@ async def cmd_help(interaction: discord.Interaction):
             inline=False,
         )
         embed.add_field(name="🚆 /transport train", value="Plan a trip — pick stops interactively", inline=True)
-        embed.add_field(name="🚏 /transport departures", value="Live departures from a stop", inline=True)
-        embed.add_field(name="🔔 /transport next", value='Quick check saved route — `"1"` or `"morning commute"`', inline=False)
+        embed.add_field(name="🚏 /transport departures", value="Live departures + platform, origin & stats", inline=True)
+        embed.add_field(name="📌 /transport next", value='Quick check saved route — `"1"` or `"morning commute"`', inline=False)
         embed.add_field(name="🔍 /transport find-stop", value="Search stop/station by name → get ID", inline=True)
         embed.add_field(name="🗺️ /transport my-trips", value="List all saved routes & stops with slot numbers", inline=True)
         embed.add_field(name="\u200b", value="**Saving & managing**", inline=False)
         embed.add_field(name="⭐ Save buttons", value="After any trip result — select option then press Save", inline=True)
+        embed.add_field(name="🔔 Remind me buttons", value="On any departure board or trip detail — get a DM before it leaves", inline=True)
         embed.add_field(name="🗑️ /transport delete-trip", value="Remove a saved route by ID", inline=True)
         embed.add_field(name="🗑️ /transport delete-stop", value="Remove a saved stop by ID", inline=True)
     embed.set_footer(text=f"Dashboard: {APP_URL}")

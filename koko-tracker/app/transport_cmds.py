@@ -22,12 +22,14 @@ from transport_nsw import (
     plan_trip,
     get_alerts,
     format_departure_line,
+    format_stop_stats,
     MODE_ICONS,
     MODE_NAMES,
     _format_mins,
     _fmt_time,
     SYDNEY_TZ,
 )
+from reminder_cmds import db_add_reminder, parse_reminder_time, ReminderModal
 
 DB_PATH = os.environ.get("DB_PATH", "/data/koko.db")
 
@@ -162,6 +164,31 @@ ERROR_COLOR = 0xE74C3C
 
 def _err_embed(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
+
+
+def _alert_keywords(from_stop: dict, to_stop: dict, trips: list[dict] | None = None) -> list[str]:
+    """
+    Build the keyword list used to filter service alerts to only those relevant
+    to the queried route.  Includes stop names and every route/line number that
+    appears in the planned trip legs.
+    """
+    kws: set[str] = set()
+    for stop in (from_stop, to_stop):
+        name = (stop.get("short_name") or stop.get("name") or "").strip()
+        main = re.split(r"[,(]", name)[0].strip()
+        if len(main) > 2:
+            kws.add(main)
+    for trip in (trips or []):
+        for leg in trip.get("legs", []):
+            if leg.get("mode") == "walk":
+                continue
+            route = (leg.get("route") or "").strip()
+            if route:
+                kws.add(route)
+            dest = (leg.get("destination") or "").split(",")[0].strip()
+            if len(dest) > 2:
+                kws.add(dest)
+    return list(kws)
 
 
 def _stop_select_label(s: dict) -> str:
@@ -544,10 +571,8 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 if not to_result:
                     return
 
-            trips, alerts = await asyncio.gather(
-                plan_trip(from_result["id"], to_result["id"], limit=5),
-                get_alerts(),
-            )
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=5)
+            alerts = await get_alerts(_alert_keywords(from_result, to_result, trips))
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
@@ -585,10 +610,8 @@ def register_transport_commands(tree: app_commands.CommandTree):
             to_result = await _pick_stop(interaction, to_stop, "destination")
             if not to_result:
                 return
-            trips, alerts = await asyncio.gather(
-                plan_trip(from_result["id"], to_result["id"], limit=5),
-                get_alerts(),
-            )
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=5)
+            alerts = await get_alerts(_alert_keywords(from_result, to_result, trips))
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
@@ -649,12 +672,14 @@ def register_transport_commands(tree: app_commands.CommandTree):
             description=f"Departures as of **{now_str}** · {mode_label}",
             color=TRAIN_COLOR,
         )
-        embed.set_footer(text="🔴 = real-time · ⚠️ = delayed")
-
         lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
         embed.description += "\n\n" + "\n".join(lines)
+        stats = format_stop_stats(deps)
+        embed.set_footer(text=f"🔴 = real-time · ⚠️ = delayed{' · ' + stats if stats else ''}")
 
-        view = _SaveStopView(interaction.user.id, stop_result["id"], stop_result["name"], mode_filter)
+        view = _SaveStopView(
+            interaction.user.id, stop_result["id"], stop_result["name"], mode_filter, deps
+        )
         await interaction.followup.send(embed=embed, view=view)
 
     # ── /transport next ───────────────────────────────────────────────────────
@@ -713,18 +738,16 @@ def register_transport_commands(tree: app_commands.CommandTree):
 
         try:
             if "from_id" in item.keys():
-                trips, alerts = await asyncio.gather(
-                    plan_trip(item["from_id"], item["to_id"], limit=5),
-                    get_alerts(),
-                )
+                from_stop = {"short_name": item["from_name"], "id": item["from_id"]}
+                to_stop = {"short_name": item["to_name"], "id": item["to_id"]}
+                trips = await plan_trip(item["from_id"], item["to_id"], limit=5)
+                alerts = await get_alerts(_alert_keywords(from_stop, to_stop, trips))
                 if not trips:
                     await interaction.followup.send(
                         embed=_err_embed(f"No trips found for **{item['label']}**."),
                         ephemeral=True,
                     )
                     return
-                from_stop = {"short_name": item["from_name"], "id": item["from_id"]}
-                to_stop = {"short_name": item["to_name"], "id": item["to_id"]}
                 embed = _build_trip_overview_embed(trips, from_stop, to_stop, alerts)
                 embed.title = f"🚆 {item['label']}"
                 embed.set_footer(text=f"🔴 = real-time · {slot_display}")
@@ -749,7 +772,15 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 )
                 lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
                 embed.description += "\n\n" + "\n".join(lines)
-                embed.set_footer(text=f"🔴 = real-time · {slot_display}")
+                stats = format_stop_stats(deps)
+                embed.set_footer(
+                    text=f"🔴 = real-time · {slot_display}{' · ' + stats if stats else ''}"
+                )
+                view = _SaveStopView(
+                    interaction.user.id, item["stop_id"], item["stop_name"], None, deps
+                )
+                await interaction.followup.send(embed=embed, view=view)
+                return
 
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
@@ -1006,14 +1037,23 @@ class _SaveRouteView(discord.ui.View):
 
 
 class _SaveStopView(discord.ui.View):
-    """Attached to departure board results — one-click save and refresh."""
+    """Attached to departure board results — one-click save, refresh, and remind me."""
 
-    def __init__(self, discord_id, stop_id, stop_name, mode_filter: str | None = None):
+    def __init__(
+        self,
+        discord_id,
+        stop_id,
+        stop_name,
+        mode_filter: str | None = None,
+        deps: list | None = None,
+    ):
         super().__init__(timeout=120)
         self.discord_id = discord_id
         self.stop_id = stop_id
         self.stop_name = stop_name
         self.mode_filter = mode_filter
+        # Keep the first departure for a sensible reminder default
+        self._first_dep = deps[0] if deps else None
 
         refresh_btn = discord.ui.Button(
             label="🔄 Refresh",
@@ -1022,12 +1062,40 @@ class _SaveStopView(discord.ui.View):
         refresh_btn.callback = self._on_refresh
         self.add_item(refresh_btn)
 
+        remind_btn = discord.ui.Button(
+            label="🔔 Remind me",
+            style=discord.ButtonStyle.secondary,
+        )
+        remind_btn.callback = self._on_remind
+        self.add_item(remind_btn)
+
         save_btn = discord.ui.Button(
             label="⭐ Save this stop",
             style=discord.ButtonStyle.primary,
         )
         save_btn.callback = self._on_save
         self.add_item(save_btn)
+
+    async def _on_remind(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+        # Build a helpful context message
+        dep = self._first_dep
+        if dep and not dep.get("cancelled"):
+            icon = MODE_ICONS.get(dep["mode"], "🚌")
+            context = (
+                f"{icon} {dep['route']} → {dep['destination']} "
+                f"from {self.stop_name} (departs {_fmt_time(dep['display_time'])})"
+            )
+        else:
+            context = f"Departure from {self.stop_name}"
+        modal = ReminderModal(
+            context_message=context,
+            channel_id=interaction.channel_id,
+            guild_id=interaction.guild_id,
+        )
+        await interaction.response.send_modal(modal)
 
     async def _on_save(self, interaction: discord.Interaction):
         if interaction.user.id != self.discord_id:
@@ -1069,11 +1137,12 @@ class _SaveStopView(discord.ui.View):
             description=f"Departures as of **{now_str}** · {mode_label}",
             color=TRAIN_COLOR,
         )
-        embed.set_footer(text="🔴 = real-time · ⚠️ = delayed")
         lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
         embed.description += "\n\n" + "\n".join(lines)
+        stats = format_stop_stats(deps)
+        embed.set_footer(text=f"🔴 = real-time · ⚠️ = delayed{' · ' + stats if stats else ''}")
 
-        new_view = _SaveStopView(self.discord_id, self.stop_id, self.stop_name, self.mode_filter)
+        new_view = _SaveStopView(self.discord_id, self.stop_id, self.stop_name, self.mode_filter, deps)
         self.stop()
         await interaction.edit_original_response(embed=embed, view=new_view)
 
@@ -1184,6 +1253,13 @@ class _TripSelectorView(discord.ui.View):
         self.add_item(refresh_btn)
 
         if selected_index is not None:
+            remind_btn = discord.ui.Button(
+                label="🔔 Remind me",
+                style=discord.ButtonStyle.secondary,
+            )
+            remind_btn.callback = self._on_remind
+            self.add_item(remind_btn)
+
             self.save_btn = discord.ui.Button(
                 label="⭐ Save this route",
                 style=discord.ButtonStyle.primary,
@@ -1291,10 +1367,8 @@ class _TripSelectorView(discord.ui.View):
 
         await interaction.response.defer()
         try:
-            trips, alerts = await asyncio.gather(
-                plan_trip(self.from_stop["id"], self.to_stop["id"], limit=5),
-                get_alerts(),
-            )
+            trips = await plan_trip(self.from_stop["id"], self.to_stop["id"], limit=5)
+            alerts = await get_alerts(_alert_keywords(self.from_stop, self.to_stop, trips))
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"Refresh failed: {e}"), ephemeral=True)
             return
@@ -1311,6 +1385,36 @@ class _TripSelectorView(discord.ui.View):
         )
         self.stop()
         await interaction.edit_original_response(embed=embed, view=new_view)
+
+    async def _on_remind(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+        if self.selected_index is None:
+            await interaction.response.send_message(
+                "Select a trip option first, then press Remind me.", ephemeral=True
+            )
+            return
+        trip = self.trips[self.selected_index]
+        dep = trip.get("departs")
+        dep_str = _fmt_time(dep) if dep else "?"
+        # Build legs summary e.g. "🚆T9 → 🚌370"
+        leg_parts = []
+        for leg in trip.get("legs", []):
+            if leg["mode"] == "walk":
+                continue
+            leg_parts.append(f"{leg['icon']} {leg.get('route', '')}")
+        legs_str = " → ".join(leg_parts) or "service"
+        context = (
+            f"{legs_str} from {self.from_stop['short_name']} "
+            f"→ {self.to_stop['short_name']} (departs {dep_str})"
+        )
+        modal = ReminderModal(
+            context_message=context,
+            channel_id=interaction.channel_id,
+            guild_id=interaction.guild_id,
+        )
+        await interaction.response.send_modal(modal)
 
     async def _on_save(self, interaction: discord.Interaction):
         if interaction.user.id != self.discord_id:
