@@ -472,6 +472,7 @@ bot = BalanceBot()
 
 @bot.tree.command(name="help", description="Show all available commands")
 async def cmd_help(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     embed = discord.Embed(
         title="📖 Balance Tracker — Commands",
@@ -517,11 +518,12 @@ async def cmd_help(interaction: discord.Interaction):
         embed.add_field(name="📡 /transport track-status", value="List active vehicle tracking sessions", inline=True)
         embed.add_field(name="🛑 /transport stop-tracking", value="Cancel an active tracking session by ID", inline=True)
     embed.set_footer(text=f"Dashboard: {APP_URL}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="info", description="Bot info and your account status")
 async def cmd_info(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user = await asyncio.to_thread(db_get_user, interaction.user.id)
 
@@ -555,11 +557,12 @@ async def cmd_info(interaction: discord.Interaction):
         value=f"{stats['cards']} cards · {stats['users']} players · ${stats['public_total']:.0f} public balance",
         inline=False)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="setup", description="Quick start guide to get tracking")
 async def cmd_setup(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user = await asyncio.to_thread(db_get_user, interaction.user.id)
 
@@ -602,29 +605,31 @@ async def cmd_setup(interaction: discord.Interaction):
                 inline=False)
 
     embed.set_footer(text=f"Dashboard: {APP_URL}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="link", description="Link your Discord account to Balance Tracker")
 async def cmd_link(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     code = await asyncio.to_thread(db_create_link_code, interaction.user.id, str(interaction.user))
     embed = discord.Embed(title="🔗 Link Your Account", color=0x6366f1,
         description="Enter this code in Balance Tracker Settings → Discord Link")
     embed.add_field(name="Code (expires 15min)", value=f"```{code}```", inline=False)
     embed.add_field(name="Where", value=f"{APP_URL}/settings", inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="cards", description="Show your card balances")
 async def cmd_cards(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'cards', default=True)
     if not user:
-        await interaction.response.send_message("❌ Use `/link` to connect your account.", ephemeral=True); return
+        await interaction.followup.send("❌ Use `/link` to connect your account.", ephemeral=True); return
     if not cards:
-        await interaction.response.send_message("No cards found.", ephemeral=ephem); return
+        await interaction.followup.send("No cards found.", ephemeral=ephem); return
 
     alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
     alltime_map = {r['label']: r['spent'] for r in alltime}
@@ -645,16 +650,17 @@ async def cmd_cards(interaction: discord.Interaction):
                f"🎫 {card['points'] or 0:,} {pts_label}{at_str}\n"
                f"🕐 {last}")
         embed.add_field(name=f"{card_emoji(card['card_type'])} {label}{tier}", value=val, inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=ephem)
+    await interaction.followup.send(embed=embed, ephemeral=ephem)
 
 
 @bot.tree.command(name="balance", description="Quick total balance summary")
 async def cmd_balance(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'balance', default=True)
     if not user:
-        await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
+        await interaction.followup.send("❌ Use `/link` first.", ephemeral=True); return
     total = sum((c['cash_balance'] or 0) + (c['cash_bonus'] or 0) for c in cards)
     tickets = sum(c['points'] or 0 for c in cards)
     embed = discord.Embed(
@@ -662,7 +668,7 @@ async def cmd_balance(interaction: discord.Interaction):
         description=f"**${total:.2f}** across {len(cards)} card(s)\n🎫 {tickets:,} tickets/points",
         color=0x22c55e
     )
-    await interaction.response.send_message(embed=embed, ephemeral=ephem)
+    await interaction.followup.send(embed=embed, ephemeral=ephem)
 
 
 @bot.tree.command(name="spent", description="How much you've spent in a timeframe")
@@ -674,11 +680,12 @@ async def cmd_balance(interaction: discord.Interaction):
     app_commands.Choice(name="All Time", value="all"),
 ])
 async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user, _ = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'spent', default=True)
     if not user:
-        await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
+        await interaction.followup.send("❌ Use `/link` first.", ephemeral=True); return
 
     label_map = {'day': 'last 24h', 'week': 'last 7 days', 'month': 'last 30 days', 'all': 'all time'}
 
@@ -690,7 +697,7 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
         results = await asyncio.to_thread(db_get_spent, user['id'], days)
 
     if not results:
-        await interaction.response.send_message("No spending data available.", ephemeral=ephem); return
+        await interaction.followup.send("No spending data available.", ephemeral=ephem); return
 
     total_spent = sum(r['spent'] for r in results)
     color = 0xef4444 if total_spent > 0 else 0x22c55e
@@ -709,17 +716,17 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
         )
     summary = f"-${total_spent:.2f}" if total_spent > 0 else f"+${abs(total_spent):.2f}"
     embed.set_footer(text=f"Total: {summary} in {label_map[period]}")
-    await interaction.response.send_message(embed=embed, ephemeral=ephem)
+    await interaction.followup.send(embed=embed, ephemeral=ephem)
 
 
 @bot.tree.command(name="refresh", description="Force refresh your card balances now")
 async def cmd_refresh(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user, cards = await asyncio.to_thread(db_get_user_cards, interaction.user.id)
     ephem = is_ephemeral(user, 'refresh', default=True)
     if not user:
-        await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
-    await interaction.response.defer(ephemeral=ephem)
+        await interaction.followup.send("❌ Use `/link` first.", ephemeral=True); return
 
     sys.path.insert(0, os.path.dirname(__file__))
     from app import fetch_koko_balance, fetch_timezone_guest
@@ -755,9 +762,10 @@ async def cmd_refresh(interaction: discord.Interaction):
 
 @bot.tree.command(name="leaderboard", description="Public card balance leaderboard (server only)")
 async def cmd_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     if interaction.guild is None:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "🏆 The leaderboard only works inside a server — invite me to a Discord server to use it!",
             ephemeral=True
         )
@@ -768,7 +776,7 @@ async def cmd_leaderboard(interaction: discord.Interaction):
     if not rows:
         embed = discord.Embed(title="🏆 Leaderboard", color=0xfbbf24,
             description="No public cards yet.\nEnable leaderboard in Settings to appear here.")
-        await interaction.response.send_message(embed=embed, ephemeral=ephem); return
+        await interaction.followup.send(embed=embed, ephemeral=ephem); return
 
     medals = ['🥇','🥈','🥉']
     embed = discord.Embed(title="🏆 Balance Leaderboard", color=0xfbbf24)
@@ -783,7 +791,7 @@ async def cmd_leaderboard(interaction: discord.Interaction):
             inline=False
         )
     embed.set_footer(text="Enable in Settings → Leaderboard to appear here")
-    await interaction.response.send_message(embed=embed, ephemeral=ephem)
+    await interaction.followup.send(embed=embed, ephemeral=ephem)
 
 
 @bot.tree.command(name="privacy", description="Toggle whether each command response is public or private")
@@ -796,14 +804,15 @@ async def cmd_leaderboard(interaction: discord.Interaction):
     app_commands.Choice(name="/leaderboard", value="leaderboard"),
 ])
 async def cmd_privacy(interaction: discord.Interaction, command: str, public: bool):
+    await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
     user = await asyncio.to_thread(db_get_user, interaction.user.id)
     if not user:
-        await interaction.response.send_message("❌ Use `/link` first.", ephemeral=True); return
+        await interaction.followup.send("❌ Use `/link` first.", ephemeral=True); return
     ephemeral = not public
     await asyncio.to_thread(db_set_command_privacy, user['id'], command, ephemeral)
     visibility = "**public** 📢" if public else "**private** 🔒"
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"✅ `/{command}` responses will now be {visibility} in this server.",
         ephemeral=True
     )
@@ -974,8 +983,10 @@ class TimezoneCardSelectView(discord.ui.View):
     app_commands.Choice(name="🕹️ Timezone — pick from your account", value="timezone"),
 ])
 async def cmd_addcard(interaction: discord.Interaction, card_type: str):
-    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
-    user = await asyncio.to_thread(db_get_user, interaction.user.id)
+    _, user = await asyncio.gather(
+        asyncio.to_thread(db_touch_last_seen, interaction.user.id),
+        asyncio.to_thread(db_get_user, interaction.user.id),
+    )
     if not user:
         await interaction.response.send_message("❌ Use `/link` first to connect your account.", ephemeral=True)
         return

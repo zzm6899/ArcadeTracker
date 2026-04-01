@@ -251,6 +251,7 @@ def register_reminder_commands(tree: app_commands.CommandTree):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
         channel_id = interaction.channel_id
         guild_id = interaction.guild_id
         await asyncio.to_thread(
@@ -259,7 +260,7 @@ def register_reminder_commands(tree: app_commands.CommandTree):
 
         mins = max(1, int((remind_at - datetime.now(SYDNEY_TZ)).total_seconds() / 60))
         time_str = remind_at.strftime("%H:%M")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=discord.Embed(
                 description=(
                     f"🔔 Reminder set for **{time_str}** "
@@ -275,9 +276,10 @@ def register_reminder_commands(tree: app_commands.CommandTree):
 
     @reminder_group.command(name="list", description="List your pending reminders")
     async def cmd_reminder_list(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         rows = await asyncio.to_thread(db_get_reminders, interaction.user.id)
         if not rows:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=discord.Embed(
                     description="You have no pending reminders.",
                     color=REMINDER_COLOR,
@@ -302,15 +304,16 @@ def register_reminder_commands(tree: app_commands.CommandTree):
                 inline=False,
             )
         embed.set_footer(text="/reminder delete <id> to cancel")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /reminder delete ──────────────────────────────────────────────────────
 
     @reminder_group.command(name="delete", description="Cancel a pending reminder by its ID")
     @app_commands.describe(reminder_id="Reminder ID shown in /reminder list")
     async def cmd_reminder_delete(interaction: discord.Interaction, reminder_id: int):
+        await interaction.response.defer(ephemeral=True)
         await asyncio.to_thread(db_delete_reminder, interaction.user.id, reminder_id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=discord.Embed(
                 description=f"🗑️ Reminder **#{reminder_id}** cancelled.",
                 color=REMINDER_COLOR,
