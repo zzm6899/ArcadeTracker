@@ -1680,23 +1680,25 @@ def register_transport_commands(tree: app_commands.CommandTree):
 
         embed = discord.Embed(title="🚂 Your active tracking sessions", color=TRAIN_COLOR)
         for s in sessions:
-            # Determine a meaningful status string
-            if s['notified']:
-                status = "✅ Alerted"
-            else:
-                try:
-                    sched = datetime.fromisoformat(s['scheduled_dep'])
-                    if sched.tzinfo is None:
-                        sched = sched.replace(tzinfo=timezone.utc)
-                    if datetime.now(timezone.utc) > sched:
-                        status = "⚠️ Service may have passed"
-                    else:
-                        status = "⏳ Waiting"
-                except Exception:
+            # Determine a meaningful status string and format departure time
+            dep_str = "?"
+            try:
+                sched = datetime.fromisoformat(s['scheduled_dep'])
+                if sched.tzinfo is None:
+                    sched = sched.replace(tzinfo=timezone.utc)
+                dep_str = _fmt_time(sched)
+                if s['notified']:
+                    status = "✅ Alerted"
+                elif datetime.now(timezone.utc) > sched:
+                    status = "⚠️ Service may have passed"
+                else:
                     status = "⏳ Waiting"
+            except Exception:
+                status = "✅ Alerted" if s['notified'] else "⏳ Waiting"
             embed.add_field(
                 name=f"#{s['id']} — {s['route']} → {s['destination']}",
                 value=(
+                    f"🕐 Departs: **{dep_str}**\n"
                     f"Alert at: **{s['alert_stop_name']}**\n"
                     f"Route: {s['from_name']} → {s['to_name']}\n"
                     f"Status: {status}"

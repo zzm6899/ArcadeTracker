@@ -373,14 +373,15 @@ class BalanceBot(discord.Client):
             return  # API unavailable — skip silently
 
         if pos is None:
-            # If the scheduled departure is more than 30 minutes in the past the
-            # service has almost certainly completed — notify the user (if not yet
-            # done) then deactivate the session so it stops showing as "⏳ Waiting".
+            # If the scheduled departure is in the past the service has likely
+            # departed — notify the user (if not yet done) then deactivate so it
+            # stops showing as "⏳ Waiting". Use a small 2-min grace period to
+            # account for clock skew / slightly early departures.
             try:
                 sched = datetime.fromisoformat(session["scheduled_dep"])
                 if sched.tzinfo is None:
                     sched = sched.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) - sched > timedelta(minutes=30):
+                if datetime.now(timezone.utc) - sched > timedelta(minutes=2):
                     if not session["notified"]:
                         await self._send_tracking_expired(session)
                     await asyncio.to_thread(db_deactivate_tracking, session["id"])
