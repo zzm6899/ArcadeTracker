@@ -14,6 +14,8 @@ import os
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from zoneinfo import ZoneInfo
+
 import discord
 from discord import app_commands
 
@@ -308,6 +310,17 @@ def db_mark_tracking_alerted(tracking_id):
     conn.close()
 
 
+def db_mark_dest_alerted(tracking_id):
+    """Mark that the destination-arrival notification has been sent (notified=2)."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE transport_tracking SET notified=2 WHERE id=?",
+        (tracking_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ─── Shared UI helpers ─────────────────────────────────────────────────────────
 
 TRAIN_COLOR = 0xF15A22   # TfNSW orange
@@ -537,6 +550,85 @@ async def _stop_autocomplete(
         return []
 
 
+# ─── Time parser ──────────────────────────────────────────────────────────────
+
+# Matches: "4pm", "4:30pm", "4:30 pm", "at 4pm", "@16:00", "at 16:00"
+# Requires am/pm OR two-digit 24h hour (HH:MM).
+_TIME_RE = re.compile(
+    r"""
+    \b(?:(?:at|@)\s*)?          # optional "at " / "@" prefix
+    (?:
+        (\d{1,2}):(\d{2})        # HH:MM  (group 1=hour, 2=min)
+        \s*(am|pm)?              # optional am/pm
+      |
+        (\d{1,2})                # H or HH  (group 4=hour)
+        \s*(am|pm)               # am/pm required when no colon (group 5)
+    )
+    \b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _parse_time_from_query(text: str) -> tuple[str, "datetime | None"]:
+    """
+    Extract a departure time from a natural-language query string.
+
+    Handles: "4pm", "4:30pm", "16:00", "at 4pm", "@9:30am", "at 16:30"
+    The matched time fragment is stripped from the text.
+
+    Returns (cleaned_text, sydney_datetime | None).
+    Midnight-next-day rollover: if the parsed time has already passed by more
+    than 5 minutes it is treated as the same time tomorrow.
+    """
+    m = _TIME_RE.search(text)
+    if not m:
+        return text, None
+
+    if m.group(1) is not None:
+        # HH:MM form
+        hour, minute = int(m.group(1)), int(m.group(2))
+        meridiem = (m.group(3) or "").lower()
+    else:
+        # H am/pm form
+        hour, minute = int(m.group(4)), 0
+        meridiem = (m.group(5) or "").lower()
+
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+
+    if hour > 23 or minute > 59:
+        return text, None
+
+    now_syd = datetime.now(SYDNEY_TZ)
+    try:
+        dep_time = now_syd.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    except ValueError:
+        return text, None
+
+    # If more than 5 minutes in the past, assume tomorrow
+    if (dep_time - now_syd).total_seconds() < -300:
+        dep_time += timedelta(days=1)
+
+    # Strip the matched segment (and any surrounding whitespace / stray "at")
+    cleaned = (text[: m.start()] + text[m.end() :]).strip()
+    cleaned = re.sub(r"^\s*(?:at|@)\s+", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"\s+(?:at|@)\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+    if not cleaned:
+        cleaned = text  # Safety: don't return empty
+
+    return cleaned, dep_time
+
+
+def _fmt_at_time(at_time: "datetime | None") -> str:
+    """Return a short human label for an at_time, e.g. '(from 4:00 PM)'."""
+    if not at_time:
+        return ""
+    return f" (from {at_time.astimezone(SYDNEY_TZ).strftime('%-I:%M %p')})"
+
+
 # ─── Natural-language query parser ────────────────────────────────────────────
 
 def _parse_go_query(text: str) -> tuple[str, str] | None:
@@ -726,18 +818,6 @@ def _build_trip_overview_embed(
     lines = [_trip_summary_line(t, i) for i, t in enumerate(trips, 1)]
     embed.description = "\n".join(lines)
 
-    if alerts:
-        embed.add_field(
-            name="📢 Service notices",
-            value="\n".join(
-                f"{'🚨' if a['is_replacement'] else '⚠️' if a['priority'] in ('high','veryHigh') else 'ℹ️'} "
-                f"{a['title'][:100]}"
-                + (f" — [details]({a['url']})" if a["url"] else "")
-                for a in alerts
-            )[:1024],
-            inline=False,
-        )
-
     embed.set_footer(text="Select an option below for details · 🔴 = real-time")
     return embed
 
@@ -758,18 +838,22 @@ def register_transport_commands(tree: app_commands.CommandTree):
         name="go",
         description='Natural-language trip planner: "rhodes to central" or "from central to parramatta"',
     )
-    @app_commands.describe(query='Where to and from, e.g. "rhodes to strathfield", "from central to parramatta"')
+    @app_commands.describe(
+        query='Trip query — include an optional time: "4pm rhodes to central", "rhodes to central at 16:00"'
+    )
     @app_commands.autocomplete(query=_stop_autocomplete)
     async def cmd_go(interaction: discord.Interaction, query: str):
         await interaction.response.defer(ephemeral=False)
 
-        parsed = _parse_go_query(query)
+        # Extract optional departure time before parsing origin/destination
+        cleaned_query, at_time = _parse_time_from_query(query)
+        parsed = _parse_go_query(cleaned_query)
         if not parsed:
             await interaction.followup.send(
                 embed=_err_embed(
                     f'Could not parse **"{query}"**.\n'
-                    'Use the format **from** `to` **destination**, e.g. `rhodes to central station` '
-                    'or `rhodes bus A to top ryde`.'
+                    'Use the format `origin to destination`, e.g. `rhodes to central` '
+                    'or `4pm rhodes to central`.'
                 ),
                 ephemeral=True,
             )
@@ -790,8 +874,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 if not to_result:
                     return
 
-            trips = await plan_trip(from_result["id"], to_result["id"], limit=5)
-            alerts = await get_alerts(_alert_keywords(from_result, to_result, trips))
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=5, at_time=at_time)
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
@@ -799,16 +882,21 @@ def register_transport_commands(tree: app_commands.CommandTree):
         if not trips:
             await interaction.followup.send(
                 embed=_err_embed(
-                    f"No trips found from **{from_result['short_name']}** to **{to_result['short_name']}**.\n"
+                    f"No trips found from **{from_result['short_name']}** to **{to_result['short_name']}**"
+                    f"{_fmt_at_time(at_time)}.\n"
                     f"Resolved: `{from_result['name']}` → `{to_result['name']}`"
                 ),
                 ephemeral=True,
             )
             return
 
-        embed = _build_trip_overview_embed(trips, from_result, to_result, alerts)
+        embed = _build_trip_overview_embed(trips, from_result, to_result, [])
+        if at_time:
+            embed.set_footer(
+                text=f"Trips from {_fmt_time(at_time)} · Select an option below for details · 🔴 = real-time"
+            )
         view = _TripSelectorView(
-            interaction.user.id, trips, from_result, to_result, alerts
+            interaction.user.id, trips, from_result, to_result, []
         )
         msg = await interaction.followup.send(embed=embed, view=view)
         view.message = msg
@@ -819,10 +907,18 @@ def register_transport_commands(tree: app_commands.CommandTree):
     @app_commands.describe(
         from_stop="Origin station or stop name (e.g. Central, Strathfield)",
         to_stop="Destination station or stop name (e.g. Rhodes, Parramatta)",
+        time='Optional departure time, e.g. "4pm", "16:30", "9:30am"',
     )
     @app_commands.autocomplete(from_stop=_stop_autocomplete, to_stop=_stop_autocomplete)
-    async def cmd_train(interaction: discord.Interaction, from_stop: str, to_stop: str):
+    async def cmd_train(
+        interaction: discord.Interaction,
+        from_stop: str,
+        to_stop: str,
+        time: str = "",
+    ):
         await interaction.response.defer(ephemeral=False)
+
+        _, at_time = _parse_time_from_query(time) if time.strip() else (time, None)
 
         try:
             from_result = await _pick_stop(interaction, from_stop, "origin")
@@ -831,8 +927,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
             to_result = await _pick_stop(interaction, to_stop, "destination")
             if not to_result:
                 return
-            trips = await plan_trip(from_result["id"], to_result["id"], limit=5)
-            alerts = await get_alerts(_alert_keywords(from_result, to_result, trips))
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=5, at_time=at_time)
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
@@ -840,15 +935,20 @@ def register_transport_commands(tree: app_commands.CommandTree):
         if not trips:
             await interaction.followup.send(
                 embed=_err_embed(
-                    f"No trips found from **{from_result['name']}** to **{to_result['name']}**."
+                    f"No trips found from **{from_result['name']}** to **{to_result['name']}**"
+                    f"{_fmt_at_time(at_time)}."
                 ),
                 ephemeral=True,
             )
             return
 
-        embed = _build_trip_overview_embed(trips, from_result, to_result, alerts)
+        embed = _build_trip_overview_embed(trips, from_result, to_result, [])
+        if at_time:
+            embed.set_footer(
+                text=f"Trips from {_fmt_time(at_time)} · Select an option below for details · 🔴 = real-time"
+            )
         view = _TripSelectorView(
-            interaction.user.id, trips, from_result, to_result, alerts
+            interaction.user.id, trips, from_result, to_result, []
         )
         msg = await interaction.followup.send(embed=embed, view=view)
         view.message = msg
@@ -859,6 +959,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
     @app_commands.describe(
         stop="Stop or station name (e.g. Central, Chatswood)",
         mode="Filter by transport mode (optional)",
+        time='Show departures from a specific time, e.g. "4pm", "16:30"',
     )
     @app_commands.choices(mode=[
         app_commands.Choice(name="All", value="all"),
@@ -869,30 +970,43 @@ def register_transport_commands(tree: app_commands.CommandTree):
         app_commands.Choice(name="🚃 Light Rail", value="4"),
     ])
     @app_commands.autocomplete(stop=_stop_autocomplete)
-    async def cmd_departures(interaction: discord.Interaction, stop: str, mode: str = "all"):
+    async def cmd_departures(
+        interaction: discord.Interaction,
+        stop: str,
+        mode: str = "all",
+        time: str = "",
+    ):
         await interaction.response.defer(ephemeral=False)
+
+        _, at_time = _parse_time_from_query(time) if time.strip() else (time, None)
 
         try:
             stop_result = await _pick_stop(interaction, stop, "stop")
             if not stop_result:
                 return
             mode_filter = None if mode == "all" else mode
-            deps = await get_departures(stop_result["id"], limit=8, mode_filter=mode_filter)
+            deps = await get_departures(
+                stop_result["id"], limit=8, mode_filter=mode_filter, at_time=at_time
+            )
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
 
         if not deps:
             mode_label = MODE_NAMES.get(mode, mode) if mode != "all" else ""
-            no_deps_msg = f"No upcoming {mode_label + ' ' if mode_label else ''}departures from **{stop_result['short_name']}**."
+            time_note = f" from **{_fmt_time(at_time)}**" if at_time else ""
+            no_deps_msg = (
+                f"No upcoming {mode_label + ' ' if mode_label else ''}departures"
+                f" from **{stop_result['short_name']}**{time_note}."
+            )
             await interaction.followup.send(embed=_err_embed(no_deps_msg), ephemeral=True)
             return
 
-        now_str = datetime.now(SYDNEY_TZ).strftime("%H:%M")
+        dep_window_str = _fmt_time(at_time) if at_time else datetime.now(SYDNEY_TZ).strftime("%H:%M")
         mode_label = "All modes" if mode == "all" else MODE_NAMES.get(mode, mode)
         embed = discord.Embed(
             title=f"🚏 {stop_result['short_name']}",
-            description=f"Departures as of **{now_str}** · {mode_label}",
+            description=f"Departures from **{dep_window_str}** · {mode_label}",
             color=TRAIN_COLOR,
         )
         lines = [format_departure_line(dep, i) for i, dep in enumerate(deps, 1)]
@@ -965,18 +1079,17 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 from_stop = {"short_name": item["from_name"], "id": item["from_id"]}
                 to_stop = {"short_name": item["to_name"], "id": item["to_id"]}
                 trips = await plan_trip(item["from_id"], item["to_id"], limit=5)
-                alerts = await get_alerts(_alert_keywords(from_stop, to_stop, trips))
                 if not trips:
                     await interaction.followup.send(
                         embed=_err_embed(f"No trips found for **{item['label']}**."),
                         ephemeral=True,
                     )
                     return
-                embed = _build_trip_overview_embed(trips, from_stop, to_stop, alerts)
+                embed = _build_trip_overview_embed(trips, from_stop, to_stop, [])
                 embed.title = f"🚆 {item['label']}"
                 embed.set_footer(text=f"🔴 = real-time · {slot_display}")
                 view = _TripSelectorView(
-                    interaction.user.id, trips, from_stop, to_stop, alerts
+                    interaction.user.id, trips, from_stop, to_stop, []
                 )
                 msg = await interaction.followup.send(embed=embed, view=view)
                 view.message = msg
@@ -1333,6 +1446,155 @@ def register_transport_commands(tree: app_commands.CommandTree):
             ),
             ephemeral=True,
         )
+
+    # ── /transport track  (quick one-shot tracking) ──────────────────────────
+
+    @transport_group.command(
+        name="track",
+        description='Instantly track the next trip: "central to parramatta" or "4pm central to parramatta"',
+    )
+    @app_commands.describe(
+        query='Trip to track — include an optional time: "central to parramatta", "4pm rhodes to central"'
+    )
+    @app_commands.autocomplete(query=_stop_autocomplete)
+    async def cmd_track(interaction: discord.Interaction, query: str):
+        await interaction.response.defer(ephemeral=True)
+
+        # Extract optional time, then parse origin → destination
+        cleaned_query, at_time = _parse_time_from_query(query)
+        parsed = _parse_go_query(cleaned_query)
+        if not parsed:
+            await interaction.followup.send(
+                embed=_err_embed(
+                    f'Could not parse **"{query}"**.\n'
+                    'Use the format `origin to destination`, e.g. `central to parramatta` '
+                    'or `4pm rhodes to central`.'
+                ),
+                ephemeral=True,
+            )
+            return
+
+        from_query, to_query = parsed
+
+        try:
+            from_result = await _pick_stop_silent(from_query)
+            to_result = await _pick_stop_silent(to_query)
+
+            if not from_result:
+                from_result = await _pick_stop(interaction, from_query, "origin")
+                if not from_result:
+                    return
+            if not to_result:
+                to_result = await _pick_stop(interaction, to_query, "destination")
+                if not to_result:
+                    return
+
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=5, at_time=at_time)
+        except Exception as e:
+            await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
+            return
+
+        if not trips:
+            time_note = _fmt_at_time(at_time)
+            await interaction.followup.send(
+                embed=_err_embed(
+                    f"No trips found from **{from_result['short_name']}** to "
+                    f"**{to_result['short_name']}**{time_note}."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        # Auto-select the first (soonest) trip
+        trip = trips[0]
+        transit_legs = [
+            (i, l) for i, l in enumerate(trip.get("legs", []))
+            if l.get("mode") != "walk"
+        ]
+        if not transit_legs:
+            await interaction.followup.send(
+                embed=_err_embed("No trackable legs found in the first trip option."),
+                ephemeral=True,
+            )
+            return
+
+        _, leg = transit_legs[0]
+        stop_seq = leg.get("stop_sequence", [])
+        if len(stop_seq) < 2:
+            await interaction.followup.send(
+                embed=_err_embed(
+                    "Not enough real-time stop data to set up tracking.\n"
+                    "Try again when the trip shows a 🔴 real-time indicator."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        # Auto-set the alert stop to the user's destination (to_stop).
+        # Find the best matching stop in the sequence; fall back to last stop.
+        dest_name = to_result["short_name"]
+        alert_stop_idx = len(stop_seq) - 1
+        for i, s in enumerate(stop_seq):
+            s_lower = s["name"].lower()
+            if dest_name.lower() in s_lower or s_lower in dest_name.lower():
+                alert_stop_idx = i
+                break
+        alert_stop_name = stop_seq[alert_stop_idx]["name"]
+
+        planned_dep = leg.get("departs")
+        scheduled_dep = planned_dep.isoformat() if planned_dep else ""
+
+        stop_seq_json = json.dumps([
+            {
+                "name": s["name"],
+                "departure": s["departure"].isoformat() if s.get("departure") else None,
+            }
+            for s in stop_seq
+        ])
+
+        tracking_id = await asyncio.to_thread(
+            db_save_tracking,
+            str(interaction.user.id),
+            str(interaction.channel_id) if interaction.channel_id else None,
+            str(interaction.guild_id) if interaction.guild_id else None,
+            leg.get("vehicle_id", ""),
+            leg.get("route", "?"),
+            leg.get("destination", "?"),
+            from_result["id"],
+            to_result["id"],
+            from_result["short_name"],
+            to_result["short_name"],
+            alert_stop_name,
+            alert_stop_idx,
+            stop_seq_json,
+            scheduled_dep,
+        )
+
+        dep_str = _fmt_time(planned_dep) if planned_dep else "?"
+        arr_str = _fmt_time(trip["arrives"]) if trip.get("arrives") else "?"
+        route = leg.get("route", "?")
+        dest = leg.get("destination", "?")
+        icon = leg.get("icon", "🚆")
+        time_label = _fmt_at_time(at_time)
+
+        embed = discord.Embed(
+            title=f"✅ Tracking started{time_label}",
+            description=(
+                f"Tracking **{icon} {route}** → {dest}.\n\n"
+                f"You'll get an alert as the service approaches **{alert_stop_name}** "
+                f"and again when it arrives."
+            ),
+            color=TRAIN_COLOR,
+        )
+        embed.add_field(name="🚉 From", value=from_result["short_name"], inline=True)
+        embed.add_field(name="🏁 To", value=to_result["short_name"], inline=True)
+        embed.add_field(name="🕐 Departs", value=dep_str, inline=True)
+        embed.add_field(name="🕑 Arrives", value=arr_str, inline=True)
+        embed.add_field(name="📍 Alert stop", value=alert_stop_name, inline=True)
+        embed.set_footer(
+            text=f"Tracking ID: #{tracking_id} · /transport stop-tracking {tracking_id} to cancel"
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # ── /transport track-status ───────────────────────────────────────────────
 
@@ -1829,23 +2091,6 @@ class _TripSelectorView(discord.ui.View):
         legs_text = _trip_detail_field(trip)
         embed.add_field(name="Journey detail", value=legs_text or "\u200b", inline=False)
 
-        # Alerts (if any)
-        if self.alerts:
-            alert_lines = []
-            for a in self.alerts:
-                icon = "🚨" if a["is_replacement"] else (
-                    "⚠️" if a["priority"] in ("high", "veryHigh") else "ℹ️"
-                )
-                line = f"{icon} {a['title'][:100]}"
-                if a["url"]:
-                    line += f" — [details]({a['url']})"
-                alert_lines.append(line)
-            embed.add_field(
-                name="📢 Service notices",
-                value="\n".join(alert_lines)[:1024],
-                inline=False,
-            )
-
         embed.set_footer(text="⭐ Press Save to add this route · 🚂 Track to get stop alerts · 🔴 = real-time")
         return embed
 
@@ -1888,7 +2133,6 @@ class _TripSelectorView(discord.ui.View):
         await interaction.response.defer()
         try:
             trips = await plan_trip(self.from_stop["id"], self.to_stop["id"], limit=5)
-            alerts = await get_alerts(_alert_keywords(self.from_stop, self.to_stop, trips))
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"Refresh failed: {e}"), ephemeral=True)
             return
@@ -1899,9 +2143,9 @@ class _TripSelectorView(discord.ui.View):
             )
             return
 
-        embed = _build_trip_overview_embed(trips, self.from_stop, self.to_stop, alerts)
+        embed = _build_trip_overview_embed(trips, self.from_stop, self.to_stop, [])
         new_view = _TripSelectorView(
-            self.discord_id, trips, self.from_stop, self.to_stop, alerts,
+            self.discord_id, trips, self.from_stop, self.to_stop, [],
         )
         self.stop()
         await interaction.edit_original_response(embed=embed, view=new_view)

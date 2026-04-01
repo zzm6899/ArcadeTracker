@@ -19,6 +19,7 @@ try:
         db_get_active_trackings,
         db_deactivate_tracking,
         db_mark_tracking_alerted,
+        db_mark_dest_alerted,
     )
     from transport_nsw import get_vehicle_position
     TRANSPORT_ENABLED = True
@@ -400,14 +401,47 @@ class BalanceBot(discord.Client):
 
         current_idx = pos.get("current_idx")
 
-        # Deactivate once the vehicle has passed the alert stop
-        if current_idx is not None and current_idx >= effective_alert_idx:
-            if not session["notified"]:
+        # ── Terminus safety net ──────────────────────────────────────────────────
+        # If the vehicle has departed the last stop in the sequence the trip has
+        # ended.  Send whichever alerts haven't fired yet, then deactivate.
+        if current_idx is not None and fresh_stop_seq and current_idx >= len(fresh_stop_seq) - 1:
+            if session["notified"] == 0:
                 await self._send_tracking_alert(session, pos, alert_stop_name, passed=True)
+            elif session["notified"] == 1:
+                await self._send_dest_arrival_alert(session, pos)
             await asyncio.to_thread(db_deactivate_tracking, session["id"])
             return
 
-        # Determine if vehicle is "approaching" (1 stop before, or within 5 min of alert stop)
+        # ── Locate the destination (to_stop) in the fresh stop sequence ─────────
+        to_name = session.get("to_name", "")
+        dest_idx: int | None = None
+        if to_name:
+            for i, s in enumerate(fresh_stop_seq):
+                s_name = s.get("name", "")
+                if to_name.lower() in s_name.lower() or s_name.lower() in to_name.lower():
+                    dest_idx = i
+                    break
+
+        # ── Destination arrival check ────────────────────────────────────────────
+        # Vehicle has reached (or passed) the user's destination → send arrival
+        # alert and deactivate.
+        if dest_idx is not None and current_idx is not None and current_idx >= dest_idx:
+            if session["notified"] < 2:
+                await self._send_dest_arrival_alert(session, pos)
+            await asyncio.to_thread(db_deactivate_tracking, session["id"])
+            return
+
+        # ── Alert stop: passed check ─────────────────────────────────────────────
+        # Vehicle has passed the chosen alert stop.  Send the alert (if not yet
+        # done) but keep the session alive so we still watch for the destination.
+        if current_idx is not None and current_idx >= effective_alert_idx:
+            if session["notified"] == 0:
+                await self._send_tracking_alert(session, pos, alert_stop_name, passed=True)
+                await asyncio.to_thread(db_mark_tracking_alerted, session["id"])  # → notified=1
+            # Do NOT deactivate here — wait for destination arrival check above
+            return
+
+        # ── Alert stop: approaching check ────────────────────────────────────────
         approaching = current_idx is not None and current_idx >= effective_alert_idx - 1
 
         if not approaching and fresh_alert_idx is not None and fresh_alert_idx < len(fresh_stop_seq):
@@ -417,9 +451,9 @@ class BalanceBot(discord.Client):
                 and 0 <= (dep.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 60 <= 5
             )
 
-        if approaching and not session["notified"]:
+        if approaching and session["notified"] == 0:
             await self._send_tracking_alert(session, pos, alert_stop_name, passed=False)
-            await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+            await asyncio.to_thread(db_mark_tracking_alerted, session["id"])  # → notified=1
 
     async def _send_tracking_alert(self, session, pos, alert_stop_name, *, passed: bool):
         """DM or mention user about their tracked vehicle approaching/passing the alert stop."""
@@ -504,6 +538,47 @@ class BalanceBot(discord.Client):
                 await channel.send(content=f"<@{discord_id}>", embed=embed)
             except Exception:
                 pass
+
+    async def _send_dest_arrival_alert(self, session, pos):
+        """Send notification when vehicle arrives at the tracked destination stop."""
+        route = session["route"]
+        destination = session["destination"]
+        to_name = session.get("to_name") or destination
+        current_stop = pos.get("current_stop") or to_name
+
+        embed = discord.Embed(
+            title=f"🏁 Arrived at {to_name}",
+            description=(
+                f"Your train (**{route}** → {destination}) has arrived at your destination: "
+                f"**{to_name}**."
+            ),
+            color=0x2ECC71,
+        )
+        embed.add_field(name="📍 Current stop", value=current_stop, inline=True)
+        embed.add_field(name="🏁 Destination", value=to_name, inline=True)
+        embed.set_footer(text="Transport for NSW · Live tracking")
+
+        discord_id = session["discord_id"]
+        channel_id = session.get("channel_id")
+
+        sent = False
+        try:
+            user = await self.fetch_user(int(discord_id))
+            await user.send(embed=embed)
+            sent = True
+        except Exception:
+            pass
+
+        if not sent and channel_id:
+            try:
+                channel = self.get_channel(int(channel_id))
+                if channel is None:
+                    channel = await self.fetch_channel(int(channel_id))
+                await channel.send(content=f"<@{discord_id}>", embed=embed)
+            except Exception:
+                pass
+
+        await asyncio.to_thread(db_mark_dest_alerted, session["id"])
 
 bot = BalanceBot()
 

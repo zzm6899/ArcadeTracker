@@ -348,13 +348,19 @@ async def find_stops(query: str, limit: int = 5) -> list[dict]:
 
 # ─── Departures ───────────────────────────────────────────────────────────────
 
-async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None = None) -> list[dict]:
+async def get_departures(
+    stop_id: str,
+    limit: int = 5,
+    mode_filter: str | None = None,
+    at_time: "datetime | None" = None,
+) -> list[dict]:
     """
     Get upcoming departures from a stop.
     Returns list of dicts with: route, destination, planned, realtime, mins, delay, stop_name, mode, line_name
     mode_filter: '4' = trains only, '1' = buses, etc.
+    at_time: optional departure window start (defaults to now).
     """
-    now_syd = _sydney_now()
+    query_time = at_time.astimezone(SYDNEY_TZ) if at_time else _sydney_now()
     # Fetch a larger buffer so client-side mode filtering still returns enough results
     fetch_limit = limit * 5 if mode_filter else limit * 2
     params = {
@@ -364,8 +370,8 @@ async def get_departures(stop_id: str, limit: int = 5, mode_filter: str | None =
         "type_dm": "stop",
         "name_dm": stop_id,
         "depArrMacro": "dep",
-        "itdDate": now_syd.strftime("%Y%m%d"),
-        "itdTime": now_syd.strftime("%H%M"),
+        "itdDate": query_time.strftime("%Y%m%d"),
+        "itdTime": query_time.strftime("%H%M"),
         "TfNSWDM": "true",
         "version": "10.2.1.42",
         "maxResults": str(fetch_limit),
@@ -507,18 +513,26 @@ def _find_current_stop_in_leg(stop_seq: list[dict]) -> str | None:
 
 # ─── Trip Planner ─────────────────────────────────────────────────────────────
 
-async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
+async def plan_trip(
+    from_id: str,
+    to_id: str,
+    limit: int = 3,
+    at_time: "datetime | None" = None,
+) -> list[dict]:
     """
     Plan trips between two stop IDs.
     Returns list of trip dicts with legs, total duration, and departure time.
+
+    ``at_time`` sets the requested departure time (Sydney-aware datetime).
+    Defaults to now when not provided.
     """
-    now_syd = _sydney_now()
+    query_time = at_time.astimezone(SYDNEY_TZ) if at_time else _sydney_now()
     params = {
         "outputFormat": "rapidJSON",
         "coordOutputFormat": "EPSG:4326",
         "depArrMacro": "dep",
-        "itdDate": now_syd.strftime("%Y%m%d"),
-        "itdTime": now_syd.strftime("%H%M"),
+        "itdDate": query_time.strftime("%Y%m%d"),
+        "itdTime": query_time.strftime("%H%M"),
         "type_origin": "stop",
         "name_origin": from_id,
         "type_destination": "stop",
