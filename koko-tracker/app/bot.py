@@ -6,14 +6,21 @@ Configure via docker-compose.yml environment variables:
 """
 
 import os, sys, asyncio, sqlite3, secrets, random, json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import tasks
 
 # ─── Transport NSW ────────────────────────────────────────────────────────────
 try:
-    from transport_cmds import register_transport_commands, transport_db_init
+    from transport_cmds import (
+        register_transport_commands,
+        transport_db_init,
+        db_get_active_trackings,
+        db_deactivate_tracking,
+        db_mark_tracking_alerted,
+    )
+    from transport_nsw import get_vehicle_position
     TRANSPORT_ENABLED = True
     print("[Bot] Transport NSW module loaded.")
 except Exception as _transport_err:
@@ -259,6 +266,9 @@ class BalanceBot(discord.Client):
         if REMINDERS_ENABLED and not self.reminder_loop.is_running():
             self.reminder_loop.start()
             print("[Bot] Reminder loop started.")
+        if TRANSPORT_ENABLED and not self.tracking_loop.is_running():
+            self.tracking_loop.start()
+            print("[Bot] Vehicle tracking loop started.")
 
     @tasks.loop(seconds=30)
     async def reminder_loop(self):
@@ -321,6 +331,130 @@ class BalanceBot(discord.Client):
         except Exception as e:
             print(f"[Bot] Status error: {e}")
 
+    @tasks.loop(seconds=60)
+    async def tracking_loop(self):
+        """Poll active vehicle tracking sessions and send alerts when approaching."""
+        if not TRANSPORT_ENABLED:
+            return
+        try:
+            sessions = await asyncio.to_thread(db_get_active_trackings)
+        except Exception as e:
+            print(f"[Bot] tracking_loop DB error: {e}")
+            return
+
+        for session in sessions:
+            try:
+                await self._process_tracking(session)
+            except Exception as e:
+                print(f"[Bot] tracking error #{session['id']}: {e}")
+
+    async def _process_tracking(self, session):
+        """Check position of a tracked vehicle and alert user if approaching alert stop."""
+        # Auto-expire sessions older than 3 hours
+        try:
+            created_str = session["created_at"]
+            created = datetime.fromisoformat(created_str).replace(tzinfo=timezone.utc)
+        except Exception:
+            created = datetime.now(timezone.utc)
+        if datetime.now(timezone.utc) - created > timedelta(hours=3):
+            await asyncio.to_thread(db_deactivate_tracking, session["id"])
+            return
+
+        # Re-fetch live vehicle position from the TfNSW API
+        try:
+            pos = await get_vehicle_position(
+                session["from_id"],
+                session["to_id"],
+                session["scheduled_dep"],
+            )
+        except Exception:
+            return  # API unavailable — skip silently
+
+        if pos is None:
+            return
+
+        alert_stop_name = session["alert_stop_name"]
+        stored_alert_idx = session["alert_stop_idx"]
+
+        # Locate alert stop in the fresh stop sequence
+        fresh_stop_seq = pos.get("stop_sequence", [])
+        fresh_alert_idx: int | None = None
+        for i, s in enumerate(fresh_stop_seq):
+            if s["name"] == alert_stop_name or alert_stop_name in s["name"]:
+                fresh_alert_idx = i
+                break
+        effective_alert_idx = fresh_alert_idx if fresh_alert_idx is not None else stored_alert_idx
+
+        current_idx = pos.get("current_idx")
+
+        # Deactivate once the vehicle has passed the alert stop
+        if current_idx is not None and current_idx >= effective_alert_idx:
+            if not session["notified"]:
+                await self._send_tracking_alert(session, pos, alert_stop_name, passed=True)
+            await asyncio.to_thread(db_deactivate_tracking, session["id"])
+            return
+
+        # Determine if vehicle is "approaching" (1 stop before, or within 5 min of alert stop)
+        approaching = current_idx is not None and current_idx >= effective_alert_idx - 1
+
+        if not approaching and fresh_alert_idx is not None and fresh_alert_idx < len(fresh_stop_seq):
+            dep = fresh_stop_seq[fresh_alert_idx].get("departure")
+            approaching = (
+                dep is not None
+                and 0 <= (dep.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 60 <= 5
+            )
+
+        if approaching and not session["notified"]:
+            await self._send_tracking_alert(session, pos, alert_stop_name, passed=False)
+            await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+
+    async def _send_tracking_alert(self, session, pos, alert_stop_name, *, passed: bool):
+        """DM or mention user about their tracked vehicle approaching/passing the alert stop."""
+        route = session["route"]
+        destination = session["destination"]
+        current_stop = pos.get("current_stop") or "Unknown"
+        next_stop = pos.get("next_stop") or alert_stop_name
+        final_stop = pos.get("final_stop") or destination
+
+        if passed:
+            title = f"🚂 Train arrived at {alert_stop_name}"
+            desc = (
+                f"Your train (**{route}** → {destination}) has arrived at or "
+                f"passed **{alert_stop_name}**."
+            )
+        else:
+            title = f"🔔 Approaching {alert_stop_name}"
+            desc = (
+                f"Your train (**{route}** → {destination}) is approaching "
+                f"**{alert_stop_name}** — get ready!"
+            )
+
+        embed = discord.Embed(title=title, description=desc, color=0xF15A22)
+        embed.add_field(name="📍 Last seen at", value=current_stop, inline=True)
+        embed.add_field(name="➡️ Next stop", value=next_stop, inline=True)
+        embed.add_field(name="🏁 Going to", value=final_stop, inline=True)
+        embed.set_footer(text="Transport for NSW · Live tracking")
+
+        discord_id = session["discord_id"]
+        channel_id = session.get("channel_id")
+
+        sent = False
+        try:
+            user = await self.fetch_user(int(discord_id))
+            await user.send(embed=embed)
+            sent = True
+        except Exception:
+            pass
+
+        if not sent and channel_id:
+            try:
+                channel = self.get_channel(int(channel_id))
+                if channel is None:
+                    channel = await self.fetch_channel(int(channel_id))
+                await channel.send(content=f"<@{discord_id}>", embed=embed)
+            except Exception:
+                pass
+
 bot = BalanceBot()
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
@@ -367,7 +501,10 @@ async def cmd_help(interaction: discord.Interaction):
         embed.add_field(name="\u200b", value="**Saving & managing**", inline=False)
         embed.add_field(name="⭐ Save buttons", value="After any trip result — select option then press Save", inline=True)
         embed.add_field(name="🔔 Remind me buttons", value="On any departure board or trip detail — get a DM before it leaves", inline=True)
+        embed.add_field(name="🚂 Track this train", value="On trip detail — pick a stop to be alerted when train approaches", inline=True)
         embed.add_field(name="🗑️ /transport delete-trip / delete-stop", value="Remove a saved route or stop by ID", inline=True)
+        embed.add_field(name="📡 /transport track-status", value="List active vehicle tracking sessions", inline=True)
+        embed.add_field(name="🛑 /transport stop-tracking", value="Cancel an active tracking session by ID", inline=True)
     embed.set_footer(text=f"Dashboard: {APP_URL}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
