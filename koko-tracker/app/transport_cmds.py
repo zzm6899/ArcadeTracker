@@ -1753,6 +1753,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 # stop sequence so we can distinguish "on route (not there yet)"
                 # from "service may have already passed the alert stop".
                 alert_dep: datetime | None = None
+                last_dep: datetime | None = None
                 try:
                     stored_seq = json.loads(s.get("stop_sequence") or "[]")
                     alert_name = (s.get("alert_stop_name") or "").lower()
@@ -1764,12 +1765,20 @@ def register_transport_commands(tree: app_commands.CommandTree):
                                 if alert_dep.tzinfo is None:
                                     alert_dep = alert_dep.replace(tzinfo=timezone.utc)
                             break
+                    if stored_seq:
+                        raw_last = stored_seq[-1].get("departure")
+                        if raw_last:
+                            last_dep = datetime.fromisoformat(raw_last)
+                            if last_dep.tzinfo is None:
+                                last_dep = last_dep.replace(tzinfo=timezone.utc)
                 except Exception:
                     pass
 
                 now = datetime.now(timezone.utc)
                 if s['notified']:
                     status = "✅ Alerted"
+                elif last_dep is not None and now > last_dep:
+                    status = "🏁 Service has finished its route"
                 elif alert_dep is not None and now > alert_dep:
                     status = "⚠️ Service may have passed"
                 elif now > sched:
