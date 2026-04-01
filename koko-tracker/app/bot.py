@@ -373,15 +373,34 @@ class BalanceBot(discord.Client):
             return  # API unavailable — skip silently
 
         if pos is None:
-            # If the scheduled departure is in the past the service has likely
-            # departed — notify the user (if not yet done) then deactivate so it
-            # stops showing as "⏳ Waiting". Use a small 2-min grace period to
-            # account for clock skew / slightly early departures.
+            # API returned nothing — the service may have already passed.
+            # Use the alert stop's own scheduled departure time (from the stored
+            # stop_sequence) as the trigger, falling back to the trip departure.
+            # Fire immediately once that time has passed (no grace period needed —
+            # if the API can't find the trip it's already gone).
             try:
-                sched = datetime.fromisoformat(session["scheduled_dep"])
-                if sched.tzinfo is None:
-                    sched = sched.replace(tzinfo=timezone.utc)
-                if datetime.now(timezone.utc) - sched > timedelta(minutes=2):
+                alert_dep: datetime | None = None
+                try:
+                    stored_seq = json.loads(session.get("stop_sequence") or "[]")
+                    alert_name = session["alert_stop_name"].lower()
+                    for s in stored_seq:
+                        if alert_name in (s.get("name") or "").lower():
+                            raw = s.get("departure")
+                            if raw:
+                                alert_dep = datetime.fromisoformat(raw)
+                                if alert_dep.tzinfo is None:
+                                    alert_dep = alert_dep.replace(tzinfo=timezone.utc)
+                            break
+                except Exception:
+                    pass
+
+                if alert_dep is None:
+                    # Fallback: use the trip departure time
+                    alert_dep = datetime.fromisoformat(session["scheduled_dep"])
+                    if alert_dep.tzinfo is None:
+                        alert_dep = alert_dep.replace(tzinfo=timezone.utc)
+
+                if datetime.now(timezone.utc) >= alert_dep:
                     if not session["notified"]:
                         await self._send_tracking_expired(session)
                     await asyncio.to_thread(db_deactivate_tracking, session["id"])
@@ -444,13 +463,15 @@ class BalanceBot(discord.Client):
             return
 
         # ── Alert stop: approaching check ────────────────────────────────────────
+        # Trigger if we're one stop away (index) OR within 10 minutes by schedule.
+        # 10 min (up from 5) covers short-gap routes where stops are <2 min apart.
         approaching = current_idx is not None and current_idx >= effective_alert_idx - 1
 
         if not approaching and fresh_alert_idx is not None and fresh_alert_idx < len(fresh_stop_seq):
             dep = fresh_stop_seq[fresh_alert_idx].get("departure")
             approaching = (
                 dep is not None
-                and 0 <= (dep.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 60 <= 5
+                and 0 <= (dep.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 60 <= 10
             )
 
         if approaching and session["notified"] == 0:
