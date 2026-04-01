@@ -47,6 +47,9 @@ BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN', '')
 GUILD_ID  = os.environ.get('DISCORD_GUILD_ID', '')
 APP_URL   = os.environ.get('APP_URL', 'http://localhost:5055')
 
+# Delays within this many minutes of scheduled are considered "on time"
+_ON_TIME_THRESHOLD_MINS = 1
+
 if not BOT_TOKEN:
     print("[Bot] No DISCORD_BOT_TOKEN set — bot disabled.")
     sys.exit(0)
@@ -438,6 +441,35 @@ class BalanceBot(discord.Client):
                 break
         effective_alert_idx = fresh_alert_idx if fresh_alert_idx is not None else stored_alert_idx
 
+        # ── Real-time delay for the alert stop ──────────────────────────────────
+        # Compare the fresh (real-time) departure of the alert stop against the
+        # originally stored scheduled departure so we can surface delay info.
+        alert_stop_delay: int | None = None
+        alert_stop_realtime: bool = False
+        check_idx = fresh_alert_idx if fresh_alert_idx is not None else (
+            stored_alert_idx if stored_alert_idx < len(fresh_stop_seq) else None
+        )
+        if check_idx is not None:
+            fresh_alert_stop = fresh_stop_seq[check_idx]
+            alert_stop_realtime = fresh_alert_stop.get("is_realtime", False)
+            fresh_dep = fresh_alert_stop.get("departure")
+            if fresh_dep and alert_stop_realtime:
+                try:
+                    stored_seq = json.loads(session.get("stop_sequence") or "[]")
+                    for s in stored_seq:
+                        if alert_lower in (s.get("name") or "").lower():
+                            raw = s.get("departure")
+                            if raw:
+                                sched_dep = datetime.fromisoformat(raw)
+                                if sched_dep.tzinfo is None:
+                                    sched_dep = sched_dep.replace(tzinfo=timezone.utc)
+                                alert_stop_delay = int(
+                                    (fresh_dep.astimezone(timezone.utc) - sched_dep).total_seconds() / 60
+                                )
+                            break
+                except Exception:
+                    pass
+
         current_idx = pos.get("current_idx")
 
         # ── Terminus safety net ──────────────────────────────────────────────────
@@ -445,7 +477,10 @@ class BalanceBot(discord.Client):
         # ended.  Send whichever alerts haven't fired yet, then deactivate.
         if current_idx is not None and fresh_stop_seq and current_idx >= len(fresh_stop_seq) - 1:
             if session["notified"] == 0:
-                await self._send_tracking_alert(session, pos, alert_stop_name, passed=True)
+                await self._send_tracking_alert(
+                    session, pos, alert_stop_name, passed=True,
+                    delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
+                )
                 await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
             if session["notified"] < 2:
                 await self._send_dest_arrival_alert(session, pos)
@@ -468,7 +503,10 @@ class BalanceBot(discord.Client):
         # if it was never sent (train skipped the loop iteration at that stop).
         if dest_idx is not None and current_idx is not None and current_idx >= dest_idx:
             if session["notified"] == 0:
-                await self._send_tracking_alert(session, pos, alert_stop_name, passed=True)
+                await self._send_tracking_alert(
+                    session, pos, alert_stop_name, passed=True,
+                    delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
+                )
                 await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
             if session["notified"] < 2:
                 await self._send_dest_arrival_alert(session, pos)
@@ -480,7 +518,10 @@ class BalanceBot(discord.Client):
         # done) but keep the session alive so we still watch for the destination.
         if current_idx is not None and current_idx >= effective_alert_idx:
             if session["notified"] == 0:
-                await self._send_tracking_alert(session, pos, alert_stop_name, passed=True)
+                await self._send_tracking_alert(
+                    session, pos, alert_stop_name, passed=True,
+                    delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
+                )
                 await asyncio.to_thread(db_mark_tracking_alerted, session["id"])  # → notified=1
             # Do NOT deactivate here — wait for destination arrival check above
             return
@@ -506,10 +547,22 @@ class BalanceBot(discord.Client):
             )
 
         if approaching and session["notified"] == 0:
-            await self._send_tracking_alert(session, pos, alert_stop_name, passed=False)
+            await self._send_tracking_alert(
+                session, pos, alert_stop_name, passed=False,
+                delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
+            )
             await asyncio.to_thread(db_mark_tracking_alerted, session["id"])  # → notified=1
 
-    async def _send_tracking_alert(self, session, pos, alert_stop_name, *, passed: bool):
+    async def _send_tracking_alert(
+        self,
+        session,
+        pos,
+        alert_stop_name,
+        *,
+        passed: bool,
+        delay_mins: int | None = None,
+        is_realtime: bool = False,
+    ):
         """DM or mention user about their tracked vehicle approaching/passing the alert stop."""
         route = session["route"]
         destination = session["destination"]
@@ -530,10 +583,24 @@ class BalanceBot(discord.Client):
                 f"**{alert_stop_name}** — get ready!"
             )
 
+        # Build a real-time status string for the alert stop
+        if is_realtime and delay_mins is not None:
+            if delay_mins > _ON_TIME_THRESHOLD_MINS:
+                rt_status = f"🔴 {delay_mins} min late"
+            elif delay_mins < -_ON_TIME_THRESHOLD_MINS:
+                rt_status = f"🟢 {abs(delay_mins)} min early"
+            else:
+                rt_status = "🟢 On time"
+        elif is_realtime:
+            rt_status = "🟢 On time"
+        else:
+            rt_status = "📅 Scheduled (no live data)"
+
         embed = discord.Embed(title=title, description=desc, color=0xF15A22)
         embed.add_field(name="📍 Last seen at", value=current_stop, inline=True)
         embed.add_field(name="➡️ Next stop", value=next_stop, inline=True)
         embed.add_field(name="🏁 Going to", value=final_stop, inline=True)
+        embed.add_field(name="🕐 Real-time status", value=rt_status, inline=False)
         embed.set_footer(text="Transport for NSW · Live tracking")
 
         discord_id = session["discord_id"]
