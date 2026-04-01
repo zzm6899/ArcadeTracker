@@ -333,11 +333,11 @@ def _err_embed(msg: str) -> discord.Embed:
 
 
 def _valid_transit_legs(trip: dict) -> list[tuple[int, dict]]:
-    """Return transit legs that have enough stop-sequence data for tracking (≥2 stops)."""
+    """Return transit legs that have at least 1 stop in their stop-sequence data."""
     return [
         (i, l)
         for i, l in enumerate(trip.get("legs", []))
-        if l.get("mode") != "walk" and len(l.get("stop_sequence", [])) >= 2
+        if l.get("mode") != "walk" and len(l.get("stop_sequence", [])) >= 1
     ]
 
 
@@ -1602,7 +1602,7 @@ def register_transport_commands(tree: app_commands.CommandTree):
             else:
                 await interaction.followup.send(
                     embed=_err_embed(
-                        "Not enough real-time stop data to set up tracking.\n"
+                        "No real-time stop data available to set up tracking.\n"
                         "Try again when the trip shows a 🔴 real-time indicator."
                     ),
                     ephemeral=True,
@@ -2399,7 +2399,7 @@ class _TripSelectorView(discord.ui.View):
                 )
             else:
                 await interaction.response.send_message(
-                    "Not enough real-time stop data to set up tracking. "
+                    "No real-time stop data available to set up tracking. "
                     "Try again on a live trip (🔴 indicator).",
                     ephemeral=True,
                 )
@@ -2550,7 +2550,7 @@ class _TrackDepartureView(discord.ui.View):
                 else:
                     await interaction.followup.send(
                         embed=_err_embed(
-                            "Not enough real-time stop data to track this service.\n"
+                            "No real-time stop data available to track this service.\n"
                             "Try again on a live trip (🔴 indicator)."
                         ),
                         ephemeral=True,
@@ -2658,15 +2658,19 @@ class _TrackVehicleView(discord.ui.View):
         self._extra_legs = valid_legs[1:]
         stop_seq = self._leg.get("stop_sequence", [])
 
-        # Build stop selector (skip first stop — that's where the user boards)
+        # Build stop selector.
+        # Normally skip first stop (that's where the user boards).
+        # When there is only 1 stop in the sequence, include it as the sole alert stop.
         options: list[discord.SelectOption] = []
         for i, s in enumerate(stop_seq):
-            if i == 0:
+            if i == 0 and len(stop_seq) > 1:
                 continue
             dep = s.get("departure")
             desc = f"Stop {i + 1}/{len(stop_seq)}"
             if dep:
                 desc += f" · {_fmt_time(dep)}"
+            if len(stop_seq) == 1:
+                desc += " (only stop)"
             options.append(
                 discord.SelectOption(
                     label=s["name"][:100],
