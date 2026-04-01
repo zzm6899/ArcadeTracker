@@ -481,15 +481,18 @@ async def _pick_stop(
     view = discord.ui.View(timeout=30)
     view.add_item(select)
 
-    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    picker_msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     await view.wait()
 
     if not chosen:
-        # Timeout — edit the picker message rather than sending another followup
-        await interaction.followup.send(
-            embed=_err_embed(f"Selection timed out for **{role}** stop."),
-            ephemeral=True,
-        )
+        # Timeout — disable the dropdown and update the picker message
+        for item in view.children:
+            item.disabled = True
+        timeout_embed = _err_embed(f"Selection timed out for **{role}** stop.")
+        try:
+            await picker_msg.edit(embed=timeout_embed, view=view)
+        except Exception:
+            pass
         return None
     return chosen[0]
 
@@ -1540,6 +1543,7 @@ class _SaveStopView(discord.ui.View):
             view=view,
             ephemeral=True,
         )
+        view.interaction = interaction
 
     async def _on_remind(self, interaction: discord.Interaction):
         if interaction.user.id != self.discord_id:
@@ -2076,6 +2080,8 @@ class _TrackDepartureView(discord.ui.View):
         self.deps = deps
         self.channel_id = str(channel_id) if channel_id else None
         self.guild_id = str(guild_id) if guild_id else None
+        # Set by the caller after sending so on_timeout can disable the dropdown
+        self.interaction: discord.Interaction | None = None
 
         options = []
         for i, dep in enumerate(deps[:25]):
@@ -2211,6 +2217,11 @@ class _TrackDepartureView(discord.ui.View):
         """Disable the dropdown so any lingering interaction doesn't fire."""
         for item in self.children:
             item.disabled = True
+        if self.interaction:
+            try:
+                await self.interaction.edit_original_response(view=self)
+            except Exception:
+                pass
 
 
 # ─── Vehicle Tracking View ─────────────────────────────────────────────────────
@@ -2242,6 +2253,9 @@ class _TrackVehicleView(discord.ui.View):
         self.to_stop = to_stop
         self.channel_id = str(channel_id) if channel_id else None
         self.guild_id = str(guild_id) if guild_id else None
+        # Set by caller after sending so on_timeout can disable the dropdown
+        self.message = None
+        self.interaction: discord.Interaction | None = None
 
         # Find first transit leg
         transit_legs = [(i, l) for i, l in enumerate(trip.get("legs", [])) if l.get("mode") != "walk"]
@@ -2342,3 +2356,13 @@ class _TrackVehicleView(discord.ui.View):
         """Disable the dropdown when the selection window expires."""
         for item in self.children:
             item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except Exception:
+                pass
+        elif self.interaction:
+            try:
+                await self.interaction.edit_original_response(view=self)
+            except Exception:
+                pass
