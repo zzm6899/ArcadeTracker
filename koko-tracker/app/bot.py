@@ -283,7 +283,6 @@ class BalanceBot(discord.Client):
             return
         for row in due:
             try:
-                user = await self.fetch_user(int(row["discord_id"]))
                 embed = discord.Embed(
                     title="🔔 Reminder",
                     description=row["message"],
@@ -291,22 +290,24 @@ class BalanceBot(discord.Client):
                 )
                 embed.set_footer(text="This reminder was set by you via the bot.")
                 sent = False
-                # Try DM first
-                try:
-                    await user.send(embed=embed)
-                    sent = True
-                except discord.Forbidden:
-                    pass
-                # Fallback: mention in original channel
-                if not sent and row["channel_id"]:
+                # Try channel first (where the reminder was set)
+                if row["channel_id"]:
                     try:
                         channel = self.get_channel(int(row["channel_id"]))
                         if channel is None:
                             channel = await self.fetch_channel(int(row["channel_id"]))
                         await channel.send(content=f"<@{row['discord_id']}>", embed=embed)
                         sent = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[Bot] reminder channel send failed (reminder #{row['id']}): {e}")
+                # Fallback: DM the user
+                if not sent:
+                    try:
+                        user = await self.fetch_user(int(row["discord_id"]))
+                        await user.send(embed=embed)
+                        sent = True
+                    except Exception as e:
+                        print(f"[Bot] reminder DM failed (reminder #{row['id']}): {e}")
                 if sent:
                     await asyncio.to_thread(db_mark_delivered, row["id"])
                     print(f"[Bot] Delivered reminder #{row['id']} to user {row['discord_id']}")
