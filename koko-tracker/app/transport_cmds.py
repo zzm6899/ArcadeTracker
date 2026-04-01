@@ -332,6 +332,31 @@ def _err_embed(msg: str) -> discord.Embed:
     return discord.Embed(description=f"❌ {msg}", color=ERROR_COLOR)
 
 
+def _valid_transit_legs(trip: dict) -> list[tuple[int, dict]]:
+    """Return transit legs that have enough stop-sequence data for tracking (≥2 stops)."""
+    return [
+        (i, l)
+        for i, l in enumerate(trip.get("legs", []))
+        if l.get("mode") != "walk" and len(l.get("stop_sequence", [])) >= 2
+    ]
+
+
+def _auto_alert_stop_idx(stop_seq: list[dict], dest_name: str) -> int:
+    """Return the index of the best alert stop for dest_name in stop_seq.
+
+    Picks the first stop whose name contains (or is contained by) dest_name;
+    falls back to the last stop in the sequence.
+    """
+    idx = len(stop_seq) - 1
+    dest_lower = dest_name.lower()
+    for i, s in enumerate(stop_seq):
+        s_lower = s["name"].lower()
+        if dest_lower in s_lower or s_lower in dest_lower:
+            idx = i
+            break
+    return idx
+
+
 def _alert_keywords(from_stop: dict, to_stop: dict, trips: list[dict] | None = None) -> list[str]:
     """
     Build the keyword list used to filter service alerts to only those relevant
@@ -1565,92 +1590,128 @@ def register_transport_commands(tree: app_commands.CommandTree):
 
         # Auto-select the first (soonest) trip
         trip = trips[0]
-        transit_legs = [
-            (i, l) for i, l in enumerate(trip.get("legs", []))
-            if l.get("mode") != "walk"
-        ]
-        if not transit_legs:
-            await interaction.followup.send(
-                embed=_err_embed("No trackable legs found in the first trip option."),
-                ephemeral=True,
-            )
+        valid_legs = _valid_transit_legs(trip)
+        if not valid_legs:
+            # Check if any transit legs exist at all
+            any_transit = any(l.get("mode") != "walk" for l in trip.get("legs", []))
+            if not any_transit:
+                await interaction.followup.send(
+                    embed=_err_embed("No trackable legs found in the first trip option."),
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    embed=_err_embed(
+                        "Not enough real-time stop data to set up tracking.\n"
+                        "Try again when the trip shows a 🔴 real-time indicator."
+                    ),
+                    ephemeral=True,
+                )
             return
 
-        _, leg = transit_legs[0]
-        stop_seq = leg.get("stop_sequence", [])
-        if len(stop_seq) < 2:
-            await interaction.followup.send(
-                embed=_err_embed(
-                    "Not enough real-time stop data to set up tracking.\n"
-                    "Try again when the trip shows a 🔴 real-time indicator."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        # Auto-set the alert stop to the user's destination (to_stop).
-        # Find the best matching stop in the sequence; fall back to last stop.
-        dest_name = to_result["short_name"]
-        alert_stop_idx = len(stop_seq) - 1
-        for i, s in enumerate(stop_seq):
-            s_lower = s["name"].lower()
-            if dest_name.lower() in s_lower or s_lower in dest_name.lower():
-                alert_stop_idx = i
-                break
-        alert_stop_name = stop_seq[alert_stop_idx]["name"]
-
-        planned_dep = leg.get("departs")
-        scheduled_dep = planned_dep.isoformat() if planned_dep else ""
-
-        stop_seq_json = json.dumps([
-            {
-                "name": s["name"],
-                "departure": s["departure"].isoformat() if s.get("departure") else None,
-            }
-            for s in stop_seq
-        ])
-
-        tracking_id = await asyncio.to_thread(
-            db_save_tracking,
-            str(interaction.user.id),
-            str(interaction.channel_id) if interaction.channel_id else None,
-            str(interaction.guild_id) if interaction.guild_id else None,
-            leg.get("vehicle_id", ""),
-            leg.get("route", "?"),
-            leg.get("destination", "?"),
-            from_result["id"],
-            to_result["id"],
-            from_result["short_name"],
-            to_result["short_name"],
-            alert_stop_name,
-            alert_stop_idx,
-            stop_seq_json,
-            scheduled_dep,
-        )
-
-        dep_str = _fmt_time(planned_dep) if planned_dep else "?"
+        dep_str = _fmt_time(trip["departs"]) if trip.get("departs") else "?"
         arr_str = _fmt_time(trip["arrives"]) if trip.get("arrives") else "?"
-        route = leg.get("route", "?")
-        dest = leg.get("destination", "?")
-        icon = leg.get("icon", "🚆")
         time_label = _fmt_at_time(at_time)
+
+        tracking_ids: list[int] = []
+        leg_summaries: list[str] = []
+        leg_alert_names: list[str] = []
+        skipped_legs: int = 0
+
+        for leg_i, (_, leg) in enumerate(valid_legs):
+            stop_seq = leg.get("stop_sequence", [])
+            dest_name = to_result["short_name"]
+            alert_stop_idx = _auto_alert_stop_idx(stop_seq, dest_name)
+            alert_stop_name = stop_seq[alert_stop_idx]["name"]
+
+            planned_dep = leg.get("departs")
+            scheduled_dep = planned_dep.isoformat() if planned_dep else ""
+
+            stop_seq_json = json.dumps([
+                {
+                    "name": s["name"],
+                    "departure": s["departure"].isoformat() if s.get("departure") else None,
+                }
+                for s in stop_seq
+            ])
+
+            # Use the leg's own boarding stop ID for subsequent legs so
+            # get_vehicle_position can re-plan from the correct origin.
+            if leg_i == 0:
+                leg_from_id = from_result["id"]
+                leg_from_name = from_result["short_name"]
+            else:
+                leg_from_id = leg.get("from_id", "")
+                leg_from_name = leg.get("from", from_result["short_name"])
+                if not leg_from_id:
+                    skipped_legs += 1
+                    continue  # skip if no stop ID available for this leg
+
+            tid = await asyncio.to_thread(
+                db_save_tracking,
+                str(interaction.user.id),
+                str(interaction.channel_id) if interaction.channel_id else None,
+                str(interaction.guild_id) if interaction.guild_id else None,
+                leg.get("vehicle_id", ""),
+                leg.get("route", "?"),
+                leg.get("destination", "?"),
+                leg_from_id,
+                to_result["id"],
+                leg_from_name,
+                to_result["short_name"],
+                alert_stop_name,
+                alert_stop_idx,
+                stop_seq_json,
+                scheduled_dep,
+            )
+            tracking_ids.append(tid)
+            leg_alert_names.append(alert_stop_name)
+
+            icon = leg.get("icon", "🚆")
+            route = leg.get("route", "?")
+            dest = leg.get("destination", "?")
+            leg_summaries.append(f"{icon} **{route}** → {dest} · alert at **{alert_stop_name}**")
+
+        if not tracking_ids:
+            await interaction.followup.send(
+                embed=_err_embed("Could not create tracking sessions — missing stop data."),
+                ephemeral=True,
+            )
+            return
+
+        first_leg = valid_legs[0][1]
+        icon = first_leg.get("icon", "🚆")
+        route = first_leg.get("route", "?")
+        dest = first_leg.get("destination", "?")
+        planned_dep = first_leg.get("departs")
+        dep_str_leg = _fmt_time(planned_dep) if planned_dep else dep_str
+        first_alert = leg_alert_names[0] if leg_alert_names else "?"
+
+        if len(tracking_ids) == 1:
+            description = (
+                f"Tracking **{icon} {route}** → {dest}.\n\n"
+                f"You'll get an alert as the service approaches **{first_alert}** "
+                f"and again when it arrives."
+            )
+        else:
+            description = "\n".join(f"• {s}" for s in leg_summaries)
+            if skipped_legs:
+                description += f"\n\n⚠️ {skipped_legs} leg(s) could not be tracked (no stop ID)."
 
         embed = discord.Embed(
             title=f"✅ Tracking started{time_label}",
-            description=(
-                f"Tracking **{icon} {route}** → {dest}.\n\n"
-                f"You'll get an alert as the service approaches **{alert_stop_name}** "
-                f"and again when it arrives."
-            ),
+            description=description,
             color=TRAIN_COLOR,
         )
         embed.add_field(name="🚉 From", value=from_result["short_name"], inline=True)
         embed.add_field(name="🏁 To", value=to_result["short_name"], inline=True)
-        embed.add_field(name="🕐 Departs", value=dep_str, inline=True)
+        embed.add_field(name="🕐 Departs", value=dep_str_leg, inline=True)
         embed.add_field(name="🕑 Arrives", value=arr_str, inline=True)
-        embed.add_field(name="📍 Alert stop", value=alert_stop_name, inline=True)
+        if len(tracking_ids) == 1:
+            embed.add_field(name="📍 Alert stop", value=first_alert, inline=True)
+        id_str = ", ".join(f"#{t}" for t in tracking_ids)
         embed.set_footer(
-            text=f"Tracking ID: #{tracking_id} · /transport stop-tracking {tracking_id} to cancel"
+            text=f"Tracking ID(s): {id_str} · /transport stop-tracking <id> to cancel"
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -2329,28 +2390,32 @@ class _TripSelectorView(discord.ui.View):
             return
 
         trip = self.trips[self.selected_index]
-        transit_legs = [(i, l) for i, l in enumerate(trip.get("legs", [])) if l.get("mode") != "walk"]
-        if not transit_legs:
-            await interaction.response.send_message(
-                "No trackable legs found in this trip.", ephemeral=True
-            )
+        valid_legs = _valid_transit_legs(trip)
+        if not valid_legs:
+            any_transit = any(l.get("mode") != "walk" for l in trip.get("legs", []))
+            if not any_transit:
+                await interaction.response.send_message(
+                    "No trackable legs found in this trip.", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(
+                    "Not enough real-time stop data to set up tracking. "
+                    "Try again on a live trip (🔴 indicator).",
+                    ephemeral=True,
+                )
             return
 
-        _, leg = transit_legs[0]
-        stop_seq = leg.get("stop_sequence", [])
-        if len(stop_seq) < 2:
-            await interaction.response.send_message(
-                "Not enough real-time stop data to set up tracking. "
-                "Try again on a live trip (🔴 indicator).",
-                ephemeral=True,
-            )
-            return
-
+        _, leg = valid_legs[0]
         route = leg.get("route", "?")
         dest = leg.get("destination", "?")
         icon = leg.get("icon", "🚆")
         vid = leg.get("vehicle_id", "")
         vid_str = (f"`{vid[:_VID_MAX_LEN]}{'…' if len(vid) > _VID_MAX_LEN else ''}`") if vid else "*not available*"
+
+        extra_count = len(valid_legs) - 1
+        footer = "Select an alert stop from the dropdown below"
+        if extra_count > 0:
+            footer += f" · {extra_count} further leg(s) will be tracked automatically"
 
         embed = discord.Embed(
             title=f"🚂 Track {icon} {route} → {dest}",
@@ -2362,7 +2427,7 @@ class _TripSelectorView(discord.ui.View):
         )
         embed.add_field(name="🆔 Service ID", value=vid_str, inline=True)
         embed.add_field(name="🚉 Route", value=f"{icon} **{route}** → {dest}", inline=True)
-        embed.set_footer(text="Select an alert stop from the dropdown below")
+        embed.set_footer(text=footer)
 
         view = _TrackVehicleView(
             discord_id=interaction.user.id,
@@ -2474,33 +2539,28 @@ class _TrackDepartureView(discord.ui.View):
                         best_diff = diff
                         best_trip = trip
 
-            transit_legs = [
-                (i, l)
-                for i, l in enumerate(best_trip.get("legs", []))
-                if l.get("mode") != "walk"
-            ]
-            if not transit_legs:
-                await interaction.followup.send(
-                    embed=_err_embed("No trackable legs found for this service."),
-                    ephemeral=True,
-                )
-                return
-
-            _, leg = transit_legs[0]
-            stop_seq = leg.get("stop_sequence", [])
-            if len(stop_seq) < 2:
-                await interaction.followup.send(
-                    embed=_err_embed(
-                        "Not enough real-time stop data to track this service.\n"
-                        "Try again on a live trip (🔴 indicator)."
-                    ),
-                    ephemeral=True,
-                )
+            valid_legs = _valid_transit_legs(best_trip)
+            if not valid_legs:
+                any_transit = any(l.get("mode") != "walk" for l in best_trip.get("legs", []))
+                if not any_transit:
+                    await interaction.followup.send(
+                        embed=_err_embed("No trackable legs found for this service."),
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.followup.send(
+                        embed=_err_embed(
+                            "Not enough real-time stop data to track this service.\n"
+                            "Try again on a live trip (🔴 indicator)."
+                        ),
+                        ephemeral=True,
+                    )
                 return
 
             from_stop_dict = {"id": self.stop_id, "short_name": self.stop_name}
             to_stop_dict = {"id": dest_stop["id"], "short_name": dest_stop["short_name"]}
 
+            _, leg = valid_legs[0]
             route = leg.get("route", "?")
             dest = leg.get("destination", "?")
             icon = leg.get("icon", "🚆")
@@ -2509,6 +2569,11 @@ class _TrackDepartureView(discord.ui.View):
                 f"`{vid[:_VID_MAX_LEN]}{'…' if len(vid) > _VID_MAX_LEN else ''}`"
                 if vid else "*not available*"
             )
+
+            extra_count = len(valid_legs) - 1
+            footer = "Select an alert stop from the dropdown below"
+            if extra_count > 0:
+                footer += f" · {extra_count} further leg(s) will be tracked automatically"
 
             embed = discord.Embed(
                 title=f"🚂 Track {icon} {route} → {dest}",
@@ -2520,7 +2585,7 @@ class _TrackDepartureView(discord.ui.View):
             )
             embed.add_field(name="🆔 Service ID", value=vid_str, inline=True)
             embed.add_field(name="🚉 Route", value=f"{icon} **{route}** → {dest}", inline=True)
-            embed.set_footer(text="Select an alert stop from the dropdown below")
+            embed.set_footer(text=footer)
 
             view = _TrackVehicleView(
                 discord_id=interaction.user.id,
@@ -2582,12 +2647,15 @@ class _TrackVehicleView(discord.ui.View):
         # Set by caller after sending so on_timeout can disable the dropdown
         self.message = None
         self.interaction: discord.Interaction | None = None
+        self._extra_legs: list[tuple[int, dict]] = []
 
-        # Find first transit leg
-        transit_legs = [(i, l) for i, l in enumerate(trip.get("legs", [])) if l.get("mode") != "walk"]
-        if not transit_legs:
+        # Find first valid transit leg (with enough stop data for tracking)
+        valid_legs = _valid_transit_legs(trip)
+        if not valid_legs:
             return
-        self._leg_idx, self._leg = transit_legs[0]
+        self._leg_idx, self._leg = valid_legs[0]
+        # Remaining valid legs will be auto-tracked when the user picks their alert stop
+        self._extra_legs = valid_legs[1:]
         stop_seq = self._leg.get("stop_sequence", [])
 
         # Build stop selector (skip first stop — that's where the user boards)
@@ -2656,23 +2724,77 @@ class _TrackVehicleView(discord.ui.View):
             scheduled_dep,
         )
 
+        # Auto-create tracking entries for any remaining valid legs
+        extra_ids: list[int] = []
+        dest_name = self.to_stop.get("short_name", "")
+        for _, extra_leg in self._extra_legs:
+            extra_seq = extra_leg.get("stop_sequence", [])
+            extra_from_id = extra_leg.get("from_id", "")
+            if not extra_from_id or not extra_seq:
+                continue
+            extra_alert_idx = _auto_alert_stop_idx(extra_seq, dest_name)
+            extra_alert_name = extra_seq[extra_alert_idx]["name"]
+            extra_dep = extra_leg.get("departs")
+            extra_scheduled = extra_dep.isoformat() if extra_dep else ""
+            extra_seq_json = json.dumps([
+                {
+                    "name": s["name"],
+                    "departure": s["departure"].isoformat() if s.get("departure") else None,
+                }
+                for s in extra_seq
+            ])
+            tid = await asyncio.to_thread(
+                db_save_tracking,
+                str(interaction.user.id),
+                self.channel_id,
+                self.guild_id,
+                extra_leg.get("vehicle_id", ""),
+                extra_leg.get("route", "?"),
+                extra_leg.get("destination", "?"),
+                extra_from_id,
+                self.to_stop.get("id", ""),
+                extra_leg.get("from", self.from_stop.get("short_name", "")),
+                dest_name,
+                extra_alert_name,
+                extra_alert_idx,
+                extra_seq_json,
+                extra_scheduled,
+            )
+            extra_ids.append(tid)
+
         dep_time = _fmt_time(planned_dep) if planned_dep else "?"
         route = self._leg.get("route", "?")
         dest = self._leg.get("destination", "?")
         icon = self._leg.get("icon", "🚆")
 
+        description = (
+            f"Now tracking **{icon} {route}** → {dest}.\n\n"
+            f"You'll be alerted when the service is approaching **{alert_stop_name}**."
+        )
+        if extra_ids:
+            extra_legs_info = [
+                f"{l.get('icon','🚌')} **{l.get('route','?')}**"
+                for _, l in self._extra_legs
+                if l.get("from_id")
+            ]
+            if extra_legs_info:
+                description += (
+                    f"\n\nAlso auto-tracking {', '.join(extra_legs_info)} "
+                    f"for the remaining leg(s) of your journey."
+                )
+
+        all_ids = [tracking_id] + extra_ids
+        id_str = ", ".join(f"#{t}" for t in all_ids)
+
         embed = discord.Embed(
             title="✅ Tracking started!",
-            description=(
-                f"Now tracking **{icon} {route}** → {dest}.\n\n"
-                f"You'll be alerted when the service is approaching **{alert_stop_name}**."
-            ),
+            description=description,
             color=TRAIN_COLOR,
         )
         embed.add_field(name="📍 Alert stop", value=alert_stop_name, inline=True)
         embed.add_field(name="🕐 Service departs", value=dep_time, inline=True)
         embed.set_footer(
-            text=f"Tracking ID: #{tracking_id} · Use /transport stop-tracking {tracking_id} to cancel"
+            text=f"Tracking ID(s): {id_str} · Use /transport stop-tracking <id> to cancel"
         )
 
         await interaction.response.edit_message(embed=embed, view=None)

@@ -634,6 +634,7 @@ async def plan_trip(
                     "route": route_num,
                     "destination": dest,
                     "from": from_name,
+                    "from_id": leg.get("origin", {}).get("id", ""),
                     "to": to_name,
                     "platform_from": platform_from,
                     "platform_to": platform_to,
