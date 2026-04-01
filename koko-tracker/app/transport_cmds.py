@@ -892,21 +892,22 @@ def register_transport_commands(tree: app_commands.CommandTree):
         description='Natural-language trip planner: "rhodes to central" or "from central to parramatta"',
     )
     @app_commands.describe(
-        query='Trip query — include an optional time: "4pm rhodes to central", "rhodes to central at 16:00"'
+        query='Trip query — e.g. "rhodes to central", "t1 central to strathfield", "4pm rhodes to central"'
     )
     @app_commands.autocomplete(query=_stop_autocomplete)
     async def cmd_go(interaction: discord.Interaction, query: str):
         await interaction.response.defer(ephemeral=False)
 
-        # Extract optional departure time before parsing origin/destination
+        # Extract optional departure time and route prefix, then parse origin/destination
         cleaned_query, at_time = _parse_time_from_query(query)
+        cleaned_query, route_filter = _parse_route_from_query(cleaned_query)
         parsed = _parse_go_query(cleaned_query)
         if not parsed:
             await interaction.followup.send(
                 embed=_err_embed(
                     f'Could not parse **"{query}"**.\n'
-                    'Use the format `origin to destination`, e.g. `rhodes to central` '
-                    'or `4pm rhodes to central`.'
+                    'Use the format `origin to destination`, e.g. `rhodes to central`, '
+                    '`t1 central to strathfield`, or `4pm rhodes to central`.'
                 ),
                 ephemeral=True,
             )
@@ -927,16 +928,18 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 if not to_result:
                     return
 
-            trips = await plan_trip(from_result["id"], to_result["id"], limit=5, at_time=at_time)
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=10, at_time=at_time)
+            trips = _filter_trips_by_route(trips, route_filter)
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
 
         if not trips:
+            route_note = f" on **{route_filter}**" if route_filter else ""
             await interaction.followup.send(
                 embed=_err_embed(
                     f"No trips found from **{from_result['short_name']}** to **{to_result['short_name']}**"
-                    f"{_fmt_at_time(at_time)}.\n"
+                    f"{route_note}{_fmt_at_time(at_time)}.\n"
                     f"Resolved: `{from_result['name']}` → `{to_result['name']}`"
                 ),
                 ephemeral=True,
@@ -1507,21 +1510,22 @@ def register_transport_commands(tree: app_commands.CommandTree):
         description='Instantly track the next trip: "central to parramatta" or "4pm central to parramatta"',
     )
     @app_commands.describe(
-        query='Trip to track — include an optional time: "central to parramatta", "4pm rhodes to central"'
+        query='Trip to track — e.g. "central to parramatta", "t1 central to strathfield", "4pm rhodes to central"'
     )
     @app_commands.autocomplete(query=_stop_autocomplete)
     async def cmd_track(interaction: discord.Interaction, query: str):
         await interaction.response.defer(ephemeral=True)
 
-        # Extract optional time, then parse origin → destination
+        # Extract optional time and route prefix, then parse origin → destination
         cleaned_query, at_time = _parse_time_from_query(query)
+        cleaned_query, route_filter = _parse_route_from_query(cleaned_query)
         parsed = _parse_go_query(cleaned_query)
         if not parsed:
             await interaction.followup.send(
                 embed=_err_embed(
                     f'Could not parse **"{query}"**.\n'
-                    'Use the format `origin to destination`, e.g. `central to parramatta` '
-                    'or `4pm rhodes to central`.'
+                    'Use the format `origin to destination`, e.g. `central to parramatta`, '
+                    '`t1 central to strathfield`, or `4pm rhodes to central`.'
                 ),
                 ephemeral=True,
             )
@@ -1542,7 +1546,8 @@ def register_transport_commands(tree: app_commands.CommandTree):
                 if not to_result:
                     return
 
-            trips = await plan_trip(from_result["id"], to_result["id"], limit=5, at_time=at_time)
+            trips = await plan_trip(from_result["id"], to_result["id"], limit=10, at_time=at_time)
+            trips = _filter_trips_by_route(trips, route_filter)
         except Exception as e:
             await interaction.followup.send(embed=_err_embed(f"API error: {e}"), ephemeral=True)
             return
