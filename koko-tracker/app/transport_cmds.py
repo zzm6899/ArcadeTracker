@@ -257,7 +257,7 @@ def db_save_tracking(
 
 
 def db_get_active_trackings(discord_id=None):
-    """Return all active tracking rows. Pass discord_id to filter by user."""
+    """Return all active tracking rows as dicts. Pass discord_id to filter by user."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     if discord_id is not None:
@@ -270,7 +270,7 @@ def db_get_active_trackings(discord_id=None):
             "SELECT * FROM transport_tracking WHERE active=1 ORDER BY created_at ASC",
         ).fetchall()
     conn.close()
-    return rows
+    return [dict(row) for row in rows]
 
 
 def db_get_tracking(tracking_id, discord_id=None):
