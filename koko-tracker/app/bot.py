@@ -372,13 +372,15 @@ class BalanceBot(discord.Client):
 
         if pos is None:
             # If the scheduled departure is more than 30 minutes in the past the
-            # service has almost certainly completed — deactivate the session so it
-            # stops showing as "⏳ Waiting" in /transport track-status.
+            # service has almost certainly completed — notify the user (if not yet
+            # done) then deactivate the session so it stops showing as "⏳ Waiting".
             try:
                 sched = datetime.fromisoformat(session["scheduled_dep"])
                 if sched.tzinfo is None:
                     sched = sched.replace(tzinfo=timezone.utc)
                 if datetime.now(timezone.utc) - sched > timedelta(minutes=30):
+                    if not session["notified"]:
+                        await self._send_tracking_expired(session)
                     await asyncio.to_thread(db_deactivate_tracking, session["id"])
             except Exception:
                 pass
@@ -444,6 +446,43 @@ class BalanceBot(discord.Client):
         embed.add_field(name="📍 Last seen at", value=current_stop, inline=True)
         embed.add_field(name="➡️ Next stop", value=next_stop, inline=True)
         embed.add_field(name="🏁 Going to", value=final_stop, inline=True)
+        embed.set_footer(text="Transport for NSW · Live tracking")
+
+        discord_id = session["discord_id"]
+        channel_id = session.get("channel_id")
+
+        sent = False
+        try:
+            user = await self.fetch_user(int(discord_id))
+            await user.send(embed=embed)
+            sent = True
+        except Exception:
+            pass
+
+        if not sent and channel_id:
+            try:
+                channel = self.get_channel(int(channel_id))
+                if channel is None:
+                    channel = await self.fetch_channel(int(channel_id))
+                await channel.send(content=f"<@{discord_id}>", embed=embed)
+            except Exception:
+                pass
+
+    async def _send_tracking_expired(self, session):
+        """Notify user that tracking ended because live position data is no longer available."""
+        route = session["route"]
+        destination = session["destination"]
+        alert_stop_name = session["alert_stop_name"]
+
+        embed = discord.Embed(
+            title=f"⏰ Tracking ended — {alert_stop_name}",
+            description=(
+                f"Your tracked train (**{route}** → {destination}) can no longer be "
+                f"located in real-time.\n\n"
+                f"The service may have already **passed {alert_stop_name}** or has ended."
+            ),
+            color=0xF15A22,
+        )
         embed.set_footer(text="Transport for NSW · Live tracking")
 
         discord_id = session["discord_id"]
