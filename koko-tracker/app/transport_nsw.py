@@ -843,7 +843,7 @@ async def get_vehicle_position(from_id: str, to_id: str, scheduled_dep: str) -> 
     trips = await plan_trip(from_id, to_id, limit=10, at_time=target)
 
     best_trip = None
-    best_diff = timedelta(minutes=15)
+    best_diff = timedelta(minutes=60)
 
     for trip in trips:
         planned = trip.get("planned_departs")
