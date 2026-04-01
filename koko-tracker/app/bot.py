@@ -486,21 +486,22 @@ class BalanceBot(discord.Client):
         channel_id = session.get("channel_id")
 
         sent = False
-        try:
-            user = await self.fetch_user(int(discord_id))
-            await user.send(embed=embed)
-            sent = True
-        except Exception:
-            pass
-
-        if not sent and channel_id:
+        if channel_id:
             try:
                 channel = self.get_channel(int(channel_id))
                 if channel is None:
                     channel = await self.fetch_channel(int(channel_id))
                 await channel.send(content=f"<@{discord_id}>", embed=embed)
-            except Exception:
-                pass
+                sent = True
+            except Exception as e:
+                print(f"[Bot] tracking alert channel send failed (session #{session['id']}): {e}")
+
+        if not sent:
+            try:
+                user = await self.fetch_user(int(discord_id))
+                await user.send(embed=embed)
+            except Exception as e:
+                print(f"[Bot] tracking alert DM failed (session #{session['id']}): {e}")
 
     async def _send_tracking_expired(self, session):
         """Notify user that tracking ended because live position data is no longer available."""
@@ -523,21 +524,22 @@ class BalanceBot(discord.Client):
         channel_id = session.get("channel_id")
 
         sent = False
-        try:
-            user = await self.fetch_user(int(discord_id))
-            await user.send(embed=embed)
-            sent = True
-        except Exception:
-            pass
-
-        if not sent and channel_id:
+        if channel_id:
             try:
                 channel = self.get_channel(int(channel_id))
                 if channel is None:
                     channel = await self.fetch_channel(int(channel_id))
                 await channel.send(content=f"<@{discord_id}>", embed=embed)
-            except Exception:
-                pass
+                sent = True
+            except Exception as e:
+                print(f"[Bot] tracking expired channel send failed (session #{session['id']}): {e}")
+
+        if not sent:
+            try:
+                user = await self.fetch_user(int(discord_id))
+                await user.send(embed=embed)
+            except Exception as e:
+                print(f"[Bot] tracking expired DM failed (session #{session['id']}): {e}")
 
     async def _send_dest_arrival_alert(self, session, pos):
         """Send notification when vehicle arrives at the tracked destination stop."""
@@ -562,21 +564,22 @@ class BalanceBot(discord.Client):
         channel_id = session.get("channel_id")
 
         sent = False
-        try:
-            user = await self.fetch_user(int(discord_id))
-            await user.send(embed=embed)
-            sent = True
-        except Exception:
-            pass
-
-        if not sent and channel_id:
+        if channel_id:
             try:
                 channel = self.get_channel(int(channel_id))
                 if channel is None:
                     channel = await self.fetch_channel(int(channel_id))
                 await channel.send(content=f"<@{discord_id}>", embed=embed)
-            except Exception:
-                pass
+                sent = True
+            except Exception as e:
+                print(f"[Bot] dest arrival channel send failed (session #{session['id']}): {e}")
+
+        if not sent:
+            try:
+                user = await self.fetch_user(int(discord_id))
+                await user.send(embed=embed)
+            except Exception as e:
+                print(f"[Bot] dest arrival DM failed (session #{session['id']}): {e}")
 
         await asyncio.to_thread(db_mark_dest_alerted, session["id"])
 
