@@ -321,6 +321,24 @@ def db_mark_dest_alerted(tracking_id):
     conn.close()
 
 
+def db_delete_inactive_trackings(ttl_minutes: int = 30) -> int:
+    """Hard-delete tracking rows that are inactive and older than ttl_minutes.
+
+    Returns the number of rows deleted.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.execute(
+        """DELETE FROM transport_tracking
+           WHERE active=0
+             AND created_at <= datetime('now', ?, 'utc')""",
+        (f"-{ttl_minutes} minutes",),
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
 # ─── Shared UI helpers ─────────────────────────────────────────────────────────
 
 TRAIN_COLOR = 0xF15A22   # TfNSW orange

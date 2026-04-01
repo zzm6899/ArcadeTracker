@@ -248,6 +248,7 @@ def init_db():
     conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_end', '10')")
     conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_enabled', '1')")
     conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('koko_quiet_timezone', 'Australia/Sydney')")
+    conn.execute("INSERT OR IGNORE INTO app_config (key, value) VALUES ('tracking_completed_ttl_minutes', '30')")
     # Migrations
     for sql in [
         'ALTER TABLE cards ADD COLUMN tier TEXT',

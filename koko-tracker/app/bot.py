@@ -20,6 +20,7 @@ try:
         db_deactivate_tracking,
         db_mark_tracking_alerted,
         db_mark_dest_alerted,
+        db_delete_inactive_trackings,
     )
     from transport_nsw import get_vehicle_position
     TRANSPORT_ENABLED = True
@@ -352,6 +353,27 @@ class BalanceBot(discord.Client):
                 await self._process_tracking(session)
             except Exception as e:
                 print(f"[Bot] tracking error #{session['id']}: {e}")
+
+        # Hard-delete inactive tracking rows older than the configured TTL
+        try:
+            ttl = await asyncio.to_thread(self._get_tracking_ttl)
+            deleted = await asyncio.to_thread(db_delete_inactive_trackings, ttl)
+            if deleted:
+                print(f"[Bot] tracking_loop: purged {deleted} inactive session(s) older than {ttl} min.")
+        except Exception as e:
+            print(f"[Bot] tracking_loop cleanup error: {e}")
+
+    def _get_tracking_ttl(self) -> int:
+        """Return the inactive-tracking TTL in minutes from app_config (default 30)."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute(
+                "SELECT value FROM app_config WHERE key='tracking_completed_ttl_minutes'"
+            ).fetchone()
+            conn.close()
+            return int(row[0]) if row else 30
+        except Exception:
+            return 30
 
     async def _process_tracking(self, session):
         """Check position of a tracked vehicle and alert user if approaching alert stop."""
