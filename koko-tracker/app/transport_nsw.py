@@ -832,19 +832,29 @@ async def get_vehicle_position(from_id: str, to_id: str, scheduled_dep: str) -> 
     """
     try:
         target = datetime.fromisoformat(scheduled_dep)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
 
-    trips = await plan_trip(from_id, to_id, limit=10)
+    # Query around the scheduled departure time so the API returns the specific
+    # service even when it is already mid-journey.  Querying from "now" only
+    # returns future departures and misses an in-progress trip entirely.
+    trips = await plan_trip(from_id, to_id, limit=10, at_time=target)
 
     best_trip = None
-    best_diff = timedelta(minutes=10)
+    best_diff = timedelta(minutes=15)
 
     for trip in trips:
         planned = trip.get("planned_departs")
         if planned is None:
             continue
-        diff = abs(planned - target)
+        try:
+            # Ensure both sides are timezone-aware before subtracting
+            p = planned if planned.tzinfo else planned.replace(tzinfo=timezone.utc)
+            diff = abs(p - target)
+        except TypeError:
+            continue
         if diff < best_diff:
             best_diff = diff
             best_trip = trip
