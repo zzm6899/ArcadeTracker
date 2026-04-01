@@ -629,6 +629,59 @@ def _fmt_at_time(at_time: "datetime | None") -> str:
     return f" (from {at_time.astimezone(SYDNEY_TZ).strftime('%-I:%M %p')})"
 
 
+# ─── Route-number prefix parser ───────────────────────────────────────────────
+# Matches a Sydney transport line/route code at the very start of the query:
+#   T1-T9, M1-M4, L1-L3, F1-F9, B1/B2, X-routes, NX routes, numeric bus routes
+# Examples: "t1 central to strathfield" → ("central to strathfield", "T1")
+#           "410 rhodes to macquarie park" → ("rhodes to macquarie park", "410")
+_ROUTE_RE = re.compile(
+    r"""
+    ^
+    (
+        [A-Za-z]{1,3}\d{1,3}   # T1, M2, NX1, X85, B1, L1, F3
+      | \d{2,4}[A-Za-z]{0,2}   # 410, 333, 700, 70X, 10X
+    )
+    \s+                         # must be followed by whitespace
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def _parse_route_from_query(text: str) -> tuple[str, "str | None"]:
+    """
+    Strip an optional route/line number from the start of the query.
+
+    Returns ``(cleaned_text, route_code)`` where ``route_code`` is upper-cased
+    (e.g. ``"T1"``, ``"410"``) or ``None`` if no prefix was found.
+    """
+    m = _ROUTE_RE.match(text.strip())
+    if m:
+        route = m.group(1).upper()
+        rest = text[m.end():].strip()
+        # Sanity-check: there must still be something left for stop parsing
+        if rest:
+            return rest, route
+    return text, None
+
+
+def _filter_trips_by_route(trips: list, route: "str | None") -> list:
+    """
+    Return the subset of ``trips`` whose first transit leg matches ``route``.
+    Falls back to the full list if nothing matches (so callers always get trips).
+    """
+    if not route or not trips:
+        return trips
+    matched = [
+        t for t in trips
+        if any(
+            l.get("route", "").upper() == route
+            for l in t.get("legs", [])
+            if l.get("mode") != "walk"
+        )
+    ]
+    return matched if matched else trips
+
+
 # ─── Natural-language query parser ────────────────────────────────────────────
 
 def _parse_go_query(text: str) -> tuple[str, str] | None:
