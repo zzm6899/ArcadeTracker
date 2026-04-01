@@ -630,6 +630,7 @@ async def plan_trip(from_id: str, to_id: str, limit: int = 3) -> list[dict]:
                     "summary": f"{MODE_ICONS.get(mode_id, '🚌')} {route_num} → {dest}",
                     "current_stop": current_stop,
                     "stop_sequence": stop_seq,
+                    "vehicle_id": transport.get("id", ""),
                 })
 
         trips.append({
@@ -792,6 +793,89 @@ def format_stop_stats(deps: list[dict]) -> str:
         sign = "+" if avg > 0 else ""
         parts.append(f"avg {sign}{avg:.0f}m")
     return " · ".join(parts)
+
+
+async def get_vehicle_position(from_id: str, to_id: str, scheduled_dep: str) -> dict | None:
+    """
+    Re-fetch the live position of a vehicle currently operating on the route
+    from ``from_id`` to ``to_id``.
+
+    ``scheduled_dep`` is the ISO-formatted planned departure time of the first
+    leg — used to identify the specific service among multiple trips returned
+    by the trip planner.
+
+    Returns a dict with:
+      current_stop  – name of the most recently departed stop (or None)
+      current_idx   – 0-based index of current_stop in stop_sequence (or None)
+      next_stop     – name of the next upcoming stop (or None)
+      next_idx      – 0-based index of next_stop (or None)
+      final_stop    – name of the terminus stop
+      vehicle_id    – service/journey identifier string
+      route         – route number (e.g. "T9")
+      destination   – final destination name
+      stop_sequence – list of {name, departure (datetime | None), is_realtime} dicts
+    Returns None if the journey cannot be found.
+    """
+    try:
+        target = datetime.fromisoformat(scheduled_dep)
+    except (ValueError, TypeError):
+        return None
+
+    trips = await plan_trip(from_id, to_id, limit=10)
+
+    best_trip = None
+    best_diff = timedelta(minutes=10)
+
+    for trip in trips:
+        planned = trip.get("planned_departs")
+        if planned is None:
+            continue
+        diff = abs(planned - target)
+        if diff < best_diff:
+            best_diff = diff
+            best_trip = trip
+
+    if best_trip is None:
+        return None
+
+    transit_legs = [l for l in best_trip.get("legs", []) if l.get("mode") != "walk"]
+    if not transit_legs:
+        return None
+
+    leg = transit_legs[0]
+    stop_seq = leg.get("stop_sequence", [])
+
+    current_stop = leg.get("current_stop")
+    current_idx: int | None = None
+    if current_stop:
+        for i, s in enumerate(stop_seq):
+            if s["name"] == current_stop:
+                current_idx = i
+                break
+
+    now_utc = datetime.now(timezone.utc)
+    next_stop: str | None = None
+    next_idx: int | None = None
+    for i, s in enumerate(stop_seq):
+        dep = s.get("departure")
+        if dep and dep.astimezone(timezone.utc) > now_utc:
+            next_stop = s["name"]
+            next_idx = i
+            break
+
+    final_stop = stop_seq[-1]["name"] if stop_seq else None
+
+    return {
+        "current_stop": current_stop,
+        "current_idx": current_idx,
+        "next_stop": next_stop,
+        "next_idx": next_idx,
+        "final_stop": final_stop,
+        "vehicle_id": leg.get("vehicle_id", ""),
+        "route": leg.get("route", ""),
+        "destination": leg.get("destination", ""),
+        "stop_sequence": stop_seq,
+    }
 
 
 def format_trip_summary(trip: dict, index: int) -> str:

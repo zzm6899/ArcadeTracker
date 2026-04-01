@@ -7,6 +7,7 @@ database as the main bot (DB_PATH env var).
 """
 
 import asyncio
+import json
 import re
 import sqlite3
 import os
@@ -21,6 +22,7 @@ from transport_nsw import (
     get_departures,
     plan_trip,
     get_alerts,
+    get_vehicle_position,
     format_departure_line,
     format_stop_stats,
     MODE_ICONS,
@@ -60,6 +62,28 @@ def transport_db_init():
             stop_id     TEXT NOT NULL,
             stop_name   TEXT NOT NULL,
             created_at  TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS transport_tracking (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            discord_id      TEXT NOT NULL,
+            channel_id      TEXT,
+            guild_id        TEXT,
+            vehicle_id      TEXT,
+            route           TEXT NOT NULL,
+            destination     TEXT NOT NULL,
+            from_id         TEXT NOT NULL,
+            to_id           TEXT NOT NULL,
+            from_name       TEXT NOT NULL,
+            to_name         TEXT NOT NULL,
+            alert_stop_name TEXT NOT NULL,
+            alert_stop_idx  INTEGER NOT NULL,
+            stop_sequence   TEXT NOT NULL,
+            scheduled_dep   TEXT NOT NULL,
+            notified        INTEGER DEFAULT 0,
+            active          INTEGER DEFAULT 1,
+            created_at      TEXT DEFAULT (datetime('now'))
         )
     """)
     conn.commit()
@@ -198,10 +222,97 @@ def db_stop_exists(discord_id, stop_id: str) -> bool:
     return row is not None
 
 
+# ─── Tracking DB helpers ───────────────────────────────────────────────────────
+
+def db_save_tracking(
+    discord_id, channel_id, guild_id,
+    vehicle_id, route, destination,
+    from_id, to_id, from_name, to_name,
+    alert_stop_name, alert_stop_idx,
+    stop_sequence_json, scheduled_dep,
+) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT INTO transport_tracking
+           (discord_id, channel_id, guild_id,
+            vehicle_id, route, destination,
+            from_id, to_id, from_name, to_name,
+            alert_stop_name, alert_stop_idx,
+            stop_sequence, scheduled_dep)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            str(discord_id), channel_id, guild_id,
+            vehicle_id, route, destination,
+            from_id, to_id, from_name, to_name,
+            alert_stop_name, alert_stop_idx,
+            stop_sequence_json, scheduled_dep,
+        ),
+    )
+    conn.commit()
+    row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.close()
+    return row_id
+
+
+def db_get_active_trackings(discord_id=None):
+    """Return all active tracking rows. Pass discord_id to filter by user."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    if discord_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM transport_tracking WHERE discord_id=? AND active=1 ORDER BY created_at DESC",
+            (str(discord_id),),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM transport_tracking WHERE active=1 ORDER BY created_at ASC",
+        ).fetchall()
+    conn.close()
+    return rows
+
+
+def db_get_tracking(tracking_id, discord_id=None):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    if discord_id is not None:
+        row = conn.execute(
+            "SELECT * FROM transport_tracking WHERE id=? AND discord_id=?",
+            (tracking_id, str(discord_id)),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM transport_tracking WHERE id=?",
+            (tracking_id,),
+        ).fetchone()
+    conn.close()
+    return row
+
+
+def db_deactivate_tracking(tracking_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE transport_tracking SET active=0 WHERE id=?",
+        (tracking_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def db_mark_tracking_alerted(tracking_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE transport_tracking SET notified=1 WHERE id=?",
+        (tracking_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
 # ─── Shared UI helpers ─────────────────────────────────────────────────────────
 
 TRAIN_COLOR = 0xF15A22   # TfNSW orange
 ERROR_COLOR = 0xE74C3C
+_VID_MAX_LEN = 20        # Max chars shown for vehicle/service IDs
 
 
 def _err_embed(msg: str) -> discord.Embed:
@@ -1220,6 +1331,72 @@ def register_transport_commands(tree: app_commands.CommandTree):
             ephemeral=True,
         )
 
+    # ── /transport track-status ───────────────────────────────────────────────
+
+    @transport_group.command(
+        name="track-status",
+        description="List your active vehicle tracking sessions",
+    )
+    async def cmd_track_status(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        sessions = await asyncio.to_thread(db_get_active_trackings, interaction.user.id)
+
+        if not sessions:
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=(
+                        "You have no active tracking sessions.\n\n"
+                        "Use `/transport go` or `/transport train`, select a trip option, "
+                        "then click **🚂 Track this train** to start tracking."
+                    ),
+                    color=TRAIN_COLOR,
+                ),
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(title="🚂 Your active tracking sessions", color=TRAIN_COLOR)
+        for s in sessions:
+            embed.add_field(
+                name=f"#{s['id']} — {s['route']} → {s['destination']}",
+                value=(
+                    f"Alert at: **{s['alert_stop_name']}**\n"
+                    f"Route: {s['from_name']} → {s['to_name']}\n"
+                    f"Status: {'✅ Alerted' if s['notified'] else '⏳ Waiting'}"
+                ),
+                inline=False,
+            )
+        embed.set_footer(text="Use /transport stop-tracking <id> to cancel a session")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # ── /transport stop-tracking ──────────────────────────────────────────────
+
+    @transport_group.command(
+        name="stop-tracking",
+        description="Cancel an active vehicle tracking session",
+    )
+    @app_commands.describe(tracking_id="Tracking session ID shown in /transport track-status")
+    async def cmd_stop_tracking(interaction: discord.Interaction, tracking_id: int):
+        await interaction.response.defer(ephemeral=True)
+        row = await asyncio.to_thread(db_get_tracking, tracking_id, interaction.user.id)
+        if not row:
+            await interaction.followup.send(
+                embed=_err_embed(f"No active tracking session #{tracking_id} found."),
+                ephemeral=True,
+            )
+            return
+        await asyncio.to_thread(db_deactivate_tracking, tracking_id)
+        await interaction.followup.send(
+            embed=discord.Embed(
+                description=(
+                    f"🛑 Stopped tracking **{row['route']}** → {row['destination']} "
+                    f"(alert at **{row['alert_stop_name']}**)."
+                ),
+                color=TRAIN_COLOR,
+            ),
+            ephemeral=True,
+        )
+
     tree.add_command(transport_group)
 
 
@@ -1527,6 +1704,13 @@ class _TripSelectorView(discord.ui.View):
             self.save_btn.callback = self._on_save
             self.add_item(self.save_btn)
 
+            track_btn = discord.ui.Button(
+                label="🚂 Track this train",
+                style=discord.ButtonStyle.success,
+            )
+            track_btn.callback = self._on_track
+            self.add_item(track_btn)
+
     # ── helpers ────────────────────────────────────────────────────────────────
 
     @staticmethod
@@ -1567,6 +1751,25 @@ class _TripSelectorView(discord.ui.View):
             color=TRAIN_COLOR,
         )
 
+        # Vehicle / service IDs for each transit leg
+        transit_legs = [l for l in trip.get("legs", []) if l.get("mode") != "walk"]
+        id_parts = []
+        for leg in transit_legs:
+            vid = leg.get("vehicle_id", "")
+            route = leg.get("route", "?")
+            dest = leg.get("destination", "")
+            if vid:
+                short_vid = vid[:_VID_MAX_LEN] + ("…" if len(vid) > _VID_MAX_LEN else "")
+                id_parts.append(f"{leg.get('icon','🚌')} **{route}** → {dest}  `{short_vid}`")
+            else:
+                id_parts.append(f"{leg.get('icon','🚌')} **{route}** → {dest}")
+        if id_parts:
+            embed.add_field(
+                name="🆔 Service ID",
+                value="\n".join(id_parts),
+                inline=False,
+            )
+
         # Leg-by-leg breakdown
         legs_text = _trip_detail_field(trip)
         embed.add_field(name="Journey detail", value=legs_text or "\u200b", inline=False)
@@ -1588,7 +1791,7 @@ class _TripSelectorView(discord.ui.View):
                 inline=False,
             )
 
-        embed.set_footer(text="⭐ Press Save to add this route · 🔴 = real-time data")
+        embed.set_footer(text="⭐ Press Save to add this route · 🚂 Track to get stop alerts · 🔴 = real-time")
         return embed
 
     # ── callbacks ──────────────────────────────────────────────────────────────
@@ -1734,6 +1937,62 @@ class _TripSelectorView(discord.ui.View):
         )
         self.stop()
 
+    async def _on_track(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+        if self.selected_index is None:
+            await interaction.response.send_message(
+                "Select a trip option first!", ephemeral=True
+            )
+            return
+
+        trip = self.trips[self.selected_index]
+        transit_legs = [(i, l) for i, l in enumerate(trip.get("legs", [])) if l.get("mode") != "walk"]
+        if not transit_legs:
+            await interaction.response.send_message(
+                "No trackable legs found in this trip.", ephemeral=True
+            )
+            return
+
+        _, leg = transit_legs[0]
+        stop_seq = leg.get("stop_sequence", [])
+        if len(stop_seq) < 2:
+            await interaction.response.send_message(
+                "Not enough real-time stop data to set up tracking. "
+                "Try again on a live trip (🔴 indicator).",
+                ephemeral=True,
+            )
+            return
+
+        route = leg.get("route", "?")
+        dest = leg.get("destination", "?")
+        icon = leg.get("icon", "🚆")
+        vid = leg.get("vehicle_id", "")
+        vid_str = (f"`{vid[:_VID_MAX_LEN]}{'…' if len(vid) > _VID_MAX_LEN else ''}`") if vid else "*not available*"
+
+        embed = discord.Embed(
+            title=f"🚂 Track {icon} {route} → {dest}",
+            description=(
+                "Select the stop where you want to receive an alert.\n"
+                "You'll be notified when the service is **about to arrive**."
+            ),
+            color=TRAIN_COLOR,
+        )
+        embed.add_field(name="🆔 Service ID", value=vid_str, inline=True)
+        embed.add_field(name="🚉 Route", value=f"{icon} **{route}** → {dest}", inline=True)
+        embed.set_footer(text="Select an alert stop from the dropdown below")
+
+        view = _TrackVehicleView(
+            discord_id=interaction.user.id,
+            trip=trip,
+            from_stop=self.from_stop,
+            to_stop=self.to_stop,
+            channel_id=interaction.channel_id,
+            guild_id=interaction.guild_id,
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
     async def on_timeout(self):
         """Disable all items after 2 minutes so stale buttons don't clutter chat."""
         for item in self.children:
@@ -1743,3 +2002,132 @@ class _TripSelectorView(discord.ui.View):
                 await self.message.edit(view=self)
             except Exception:
                 pass
+
+
+# ─── Vehicle Tracking View ─────────────────────────────────────────────────────
+
+class _TrackVehicleView(discord.ui.View):
+    """
+    Stop-picker for setting up live vehicle tracking.
+
+    Shows all stops in the selected leg's stop sequence (excluding the first
+    boarding stop) so the user can choose where they want to be alerted.
+    After selection a tracking session is persisted to the DB and the
+    background tracking_loop in bot.py will poll for the vehicle and send
+    an alert when it approaches the chosen stop.
+    """
+
+    def __init__(
+        self,
+        discord_id: int,
+        trip: dict,
+        from_stop: dict,
+        to_stop: dict,
+        channel_id,
+        guild_id,
+    ):
+        super().__init__(timeout=60)
+        self.discord_id = discord_id
+        self.trip = trip
+        self.from_stop = from_stop
+        self.to_stop = to_stop
+        self.channel_id = str(channel_id) if channel_id else None
+        self.guild_id = str(guild_id) if guild_id else None
+
+        # Find first transit leg
+        transit_legs = [(i, l) for i, l in enumerate(trip.get("legs", [])) if l.get("mode") != "walk"]
+        if not transit_legs:
+            return
+        self._leg_idx, self._leg = transit_legs[0]
+        stop_seq = self._leg.get("stop_sequence", [])
+
+        # Build stop selector (skip first stop — that's where the user boards)
+        options: list[discord.SelectOption] = []
+        for i, s in enumerate(stop_seq):
+            if i == 0:
+                continue
+            dep = s.get("departure")
+            desc = f"Stop {i + 1}/{len(stop_seq)}"
+            if dep:
+                desc += f" · {_fmt_time(dep)}"
+            options.append(
+                discord.SelectOption(
+                    label=s["name"][:100],
+                    value=str(i),
+                    description=desc[:100],
+                )
+            )
+
+        if not options:
+            return
+
+        select = discord.ui.Select(
+            placeholder="Select your alert stop…",
+            options=options[:25],  # Discord max 25
+        )
+        select.callback = self._on_stop_select
+        self.add_item(select)
+
+    async def _on_stop_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+
+        alert_stop_idx = int(interaction.data["values"][0])
+        stop_seq = self._leg.get("stop_sequence", [])
+        alert_stop_name = stop_seq[alert_stop_idx]["name"]
+
+        planned_dep = self._leg.get("departs")
+        scheduled_dep = planned_dep.isoformat() if planned_dep else ""
+
+        # Serialise stop sequence for storage (datetimes → ISO strings)
+        stop_seq_json = json.dumps([
+            {
+                "name": s["name"],
+                "departure": s["departure"].isoformat() if s.get("departure") else None,
+            }
+            for s in stop_seq
+        ])
+
+        tracking_id = await asyncio.to_thread(
+            db_save_tracking,
+            str(interaction.user.id),
+            self.channel_id,
+            self.guild_id,
+            self._leg.get("vehicle_id", ""),
+            self._leg.get("route", "?"),
+            self._leg.get("destination", "?"),
+            self.from_stop.get("id", ""),
+            self.to_stop.get("id", ""),
+            self.from_stop.get("short_name", ""),
+            self.to_stop.get("short_name", ""),
+            alert_stop_name,
+            alert_stop_idx,
+            stop_seq_json,
+            scheduled_dep,
+        )
+
+        dep_time = _fmt_time(planned_dep) if planned_dep else "?"
+        route = self._leg.get("route", "?")
+        dest = self._leg.get("destination", "?")
+        icon = self._leg.get("icon", "🚆")
+
+        embed = discord.Embed(
+            title="✅ Tracking started!",
+            description=(
+                f"Now tracking **{icon} {route}** → {dest}.\n\n"
+                f"You'll be alerted when the service is approaching **{alert_stop_name}**."
+            ),
+            color=TRAIN_COLOR,
+        )
+        embed.add_field(name="📍 Alert stop", value=alert_stop_name, inline=True)
+        embed.add_field(name="🕐 Service departs", value=dep_time, inline=True)
+        embed.set_footer(
+            text=f"Tracking ID: #{tracking_id} · Use /transport stop-tracking {tracking_id} to cancel"
+        )
+
+        await interaction.response.edit_message(embed=embed, view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        pass  # Ephemeral message — no need to disable buttons
