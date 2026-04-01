@@ -12,7 +12,7 @@ import re
 import sqlite3
 import os
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord import app_commands
@@ -1357,12 +1357,26 @@ def register_transport_commands(tree: app_commands.CommandTree):
 
         embed = discord.Embed(title="🚂 Your active tracking sessions", color=TRAIN_COLOR)
         for s in sessions:
+            # Determine a meaningful status string
+            if s['notified']:
+                status = "✅ Alerted"
+            else:
+                try:
+                    sched = datetime.fromisoformat(s['scheduled_dep'])
+                    if sched.tzinfo is None:
+                        sched = sched.replace(tzinfo=timezone.utc)
+                    if datetime.now(timezone.utc) > sched:
+                        status = "⚠️ Service may have passed"
+                    else:
+                        status = "⏳ Waiting"
+                except Exception:
+                    status = "⏳ Waiting"
             embed.add_field(
                 name=f"#{s['id']} — {s['route']} → {s['destination']}",
                 value=(
                     f"Alert at: **{s['alert_stop_name']}**\n"
                     f"Route: {s['from_name']} → {s['to_name']}\n"
-                    f"Status: {'✅ Alerted' if s['notified'] else '⏳ Waiting'}"
+                    f"Status: {status}"
                 ),
                 inline=False,
             )
@@ -1466,6 +1480,8 @@ class _SaveStopView(discord.ui.View):
         self.mode_filter = mode_filter
         # Keep the first departure for a sensible reminder default
         self._first_dep = deps[0] if deps else None
+        # Keep non-cancelled departures for the track picker
+        self._trackable_deps = [d for d in (deps or []) if not d.get("cancelled")]
         # Set by the caller after sending so on_timeout can disable buttons
         self.message: discord.Message | None = None
 
@@ -1489,6 +1505,41 @@ class _SaveStopView(discord.ui.View):
         )
         save_btn.callback = self._on_save
         self.add_item(save_btn)
+
+        if self._trackable_deps:
+            track_btn = discord.ui.Button(
+                label="🚂 Track a train",
+                style=discord.ButtonStyle.success,
+            )
+            track_btn.callback = self._on_track_departure
+            self.add_item(track_btn)
+
+    async def _on_track_departure(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+        if not self._trackable_deps:
+            await interaction.response.send_message(
+                "No trackable departures available.", ephemeral=True
+            )
+            return
+        view = _TrackDepartureView(
+            discord_id=interaction.user.id,
+            stop_id=self.stop_id,
+            stop_name=self.stop_name,
+            deps=self._trackable_deps,
+            channel_id=interaction.channel_id,
+            guild_id=interaction.guild_id,
+        )
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                title="🚂 Track a departure",
+                description="Select the service you want to track from the dropdown below.",
+                color=TRAIN_COLOR,
+            ),
+            view=view,
+            ephemeral=True,
+        )
 
     async def _on_remind(self, interaction: discord.Interaction):
         if interaction.user.id != self.discord_id:
@@ -2004,6 +2055,164 @@ class _TripSelectorView(discord.ui.View):
                 pass
 
 
+# ─── Departure tracking picker ─────────────────────────────────────────────────
+
+class _TrackDepartureView(discord.ui.View):
+    """
+    Departure selector shown when the user clicks "🚂 Track a train" on a
+    departure board (_SaveStopView).
+
+    Presents a dropdown of non-cancelled departures.  When one is selected the
+    bot resolves the destination stop, plans the full trip to get a stop
+    sequence, and hands off to _TrackVehicleView so the user can pick an alert
+    stop.
+    """
+
+    def __init__(self, discord_id, stop_id, stop_name, deps, channel_id, guild_id):
+        super().__init__(timeout=60)
+        self.discord_id = discord_id
+        self.stop_id = stop_id
+        self.stop_name = stop_name
+        self.deps = deps
+        self.channel_id = str(channel_id) if channel_id else None
+        self.guild_id = str(guild_id) if guild_id else None
+
+        options = []
+        for i, dep in enumerate(deps[:25]):
+            icon = MODE_ICONS.get(dep["mode"], "🚌")
+            label = f"{icon} {dep['route']} → {dep['destination']}"[:100]
+            dep_time = _fmt_time(dep["display_time"]) if dep.get("display_time") else "?"
+            desc = f"Departs {dep_time}"
+            if dep.get("mins") is not None:
+                desc += f" ({_format_mins(dep['mins'])})"
+            options.append(discord.SelectOption(label=label, value=str(i), description=desc[:100]))
+
+        select = discord.ui.Select(placeholder="Select a departure to track…", options=options)
+        select.callback = self._on_dep_select
+        self.add_item(select)
+
+    async def _on_dep_select(self, interaction: discord.Interaction):
+        if interaction.user.id != self.discord_id:
+            await interaction.response.send_message("This isn't your result!", ephemeral=True)
+            return
+
+        idx = int(interaction.data["values"][0])
+        dep = self.deps[idx]
+        dest_name = dep["destination"]
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            dest_stop = await _pick_stop_silent(dest_name)
+            if not dest_stop:
+                await interaction.followup.send(
+                    embed=_err_embed(
+                        f"Could not resolve destination **{dest_name}**.\n"
+                        "Try `/transport train` to set up tracking manually."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            trips = await plan_trip(self.stop_id, dest_stop["id"], limit=5)
+            if not trips:
+                await interaction.followup.send(
+                    embed=_err_embed(
+                        f"Could not plan a trip to **{dest_name}**.\n"
+                        "Try `/transport train` to set up tracking manually."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            # Match the trip whose first transit leg departure is closest to
+            # the selected departure time (within 10 minutes).
+            target_dep = dep.get("display_time") or dep.get("planned")
+            best_trip = trips[0]
+            if target_dep is not None:
+                best_diff = None
+                for trip in trips:
+                    trip_dep = trip.get("departs") or trip.get("planned_departs")
+                    if trip_dep is None:
+                        continue
+                    diff = abs(
+                        (trip_dep.astimezone(timezone.utc) - target_dep.astimezone(timezone.utc)).total_seconds()
+                    )
+                    if best_diff is None or diff < best_diff:
+                        best_diff = diff
+                        best_trip = trip
+
+            transit_legs = [
+                (i, l)
+                for i, l in enumerate(best_trip.get("legs", []))
+                if l.get("mode") != "walk"
+            ]
+            if not transit_legs:
+                await interaction.followup.send(
+                    embed=_err_embed("No trackable legs found for this service."),
+                    ephemeral=True,
+                )
+                return
+
+            _, leg = transit_legs[0]
+            stop_seq = leg.get("stop_sequence", [])
+            if len(stop_seq) < 2:
+                await interaction.followup.send(
+                    embed=_err_embed(
+                        "Not enough real-time stop data to track this service.\n"
+                        "Try again on a live trip (🔴 indicator)."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            from_stop_dict = {"id": self.stop_id, "short_name": self.stop_name}
+            to_stop_dict = {"id": dest_stop["id"], "short_name": dest_stop["short_name"]}
+
+            route = leg.get("route", "?")
+            dest = leg.get("destination", "?")
+            icon = leg.get("icon", "🚆")
+            vid = leg.get("vehicle_id", "")
+            vid_str = (
+                f"`{vid[:_VID_MAX_LEN]}{'…' if len(vid) > _VID_MAX_LEN else ''}`"
+                if vid else "*not available*"
+            )
+
+            embed = discord.Embed(
+                title=f"🚂 Track {icon} {route} → {dest}",
+                description=(
+                    "Select the stop where you want to receive an alert.\n"
+                    "You'll be notified when the service is **about to arrive**."
+                ),
+                color=TRAIN_COLOR,
+            )
+            embed.add_field(name="🆔 Service ID", value=vid_str, inline=True)
+            embed.add_field(name="🚉 Route", value=f"{icon} **{route}** → {dest}", inline=True)
+            embed.set_footer(text="Select an alert stop from the dropdown below")
+
+            view = _TrackVehicleView(
+                discord_id=interaction.user.id,
+                trip=best_trip,
+                from_stop=from_stop_dict,
+                to_stop=to_stop_dict,
+                channel_id=self.channel_id,
+                guild_id=self.guild_id,
+            )
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            self.stop()
+
+        except Exception as e:
+            await interaction.followup.send(
+                embed=_err_embed(f"Error setting up tracking: {e}"),
+                ephemeral=True,
+            )
+
+    async def on_timeout(self):
+        """Disable the dropdown so any lingering interaction doesn't fire."""
+        for item in self.children:
+            item.disabled = True
+
+
 # ─── Vehicle Tracking View ─────────────────────────────────────────────────────
 
 class _TrackVehicleView(discord.ui.View):
@@ -2130,4 +2339,6 @@ class _TrackVehicleView(discord.ui.View):
         self.stop()
 
     async def on_timeout(self):
-        pass  # Ephemeral message — no need to disable buttons
+        """Disable the dropdown when the selection window expires."""
+        for item in self.children:
+            item.disabled = True
