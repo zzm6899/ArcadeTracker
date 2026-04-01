@@ -371,6 +371,17 @@ class BalanceBot(discord.Client):
             return  # API unavailable — skip silently
 
         if pos is None:
+            # If the scheduled departure is more than 30 minutes in the past the
+            # service has almost certainly completed — deactivate the session so it
+            # stops showing as "⏳ Waiting" in /transport track-status.
+            try:
+                sched = datetime.fromisoformat(session["scheduled_dep"])
+                if sched.tzinfo is None:
+                    sched = sched.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - sched > timedelta(minutes=30):
+                    await asyncio.to_thread(db_deactivate_tracking, session["id"])
+            except Exception:
+                pass
             return
 
         alert_stop_name = session["alert_stop_name"]
