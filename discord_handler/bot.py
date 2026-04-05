@@ -1,7 +1,7 @@
 """
 Presentation Layer — Discord communication only.
 All formatting helpers live in utils/utilities.py.
-All business logic lives in service_manager.py.
+All business/scheduling logic lives in service_manager.py.
 This file must NOT contain API calls or scheduling state.
 """
 
@@ -9,20 +9,27 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Awaitable, Callable
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from data_layer.api_service import APIService
 from utils.utilities import (
     calculate_delay_minutes,
     format_alert_card,
     format_delay_alert,
+    format_departures_board,
+    format_reminder_list,
     format_trip_report,
+    format_vehicle_status,
+    parse_duration,
     validate_stop_id,
 )
 
-_DEFAULT_CHANNEL = "default_channel"
+if TYPE_CHECKING:
+    from service_manager import LocationAlertStateMachine, ReminderScheduler
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_CHANNEL = "default_channel"
 
 
 class BotHandler:
@@ -38,21 +45,18 @@ class BotHandler:
         """Send *content* to *channel_id*.  Replace body with real discord.py call."""
         print(f"[Discord -> #{channel_id}]\n{content}\n")
 
-    # ── Unit 1: register a location alert (wires into service_manager) ────────
+    # ── Unit 1: location alert ────────────────────────────────────────────────
 
     async def handle_location_alert_command(
         self,
         channel_id: str,
         trip_id: str,
         stop_id: str,
-        state_machine,  # LocationAlertStateMachine — avoids circular import type hint
+        state_machine: LocationAlertStateMachine,
     ) -> None:
         """
         Register a one-shot location alert.
-
-        Called when a user invokes e.g. `/alert T1234 200060`.
-        The state_machine.run() loop (started in app.py) will fire
-        send_message() when the vehicle reaches the stop.
+        `/alert <trip_id> <stop_id>`
         """
         if not validate_stop_id(stop_id):
             await self.send_message(
@@ -70,7 +74,7 @@ class BotHandler:
         await self.send_message(
             channel_id,
             f"🔔 Alert registered for trip `{trip_id}` at stop `{stop_id}`. "
-            f"You'll be notified when the vehicle arrives.",
+            "You'll be notified when the vehicle arrives. Expires in 2 hours.",
         )
 
     # ── Unit 2: scheduled trip report ────────────────────────────────────────
@@ -83,18 +87,15 @@ class BotHandler:
         target_datetime: datetime | None = None,
     ) -> None:
         """
-        Handle `/trip <from> <to> [datetime]` — returns a formatted trip report.
-
-        *target_datetime* should be a timezone-aware datetime; when None the
-        API defaults to the current time.
+        Return a formatted trip report.
+        `/trip <from> <to> [datetime]`
         """
         legs = self.api_service.plan_trip(
             from_id=from_id,
             to_id=to_id,
             target_datetime=target_datetime,
         )
-        report = format_trip_report(legs, target_datetime)
-        await self.send_message(channel_id, report)
+        await self.send_message(channel_id, format_trip_report(legs, target_datetime))
 
     # ── Unit 3: on-demand delay check ────────────────────────────────────────
 
@@ -106,11 +107,8 @@ class BotHandler:
         threshold_minutes: int = 5,
     ) -> None:
         """
-        Handle `/delay <trip_id> <stop_id> [threshold]`.
-
-        Fetches live vs scheduled arrival, sends a Delay Alert if the service
-        is running more than *threshold_minutes* off schedule, or an "on time"
-        confirmation otherwise.
+        Check live vs scheduled arrival and report.
+        `/delay <trip_id> <stop_id> [threshold]`
         """
         scheduled = self.api_service.get_scheduled_stop_time(trip_id, stop_id)
         live = self.api_service.get_live_arrival(trip_id, stop_id)
@@ -118,7 +116,8 @@ class BotHandler:
         if not scheduled or not live:
             await self.send_message(
                 channel_id,
-                f"⚠️ Could not retrieve timing data for trip `{trip_id}` at stop `{stop_id}`.",
+                f"⚠️ Could not retrieve timing data for trip `{trip_id}` "
+                f"at stop `{stop_id}`.",
             )
             return
 
@@ -131,38 +130,192 @@ class BotHandler:
             await self.send_message(
                 channel_id,
                 f"✅ Trip `{trip_id}` to **{scheduled.get('stop_name', stop_id)}** "
-                f"is running **on time**.",
+                "is running **on time**.",
             )
             return
 
-        msg = format_delay_alert(
-            trip_id=trip_id,
-            stop_name=scheduled.get("stop_name", stop_id),
-            delay_minutes=delay_min,
-            scheduled_iso=scheduled["scheduled_arrival"],
-            predicted_iso=live["predicted_arrival"],
+        await self.send_message(
+            channel_id,
+            format_delay_alert(
+                trip_id=trip_id,
+                stop_name=scheduled.get("stop_name", stop_id),
+                delay_minutes=delay_min,
+                scheduled_iso=scheduled["scheduled_arrival"],
+                predicted_iso=live["predicted_arrival"],
+            ),
         )
-        await self.send_message(channel_id, msg)
 
     # ── Unit 4: service disruption dashboard ─────────────────────────────────
 
     async def handle_disruptions_command(self, channel_id: str) -> None:
         """
-        Handle `/disruptions` — posts a formatted disruption dashboard card.
+        Post a formatted disruption dashboard.
+        `/disruptions`
         """
-        alerts = self.api_service.get_service_alerts()
-        card = format_alert_card(alerts)
-        await self.send_message(channel_id, card)
+        await self.send_message(
+            channel_id,
+            format_alert_card(self.api_service.get_service_alerts()),
+        )
 
-    # ── Legacy / internal helpers (kept for backward compatibility) ───────────
+    # ── Departures board ──────────────────────────────────────────────────────
+
+    async def handle_departures_command(
+        self,
+        channel_id: str,
+        stop_id: str,
+        limit: int = 8,
+    ) -> None:
+        """
+        Show the next departures for a stop.
+        `/departures <stop_id> [limit]`
+        """
+        if not validate_stop_id(stop_id):
+            await self.send_message(
+                channel_id,
+                f"❌ Invalid stop ID `{stop_id}`.",
+            )
+            return
+
+        departures = self.api_service.get_departures(stop_id, limit=limit)
+        # Try to resolve a friendly stop name from the first departure.
+        stop_name = stop_id
+        stops = self.api_service.find_stops(stop_id, limit=1)
+        if stops:
+            stop_name = stops[0]["name"]
+
+        await self.send_message(
+            channel_id,
+            format_departures_board(stop_name, departures),
+        )
+
+    # ── Stop search ───────────────────────────────────────────────────────────
+
+    async def handle_stop_search_command(
+        self,
+        channel_id: str,
+        query: str,
+    ) -> None:
+        """
+        Search for stops matching a name query.
+        `/stops <query>`
+        """
+        if not query or not query.strip():
+            await self.send_message(channel_id, "❌ Please provide a search query.")
+            return
+
+        results = self.api_service.find_stops(query)
+        if not results:
+            await self.send_message(
+                channel_id,
+                f"No stops found matching **{query}**.",
+            )
+            return
+
+        lines = [f"## 🔍 Stop Search — \"{query}\"", ""]
+        for r in results:
+            modes = ", ".join(r.get("modes", []))
+            lines.append(
+                f"`{r['id']}` **{r['name']}**  _{r.get('type', '')}_ "
+                f"({modes})"
+            )
+        await self.send_message(channel_id, "\n".join(lines))
+
+    # ── Vehicle status ────────────────────────────────────────────────────────
+
+    async def handle_vehicle_status_command(
+        self,
+        channel_id: str,
+        trip_id: str,
+    ) -> None:
+        """
+        Show the current live position of a vehicle.
+        `/status <trip_id>`
+        """
+        from datetime import timezone
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        position = self.api_service.get_vehicle_position(trip_id, now_iso)
+
+        if position is None:
+            await self.send_message(
+                channel_id,
+                f"⚠️ No live position data available for trip `{trip_id}`.",
+            )
+            return
+
+        await self.send_message(channel_id, format_vehicle_status(trip_id, position))
+
+    # ── Reminder commands ─────────────────────────────────────────────────────
+
+    async def handle_add_reminder_command(
+        self,
+        channel_id: str,
+        message: str,
+        duration_str: str,
+        scheduler: ReminderScheduler,
+    ) -> None:
+        """
+        Schedule a reminder.
+        `/remind <message> <duration>` e.g. `/remind check T1 delays 30m`
+        """
+        delay = parse_duration(duration_str)
+        if delay is None:
+            await self.send_message(
+                channel_id,
+                "❌ Could not parse duration. Try `30m`, `1h`, `2h30m`, or `in 45 minutes`.",
+            )
+            return
+
+        reminder = scheduler.add(
+            channel_id=channel_id,
+            message=message,
+            delay=delay,
+            notify_fn=self.send_message,
+        )
+        mins = int(delay.total_seconds() / 60)
+        await self.send_message(
+            channel_id,
+            f"⏰ Reminder `#{reminder.id}` set — I'll remind you in **{mins} min**:\n"
+            f"> {message}",
+        )
+
+    async def handle_list_reminders_command(
+        self,
+        channel_id: str,
+        scheduler: ReminderScheduler,
+    ) -> None:
+        """
+        List pending reminders for this channel.
+        `/reminders`
+        """
+        pending = scheduler.pending_for(channel_id)
+        await self.send_message(channel_id, format_reminder_list(pending))
+
+    async def handle_cancel_reminder_command(
+        self,
+        channel_id: str,
+        reminder_id: str,
+        scheduler: ReminderScheduler,
+    ) -> None:
+        """
+        Cancel a pending reminder by ID.
+        `/cancel-reminder <id>`
+        """
+        if scheduler.cancel(reminder_id):
+            await self.send_message(
+                channel_id,
+                f"✅ Reminder `#{reminder_id}` cancelled.",
+            )
+        else:
+            await self.send_message(
+                channel_id,
+                f"❌ No pending reminder with ID `#{reminder_id}`.",
+            )
+
+    # ── Legacy helper ─────────────────────────────────────────────────────────
 
     async def handle_alert_trigger(self, trip_id: str, stop_id: str) -> None:
-        """
-        Internal helper: directly send an alert for *trip_id* reaching *stop_id*.
-        Prefer registering via LocationAlertStateMachine for live tracking;
-        this exists for direct/test invocations.
-        """
-        msg = (
-            f"✅ **Alert Triggered** — Trip `{trip_id}` has arrived at stop `{stop_id}`!"
+        """Direct alert for *trip_id* reaching *stop_id* — for test use."""
+        await self.send_message(
+            _DEFAULT_CHANNEL,
+            f"✅ **Alert Triggered** — Trip `{trip_id}` has arrived at stop `{stop_id}`!",
         )
-        await self.send_message(_DEFAULT_CHANNEL, msg)
