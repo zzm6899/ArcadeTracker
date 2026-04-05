@@ -356,8 +356,6 @@ class BalanceBot(discord.Client):
         """Poll active vehicle tracking sessions and send alerts when approaching."""
         if not TRANSPORT_ENABLED:
             return
-        if _is_quiet_hours():
-            return
         try:
             sessions = await asyncio.to_thread(db_get_active_trackings)
         except Exception as e:
