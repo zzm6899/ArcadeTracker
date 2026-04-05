@@ -384,8 +384,18 @@ class BalanceBot(discord.Client):
         except Exception:
             created = datetime.now(timezone.utc)
         if datetime.now(timezone.utc) - created > timedelta(hours=3):
+            # Build a minimal position dict for use when live data is unavailable.
+            dummy_pos = self._dummy_pos(session)
+            # Fire any pending notifications before deactivating so that the user
+            # always receives both their alert-stop and destination notifications.
             if session["notified"] == 0:
-                await self._send_tracking_expired(session)
+                await self._send_tracking_alert(
+                    session, dummy_pos, session["alert_stop_name"], passed=True
+                )
+                await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+            if session["notified"] < 2:
+                await self._send_dest_arrival_alert(session, dummy_pos)
+            await self._send_tracking_expired(session)
             await asyncio.to_thread(db_deactivate_tracking, session["id"])
             return
 
@@ -431,18 +441,19 @@ class BalanceBot(discord.Client):
                         print(f"[Bot] tracking scheduled_dep parse error #{session['id']}: {e}")
 
                 if alert_dep is not None and datetime.now(timezone.utc) >= alert_dep:
+                    dummy_pos = self._dummy_pos(session)
                     if session["notified"] == 0:
                         # Alert stop departure time has passed and we never sent an
                         # alert — the train has almost certainly passed the stop.
-                        dummy_pos = {
-                            "current_stop": None,
-                            "next_stop": None,
-                            "final_stop": session.get("destination", ""),
-                        }
                         await self._send_tracking_alert(
                             session, dummy_pos, session["alert_stop_name"], passed=True
                         )
                         await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+                    # Always send the destination notification if not yet sent, so the
+                    # user receives both their alert-stop and destination notifications
+                    # even when live position data is unavailable.
+                    if session["notified"] < 2:
+                        await self._send_dest_arrival_alert(session, dummy_pos)
                     await asyncio.to_thread(db_deactivate_tracking, session["id"])
             except Exception as e:
                 print(f"[Bot] tracking pos-None error #{session['id']}: {e}")
@@ -574,6 +585,15 @@ class BalanceBot(discord.Client):
                 delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
             )
             await asyncio.to_thread(db_mark_tracking_alerted, session["id"])  # → notified=1
+
+    @staticmethod
+    def _dummy_pos(session: dict) -> dict:
+        """Return a minimal position dict for use when live vehicle data is unavailable."""
+        return {
+            "current_stop": None,
+            "next_stop": None,
+            "final_stop": session.get("destination", ""),
+        }
 
     async def _send_tracking_alert(
         self,
