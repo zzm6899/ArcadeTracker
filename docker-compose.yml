@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  arcade-tracker:
+    build: .
+    container_name: arcade-tracker
+    restart: unless-stopped
+    environment:
+      - DISCORD_BOT_TOKEN=           # discord.com/developers/applications
+      - DISCORD_GUILD_ID=            # Right-click your server → Copy Server ID (for instant command sync)
+      - TFNSW_API_KEY=               # opendata.transport.nsw.gov.au
+    healthcheck:
+      test: ["CMD", "python", "-c", "import discord; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
