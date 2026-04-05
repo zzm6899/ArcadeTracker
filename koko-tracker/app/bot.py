@@ -504,6 +504,7 @@ class BalanceBot(discord.Client):
                     pass
 
         current_idx = pos.get("current_idx")
+        next_idx = pos.get("next_idx")
 
         # ── Terminus safety net ──────────────────────────────────────────────────
         # If the vehicle has departed the last stop in the sequence the trip has
@@ -549,7 +550,32 @@ class BalanceBot(discord.Client):
         # ── Alert stop: passed check ─────────────────────────────────────────────
         # Vehicle has passed the chosen alert stop.  Send the alert (if not yet
         # done) but keep the session alive so we still watch for the destination.
-        if current_idx is not None and current_idx >= effective_alert_idx:
+        #
+        # When live position is unavailable (current_idx is None) we apply two
+        # additional fallbacks so the alert still fires promptly:
+        #   1. next_idx inference – the next upcoming stop (by departure time) is
+        #      beyond the alert stop, so the alert stop has already been served.
+        #   2. Schedule fallback – the alert stop's own departure time (from the
+        #      fresh stop sequence) has already passed.  Use check_idx which was
+        #      already resolved above for the delay calculation.
+        alert_stop_dep_time: datetime | None = None
+        if check_idx is not None and check_idx < len(fresh_stop_seq):
+            raw_departure = fresh_stop_seq[check_idx].get("departure")
+            if raw_departure is not None:
+                alert_stop_dep_time = raw_departure.astimezone(timezone.utc)
+
+        # True when there is a confirmed "next upcoming stop" but no live current stop.
+        no_live_pos_with_next = current_idx is None and next_idx is not None
+
+        passed_by_position = current_idx is not None and current_idx >= effective_alert_idx
+        passed_by_next = no_live_pos_with_next and next_idx > effective_alert_idx
+        passed_by_schedule = (
+            current_idx is None
+            and alert_stop_dep_time is not None
+            and datetime.now(timezone.utc) >= alert_stop_dep_time
+        )
+
+        if passed_by_position or passed_by_next or passed_by_schedule:
             if session["notified"] == 0:
                 await self._send_tracking_alert(
                     session, pos, alert_stop_name, passed=True,
@@ -560,20 +586,20 @@ class BalanceBot(discord.Client):
             return
 
         # ── Alert stop: approaching check ────────────────────────────────────────
-        # Trigger if we're one stop away (index) OR within 10 minutes by schedule.
+        # Trigger if we're one stop away (index) OR the alert stop is the next
+        # upcoming stop (next_idx) OR within 10 minutes by schedule.
         # 10 min (up from 5) covers short-gap routes where stops are <2 min apart.
-        approaching = current_idx is not None and current_idx >= effective_alert_idx - 1
+        approaching = (
+            (current_idx is not None and current_idx >= effective_alert_idx - 1)
+            or (no_live_pos_with_next and next_idx == effective_alert_idx)
+        )
 
-        # Use stored_alert_idx as fallback for the time-based check when
-        # fresh_alert_idx could not be matched (avoids silently skipping the check).
-        if fresh_alert_idx is not None:
-            time_check_idx = fresh_alert_idx
-        elif stored_alert_idx < len(fresh_stop_seq):
-            time_check_idx = stored_alert_idx
-        else:
-            time_check_idx = None
-        if not approaching and time_check_idx is not None and time_check_idx < len(fresh_stop_seq):
-            dep = fresh_stop_seq[time_check_idx].get("departure")
+        # Use check_idx (already computed above) for the time-based check; it
+        # resolves to fresh_alert_idx when available, falling back to the stored
+        # index.  This avoids silently skipping the check when the alert stop
+        # name cannot be matched in the fresh stop sequence.
+        if not approaching and check_idx is not None and check_idx < len(fresh_stop_seq):
+            dep = fresh_stop_seq[check_idx].get("departure")
             approaching = (
                 dep is not None
                 and 0 <= (dep.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 60 <= 10
