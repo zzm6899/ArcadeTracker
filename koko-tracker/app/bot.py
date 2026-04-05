@@ -393,6 +393,7 @@ class BalanceBot(discord.Client):
                     session, dummy_pos, session["alert_stop_name"], passed=True
                 )
                 await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+                session["notified"] = 1
             if session["notified"] < 2:
                 await self._send_dest_arrival_alert(session, dummy_pos)
             await self._send_tracking_expired(session)
@@ -411,23 +412,33 @@ class BalanceBot(discord.Client):
 
         if pos is None:
             # API returned nothing — the service may have already passed.
-            # Use the alert stop's own scheduled departure time (from the stored
-            # stop_sequence) as the trigger, falling back to the trip departure.
-            # Fire immediately once that time has passed (no grace period needed —
-            # if the API can't find the trip it's already gone).
+            # Use scheduled departure times from the stored stop_sequence to
+            # determine when to fire each notification:
+            #   • checkpoint alert fires once the alert stop's scheduled time passes
+            #   • destination alert fires once the *destination's* scheduled time
+            #     passes — not when the checkpoint time passes, so the user isn't
+            #     told "arrived" before the vehicle has actually reached their stop.
             try:
                 alert_dep: datetime | None = None
+                dest_dep: datetime | None = None
                 try:
                     stored_seq = json.loads(session.get("stop_sequence") or "[]")
                     alert_name = session["alert_stop_name"].lower()
+                    to_name_lower = session.get("to_name", "").lower()
                     for s in stored_seq:
-                        if alert_name in (s.get("name") or "").lower():
+                        s_name_lower = (s.get("name") or "").lower()
+                        if alert_dep is None and alert_name in s_name_lower:
                             raw = s.get("departure")
                             if raw:
                                 alert_dep = datetime.fromisoformat(raw)
                                 if alert_dep.tzinfo is None:
                                     alert_dep = alert_dep.replace(tzinfo=timezone.utc)
-                            break
+                        if dest_dep is None and to_name_lower and to_name_lower in s_name_lower:
+                            raw = s.get("departure")
+                            if raw:
+                                dest_dep = datetime.fromisoformat(raw)
+                                if dest_dep.tzinfo is None:
+                                    dest_dep = dest_dep.replace(tzinfo=timezone.utc)
                 except Exception:
                     pass
 
@@ -452,6 +463,7 @@ class BalanceBot(discord.Client):
                                 session, dummy_pos, session["alert_stop_name"], passed=False
                             )
                             await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+                            session["notified"] = 1
                     elif now_utc >= alert_dep:
                         if session["notified"] == 0:
                             # Alert stop departure time has passed and we never sent an
@@ -460,12 +472,16 @@ class BalanceBot(discord.Client):
                                 session, dummy_pos, session["alert_stop_name"], passed=True
                             )
                             await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
-                        # Always send the destination notification if not yet sent, so the
-                        # user receives both their alert-stop and destination notifications
-                        # even when live position data is unavailable.
-                        if session["notified"] < 2:
-                            await self._send_dest_arrival_alert(session, dummy_pos)
-                        await asyncio.to_thread(db_deactivate_tracking, session["id"])
+                            session["notified"] = 1
+                        # Only send the destination notification and deactivate once
+                        # the destination's own scheduled time has also passed (or if
+                        # it cannot be determined from the stored sequence).  This
+                        # prevents sending an "arrived" message while the vehicle is
+                        # still travelling between the alert stop and the destination.
+                        if dest_dep is None or now_utc >= dest_dep:
+                            if session["notified"] < 2:
+                                await self._send_dest_arrival_alert(session, dummy_pos)
+                            await asyncio.to_thread(db_deactivate_tracking, session["id"])
             except Exception as e:
                 print(f"[Bot] tracking pos-None error #{session['id']}: {e}")
             return
@@ -527,6 +543,7 @@ class BalanceBot(discord.Client):
                     delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
                 )
                 await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+                session["notified"] = 1
             if session["notified"] < 2:
                 await self._send_dest_arrival_alert(session, pos)
             await asyncio.to_thread(db_deactivate_tracking, session["id"])
@@ -553,6 +570,7 @@ class BalanceBot(discord.Client):
                     delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
                 )
                 await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+                session["notified"] = 1
             if session["notified"] < 2:
                 await self._send_dest_arrival_alert(session, pos)
             await asyncio.to_thread(db_deactivate_tracking, session["id"])
@@ -593,6 +611,7 @@ class BalanceBot(discord.Client):
                     delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
                 )
                 await asyncio.to_thread(db_mark_tracking_alerted, session["id"])  # → notified=1
+                session["notified"] = 1
             # Do NOT deactivate here — wait for destination arrival check above
             return
 
@@ -646,6 +665,7 @@ class BalanceBot(discord.Client):
                                     await asyncio.to_thread(
                                         db_mark_tracking_alerted, session["id"]
                                     )
+                                    session["notified"] = 1
                                 return
                             elif 0 <= _mins <= 10:
                                 approaching = True
@@ -659,6 +679,7 @@ class BalanceBot(discord.Client):
                 delay_mins=alert_stop_delay, is_realtime=alert_stop_realtime,
             )
             await asyncio.to_thread(db_mark_tracking_alerted, session["id"])  # → notified=1
+            session["notified"] = 1
 
     @staticmethod
     def _dummy_pos(session: dict) -> dict:
