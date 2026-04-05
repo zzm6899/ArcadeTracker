@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from data_layer.api_service import APIService
 from utils.utilities import (
@@ -35,15 +35,34 @@ _DEFAULT_CHANNEL = "default_channel"
 class BotHandler:
     """Manages all Discord interactions and command dispatching."""
 
-    def __init__(self, api_service: APIService):
+    def __init__(self, api_service: APIService, discord_client: Any = None):
         self.api_service = api_service
+        self._client = discord_client  # discord.Client — set via set_client() after login
         logger.info("BotHandler initialized.")
+
+    def set_client(self, client: Any) -> None:
+        """Attach the live discord.Client so background sends reach real channels."""
+        self._client = client
 
     # ── Core send primitive ───────────────────────────────────────────────────
 
     async def send_message(self, channel_id: str, content: str) -> None:
-        """Send *content* to *channel_id*.  Replace body with real discord.py call."""
-        print(f"[Discord -> #{channel_id}]\n{content}\n")
+        """
+        Send *content* to a Discord channel.
+
+        When a discord.Client is attached (production), fetches the channel and
+        sends via the real API.  Falls back to stdout for smoke-testing / mock mode.
+        """
+        if self._client is not None:
+            try:
+                channel = self._client.get_channel(int(channel_id))
+                if channel is None:
+                    channel = await self._client.fetch_channel(int(channel_id))
+                await channel.send(content)
+            except Exception:
+                logger.exception("Failed to send message to channel %s", channel_id)
+        else:
+            print(f"[Discord -> #{channel_id}]\n{content}\n")
 
     # ── Unit 1: location alert ────────────────────────────────────────────────
 
