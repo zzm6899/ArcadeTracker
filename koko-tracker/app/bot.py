@@ -440,21 +440,32 @@ class BalanceBot(discord.Client):
                     except (ValueError, TypeError) as e:
                         print(f"[Bot] tracking scheduled_dep parse error #{session['id']}: {e}")
 
-                if alert_dep is not None and datetime.now(timezone.utc) >= alert_dep:
+                if alert_dep is not None:
+                    now_utc = datetime.now(timezone.utc)
+                    mins_until = (alert_dep.astimezone(timezone.utc) - now_utc).total_seconds() / 60
                     dummy_pos = self._dummy_pos(session)
-                    if session["notified"] == 0:
-                        # Alert stop departure time has passed and we never sent an
-                        # alert — the train has almost certainly passed the stop.
-                        await self._send_tracking_alert(
-                            session, dummy_pos, session["alert_stop_name"], passed=True
-                        )
-                        await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
-                    # Always send the destination notification if not yet sent, so the
-                    # user receives both their alert-stop and destination notifications
-                    # even when live position data is unavailable.
-                    if session["notified"] < 2:
-                        await self._send_dest_arrival_alert(session, dummy_pos)
-                    await asyncio.to_thread(db_deactivate_tracking, session["id"])
+                    if 0 <= mins_until <= 10:
+                        # Service is about to depart — send approaching alert so the
+                        # user is notified even when the API has no live data yet.
+                        if session["notified"] == 0:
+                            await self._send_tracking_alert(
+                                session, dummy_pos, session["alert_stop_name"], passed=False
+                            )
+                            await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+                    elif now_utc >= alert_dep:
+                        if session["notified"] == 0:
+                            # Alert stop departure time has passed and we never sent an
+                            # alert — the train has almost certainly passed the stop.
+                            await self._send_tracking_alert(
+                                session, dummy_pos, session["alert_stop_name"], passed=True
+                            )
+                            await asyncio.to_thread(db_mark_tracking_alerted, session["id"])
+                        # Always send the destination notification if not yet sent, so the
+                        # user receives both their alert-stop and destination notifications
+                        # even when live position data is unavailable.
+                        if session["notified"] < 2:
+                            await self._send_dest_arrival_alert(session, dummy_pos)
+                        await asyncio.to_thread(db_deactivate_tracking, session["id"])
             except Exception as e:
                 print(f"[Bot] tracking pos-None error #{session['id']}: {e}")
             return
@@ -606,11 +617,11 @@ class BalanceBot(discord.Client):
             )
 
         # ── Stored-schedule fallback ──────────────────────────────────────────
-        # When time_check_idx is None the alert stop was not found in the fresh
+        # When check_idx is None the alert stop was not found in the fresh
         # sequence — the API may only be returning remaining/future stops (the
         # alert stop has already been passed).  Check the stored schedule
         # directly to fire a "passed" alert or set the approaching flag.
-        if not approaching and time_check_idx is None:
+        if not approaching and check_idx is None:
             try:
                 stored_seq = json.loads(session.get("stop_sequence") or "[]")
                 _alert_lower = alert_stop_name.lower()
