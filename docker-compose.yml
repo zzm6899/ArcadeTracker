@@ -1,17 +1,31 @@
 version: '3.8'
 
 services:
-  arcade-tracker:
-    build: .
-    container_name: arcade-tracker
+  koko-tracker:
+    build: ./koko-tracker
+    container_name: koko-tracker
     restart: unless-stopped
+    ports:
+      - "5055:5000"
+    volumes:
+      - koko-data:/data
     environment:
-      - DISCORD_BOT_TOKEN=           # discord.com/developers/applications
-      - DISCORD_GUILD_ID=            # Right-click your server → Copy Server ID (for instant command sync)
-      - TFNSW_API_KEY=               # opendata.transport.nsw.gov.au
+      - POLL_INTERVAL=60
+      - SECRET_KEY=change_me_to_something_random_and_long_please
+      - APP_URL=https://card.z2hs.au
+      - ADMIN_USERNAME=admin          # Auto-grant admin to this username on startup
+      # ── Discord Bot (optional) ─────────────────────────────────────────────
+      - DISCORD_BOT_TOKEN=           # Get from discord.com/developers/applications
+      - DISCORD_GUILD_ID=            # Your server ID (right-click server → Copy ID)
+      # ── Transport NSW (optional) ───────────────────────────────────────────
+      - TFNSW_API_KEY=               # Get from https://opendata.transport.nsw.gov.au
     healthcheck:
-      test: ["CMD", "python", "-c", "import discord; print('ok')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/')"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 10s
+
+volumes:
+  koko-data:
+    driver: local
