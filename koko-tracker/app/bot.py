@@ -605,6 +605,43 @@ class BalanceBot(discord.Client):
                 and 0 <= (dep.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 60 <= 10
             )
 
+        # ── Stored-schedule fallback ──────────────────────────────────────────
+        # When time_check_idx is None the alert stop was not found in the fresh
+        # sequence — the API may only be returning remaining/future stops (the
+        # alert stop has already been passed).  Check the stored schedule
+        # directly to fire a "passed" alert or set the approaching flag.
+        if not approaching and time_check_idx is None:
+            try:
+                stored_seq = json.loads(session.get("stop_sequence") or "[]")
+                _alert_lower = alert_stop_name.lower()
+                for _s in stored_seq:
+                    if _alert_lower in (_s.get("name") or "").lower():
+                        _raw_dep = _s.get("departure")
+                        if _raw_dep:
+                            _sched = datetime.fromisoformat(_raw_dep)
+                            if _sched.tzinfo is None:
+                                _sched = _sched.replace(tzinfo=timezone.utc)
+                            _mins = (
+                                _sched.astimezone(timezone.utc) - datetime.now(timezone.utc)
+                            ).total_seconds() / 60
+                            if _mins < 0:
+                                # Scheduled departure has passed; treat as passed.
+                                if session["notified"] == 0:
+                                    await self._send_tracking_alert(
+                                        session, pos, alert_stop_name, passed=True,
+                                        delay_mins=alert_stop_delay,
+                                        is_realtime=alert_stop_realtime,
+                                    )
+                                    await asyncio.to_thread(
+                                        db_mark_tracking_alerted, session["id"]
+                                    )
+                                return
+                            elif 0 <= _mins <= 10:
+                                approaching = True
+                        break
+            except Exception as _e:
+                print(f"[Bot] stored-schedule fallback error #{session['id']}: {_e}")
+
         if approaching and session["notified"] == 0:
             await self._send_tracking_alert(
                 session, pos, alert_stop_name, passed=False,
