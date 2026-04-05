@@ -7,9 +7,21 @@ Configure via docker-compose.yml environment variables:
 
 import os, sys, asyncio, sqlite3, secrets, random, json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from discord.ext import tasks
+
+SYDNEY_TZ = ZoneInfo("Australia/Sydney")
+_QUIET_HOURS_START = 23  # 11 pm
+_QUIET_HOURS_END   = 5   # 5 am
+
+def _is_quiet_hours() -> bool:
+    """Return True if current Sydney time is between 11 pm and 5 am."""
+    hour = datetime.now(SYDNEY_TZ).hour
+    if _QUIET_HOURS_START > _QUIET_HOURS_END:
+        return hour >= _QUIET_HOURS_START or hour < _QUIET_HOURS_END
+    return _QUIET_HOURS_START <= hour < _QUIET_HOURS_END
 
 # ─── Transport NSW ────────────────────────────────────────────────────────────
 try:
@@ -280,6 +292,8 @@ class BalanceBot(discord.Client):
         """Fire any reminders that are now due — DM the user, or mention in channel."""
         if not REMINDERS_ENABLED:
             return
+        if _is_quiet_hours():
+            return
         try:
             due = await asyncio.to_thread(db_get_due_reminders)
         except Exception as e:
@@ -341,6 +355,8 @@ class BalanceBot(discord.Client):
     async def tracking_loop(self):
         """Poll active vehicle tracking sessions and send alerts when approaching."""
         if not TRANSPORT_ENABLED:
+            return
+        if _is_quiet_hours():
             return
         try:
             sessions = await asyncio.to_thread(db_get_active_trackings)

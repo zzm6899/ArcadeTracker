@@ -126,20 +126,20 @@ def parse_reminder_time(text: str) -> datetime | None:
       "in 10 minutes" / "10 minutes" / "10m" / "10"
       "in 2 hours" / "2h"
       "in 1h30m" / "in 1 hour 30 minutes"
+      "in 30 seconds" / "30s"
+      "in 1h30m20s"
     Returns None if the input cannot be parsed.
     """
     text = text.strip().lower()
     now = datetime.now(SYDNEY_TZ)
 
-    # "in N minutes" variants
-    m = re.fullmatch(r"(?:in\s+)?(\d+)\s*(?:minutes?|mins?|m)", text)
+    # "in NhMmSs" — full combined form (hours + minutes + seconds)
+    m = re.fullmatch(
+        r"(?:in\s+)?(\d+)\s*(?:hours?|hrs?|h)\s*(\d+)\s*(?:minutes?|mins?|m)\s*(\d+)\s*(?:seconds?|secs?|s)",
+        text,
+    )
     if m:
-        return now + timedelta(minutes=int(m.group(1)))
-
-    # "in N hours" variants
-    m = re.fullmatch(r"(?:in\s+)?(\d+)\s*(?:hours?|hrs?|h)", text)
-    if m:
-        return now + timedelta(hours=int(m.group(1)))
+        return now + timedelta(hours=int(m.group(1)), minutes=int(m.group(2)), seconds=int(m.group(3)))
 
     # "in NhMm" / "in N hours M minutes"
     m = re.fullmatch(
@@ -147,6 +147,21 @@ def parse_reminder_time(text: str) -> datetime | None:
     )
     if m:
         return now + timedelta(hours=int(m.group(1)), minutes=int(m.group(2)))
+
+    # "in N hours" variants
+    m = re.fullmatch(r"(?:in\s+)?(\d+)\s*(?:hours?|hrs?|h)", text)
+    if m:
+        return now + timedelta(hours=int(m.group(1)))
+
+    # "in N minutes" variants
+    m = re.fullmatch(r"(?:in\s+)?(\d+)\s*(?:minutes?|mins?|m)", text)
+    if m:
+        return now + timedelta(minutes=int(m.group(1)))
+
+    # "in N seconds" variants
+    m = re.fullmatch(r"(?:in\s+)?(\d+)\s*(?:seconds?|secs?|s)", text)
+    if m:
+        return now + timedelta(seconds=int(m.group(1)))
 
     # Plain number → treat as minutes
     m = re.fullmatch(r"(\d+)", text)
