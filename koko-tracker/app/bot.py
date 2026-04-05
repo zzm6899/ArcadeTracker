@@ -442,7 +442,7 @@ class BalanceBot(discord.Client):
 
                 if alert_dep is not None:
                     now_utc = datetime.now(timezone.utc)
-                    mins_until = (alert_dep.astimezone(timezone.utc) - now_utc).total_seconds() / 60
+                    mins_until = (alert_dep - now_utc).total_seconds() / 60
                     dummy_pos = self._dummy_pos(session)
                     if 0 <= mins_until <= 10:
                         # Service is about to depart — send approaching alert so the
