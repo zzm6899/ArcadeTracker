@@ -2236,7 +2236,7 @@ def admin_logs():
 def admin():
     conn = get_db()
     users = conn.execute('SELECT * FROM users ORDER BY created_at').fetchall()
-    cards = conn.execute('''
+    cards_raw = conn.execute('''
         SELECT c.*, u.username,
                h.cash_balance, h.cash_bonus, h.points, h.recorded_at as last_updated
         FROM cards c
@@ -2244,6 +2244,21 @@ def admin():
         LEFT JOIN balance_history h ON h.id=(SELECT id FROM balance_history WHERE card_id=c.id ORDER BY recorded_at DESC LIMIT 1)
         WHERE c.active=1 ORDER BY u.username, c.card_type
     ''').fetchall()
+    cards = []
+    total_credits_used = 0.0
+    total_aud_spent = 0.0
+    for card_row in cards_raw:
+        card = dict(card_row)
+        history_rows = conn.execute(
+            'SELECT cash_balance,cash_bonus,recorded_at FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC',
+            (card['id'],)
+        ).fetchall()
+        movement = summarize_balance_movements(history_rows, card['card_type']) if len(history_rows) >= 2 else {'arcade_used': 0.0, 'aud_loaded': 0.0}
+        card['alltime_credits_used'] = movement['arcade_used']
+        card['alltime_aud_spent'] = movement['aud_loaded']
+        total_credits_used += movement['arcade_used']
+        total_aud_spent += movement['aud_loaded']
+        cards.append(card)
     tz_sessions = conn.execute('''
         SELECT ts.*, u.username FROM timezone_sessions ts
         JOIN users u ON ts.user_id = u.id
@@ -2261,6 +2276,7 @@ def admin():
                           tz_sessions=tz_sessions, tz_statuses=tz_statuses,
                           user=current, current_user=current, admin_username=ADMIN_USERNAME,
                           admin_webhook=admin_wh, quiet_cfg=quiet_cfg,
+                          admin_stats={'credits_used': round(total_credits_used, 2), 'aud_spent': round(total_aud_spent, 2)},
                           now_date=datetime.utcnow().strftime('%Y-%m-%d'))
 
 @app.route('/admin/webhook', methods=['POST'])

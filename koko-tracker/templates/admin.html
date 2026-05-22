@@ -6,6 +6,10 @@
     <div>
         <h1 class="text-xl font-bold text-white">⚙️ Admin</h1>
         <p class="text-slate-500 text-sm mt-0.5">{{ users|length }} users · {{ cards|length }} active cards</p>
+        <p class="text-xs text-slate-500 mt-1">
+            All-time: <span class="text-red-400">-${{ "%.2f"|format(admin_stats.credits_used or 0) }}</span> credits used ·
+            <span class="text-red-400">~-${{ "%.2f"|format(admin_stats.aud_spent or 0) }}</span> AUD spent
+        </p>
     </div>
     <a href="/dashboard" class="text-slate-500 hover:text-white text-sm transition">← Dashboard</a>
 </div>
@@ -135,6 +139,8 @@
                     <th class="text-left pb-2 pr-3">Balance</th>
                     <th class="text-left pb-2 pr-3">Bonus</th>
                     <th class="text-left pb-2 pr-3">Points</th>
+                    <th class="text-left pb-2 pr-3">Credits Used</th>
+                    <th class="text-left pb-2 pr-3">AUD Spent</th>
                     <th class="text-left pb-2 pr-3">Poll</th>
                     <th class="text-left pb-2 pr-3">Updated</th>
                     <th class="text-left pb-2">Leaderboard</th>
@@ -154,6 +160,8 @@
                 <td class="py-2 pr-3 text-green-400 text-xs font-medium">${{ "%.2f"|format(card.cash_balance or 0) }}</td>
                 <td class="py-2 pr-3 text-yellow-400 text-xs">${{ "%.2f"|format(card.cash_bonus or 0) }}</td>
                 <td class="py-2 pr-3 text-orange-400 text-xs">{{ card.points or 0 }}</td>
+                <td class="py-2 pr-3 text-red-400 text-xs font-medium">-${{ "%.2f"|format(card.alltime_credits_used or 0) }}</td>
+                <td class="py-2 pr-3 text-red-400 text-xs font-medium">~-${{ "%.2f"|format(card.alltime_aud_spent or 0) }}</td>
                 <td class="py-2 pr-3 text-slate-500 text-xs">{{ card.poll_interval or 60 }}s</td>
                 <td class="py-2 pr-3 text-slate-500 text-xs"><span class="utc-ts">{{ card.last_updated[:16] if card.last_updated else 'Never' }}</span></td>
                 <td class="py-2">

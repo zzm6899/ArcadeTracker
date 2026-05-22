@@ -892,6 +892,7 @@ async def cmd_help(interaction: discord.Interaction):
     main_embed.add_field(name="🔄 /refresh", value="Force poll all cards", inline=True)
     main_embed.add_field(name="🏆 /leaderboard", value="Public balance rankings", inline=True)
     main_embed.add_field(name="➕ /addcard", value="Add a Koko or Timezone card", inline=True)
+    main_embed.add_field(name="🌐 /website", value="Get dashboard and setup links", inline=True)
     main_embed.add_field(name="🔒 /privacy", value="Toggle public/private per command", inline=True)
     main_embed.add_field(name="ℹ️ /info", value="Bot & account info", inline=True)
     main_embed.add_field(name="🛠 /setup", value="Quick start guide", inline=True)
@@ -927,6 +928,22 @@ async def cmd_help(interaction: discord.Interaction):
         embeds.append(transport_embed)
     embeds[-1].set_footer(text=f"Dashboard: {APP_URL}")
     await interaction.followup.send(embeds=embeds, ephemeral=True)
+
+
+@bot.tree.command(name="website", description="Get the Balance Tracker website link")
+async def cmd_website(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
+    embed = discord.Embed(
+        title="🌐 Balance Tracker Website",
+        url=APP_URL,
+        description=f"[Open dashboard]({APP_URL})",
+        color=0x6366f1
+    )
+    embed.add_field(name="Dashboard", value=f"[{APP_URL}]({APP_URL})", inline=False)
+    embed.add_field(name="Settings", value=f"[{APP_URL}/settings]({APP_URL}/settings)", inline=True)
+    embed.add_field(name="Timezone", value=f"[{APP_URL}/timezone/start]({APP_URL}/timezone/start)", inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="info", description="Bot info and your account status")
