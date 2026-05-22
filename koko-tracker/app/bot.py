@@ -954,9 +954,9 @@ async def cmd_info(interaction: discord.Interaction):
         total_alltime = sum(r['spent'] for r in alltime)
         total_loaded = sum(r.get('aud_loaded', 0) for r in alltime)
         if abs(total_alltime) >= 0.01:
-            embed.add_field(name="📉 Credits Used", value=f"${total_alltime:.2f}", inline=True)
+            embed.add_field(name="📉 Credits Used", value=f"-${total_alltime:.2f}", inline=True)
         if abs(total_loaded) >= 0.01:
-            embed.add_field(name="💳 AUD Loaded", value=f"~${total_loaded:.2f}", inline=True)
+            embed.add_field(name="💳 AUD Spent", value=f"~-${total_loaded:.2f}", inline=True)
 
         embed.add_field(name="🏆 Leaderboard", value="Opted In" if user['leaderboard_opt_in'] else "Opted Out", inline=True)
     else:
@@ -1056,9 +1056,9 @@ async def cmd_cards(interaction: discord.Interaction):
         at_loaded = loaded_map.get(card['id'], 0)
         at_str = ''
         if abs(at_spent) >= 0.01:
-            at_str += f"\n📉 All-time credits used: ${at_spent:.2f}"
+            at_str += f"\n📉 All-time credits used: -${at_spent:.2f}"
         if abs(at_loaded) >= 0.01:
-            at_str += f"\n💳 All-time AUD loaded: ~${at_loaded:.2f}"
+            at_str += f"\n💳 All-time AUD spent: ~-${at_loaded:.2f}"
         val = (f"💰 **${total:.2f}** · ${card['cash_balance'] or 0:.2f} + ${card['cash_bonus'] or 0:.2f} bonus\n"
                f"🎫 {card['points'] or 0:,} {pts_label}{at_str}\n"
                f"🕐 {last}")
@@ -1117,7 +1117,7 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
     color = 0xef4444 if total_spent > 0 or total_loaded > 0 else 0x22c55e
     embed = discord.Embed(
         title=f"📊 Spending — {label_map[period]}",
-        description="Credits used are arcade balance drops. AUD loaded estimates real cash spent on top-ups.",
+        description="Credits used are arcade balance drops. AUD spent estimates real cash spent on top-ups.",
         color=color
     )
     for r in results:
@@ -1126,10 +1126,10 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
         color_ind = '🔴' if spent > 0 else '🟢'
         embed.add_field(
             name=f"{card_emoji(r['card_type'])} {r['label']}",
-            value=f"{color_ind} Credits used: **${spent:.2f}**\n💳 AUD loaded: **~${aud_loaded:.2f}**",
+            value=f"{color_ind} Credits used: **-${spent:.2f}**\n💳 AUD spent: **~-${aud_loaded:.2f}**",
             inline=False
         )
-    embed.set_footer(text=f"Totals: ${total_spent:.2f} credits used · ~${total_loaded:.2f} AUD loaded")
+    embed.set_footer(text=f"Totals: -${total_spent:.2f} credits used · ~-${total_loaded:.2f} AUD spent")
     await interaction.followup.send(embed=embed, ephemeral=ephem)
 
 

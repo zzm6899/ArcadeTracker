@@ -920,7 +920,7 @@ def send_admin_webhook(card, data, prev, username):
                 fields.append({'name': 'Credit Change', 'value': f'{action}  {change_str}', 'inline': True})
                 if diff > 0:
                     aud_loaded = estimate_aud_loaded(diff, ctype)
-                    fields.append({'name': 'AUD Loaded', 'value': f'~${aud_loaded:.2f}', 'inline': True})
+                    fields.append({'name': 'AUD Spent', 'value': f'~-${aud_loaded:.2f}', 'inline': True})
 
         mode_label = {'on': 'Live', '5m': 'Every 5m', '10m': 'Every 10m',
                       '30m': 'Every 30m', '1h': 'Hourly', '1d': 'Daily'}.get(mode, mode)
@@ -954,7 +954,7 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
             {'name': 'Credit Change',  'value': f"{sign}${diff:.2f}",           'inline': True},
         ]
         if diff > 0:
-            fields.append({'name': 'AUD Loaded', 'value': f"~${estimate_aud_loaded(diff, ctype):.2f}", 'inline': True})
+            fields.append({'name': 'AUD Spent', 'value': f"~-${estimate_aud_loaded(diff, ctype):.2f}", 'inline': True})
         # Calculate all-time spending as cumulative balance drops. Top-ups and
         # other balance increases are ignored.
         try:
@@ -973,7 +973,7 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
                         alltime_spent += prev_total_spend - total_spend
                     prev_total_spend = total_spend
                 if abs(alltime_spent) >= 0.01:
-                    fields.append({'name': 'All-Time Credits Used', 'value': f"${alltime_spent:.2f}", 'inline': True})
+                    fields.append({'name': 'All-Time Credits Used', 'value': f"-${alltime_spent:.2f}", 'inline': True})
         except: pass
         payload = {
             'embeds': [{
