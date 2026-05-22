@@ -34,6 +34,8 @@ import requests
 from bs4 import BeautifulSoup
 import re
 
+DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
+
 app = Flask(__name__, template_folder='../templates', static_folder='../static')
 sys.stdout = _PrintCapture(sys.stdout)
 sys.stderr = _PrintCapture(sys.stderr)
@@ -79,7 +81,6 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = True  # requires HTTPS
 
-DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
 DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 300))
 TIMEZONE_POLL_INTERVAL = int(os.environ.get('TIMEZONE_POLL_INTERVAL', 900))
 KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
@@ -801,6 +802,43 @@ ADMIN_WEBHOOK_INTERVALS = {
     '1d':  86400,
 }
 
+KOKO_TOPUP_PACKAGES = [
+    (10.0, 10.0),
+    (30.0, 40.0),
+    (60.0, 90.0),
+    (100.0, 160.0),
+    (200.0, 340.0),
+]
+
+def estimate_aud_loaded(credit_delta, card_type='koko'):
+    """Estimate real AUD paid from an arcade-credit top-up delta."""
+    if credit_delta <= 0:
+        return 0.0
+    if card_type != 'koko':
+        return round(credit_delta, 2)
+
+    # Koko top-ups include bonus play. Polling may happen after some credits
+    # were used, so a $30 top-up can appear as +$36.80 instead of +$40.00.
+    for paid, loaded in sorted(KOKO_TOPUP_PACKAGES, reverse=True):
+        if paid * 0.9 <= credit_delta <= loaded + 0.25:
+            return paid
+    return round(credit_delta, 2)
+
+def summarize_balance_movements(rows, card_type='koko'):
+    arcade_used = 0.0
+    aud_loaded = 0.0
+    prev_total = None
+    for row in rows:
+        total = (row['cash_balance'] or 0) + (row['cash_bonus'] or 0)
+        if prev_total is not None:
+            delta = total - prev_total
+            if delta < -0.009:
+                arcade_used += abs(delta)
+            elif delta > 0.009:
+                aud_loaded += estimate_aud_loaded(delta, card_type)
+        prev_total = total
+    return {'arcade_used': round(arcade_used, 2), 'aud_loaded': round(aud_loaded, 2)}
+
 def get_admin_webhook_config():
     """Return (url, mode) or (None, 'off') if not configured."""
     try:
@@ -879,7 +917,10 @@ def send_admin_webhook(card, data, prev, username):
                 color     = 0x22c55e if diff > 0 else 0xef4444
                 action    = '💳 Topup!' if diff > 0 else '🎮 Tapped!'
                 change_str = f'{sign}${diff:.2f}'
-                fields.append({'name': 'Change', 'value': f'{action}  {change_str}', 'inline': True})
+                fields.append({'name': 'Credit Change', 'value': f'{action}  {change_str}', 'inline': True})
+                if diff > 0:
+                    aud_loaded = estimate_aud_loaded(diff, ctype)
+                    fields.append({'name': 'AUD Loaded', 'value': f'~${aud_loaded:.2f}', 'inline': True})
 
         mode_label = {'on': 'Live', '5m': 'Every 5m', '10m': 'Every 10m',
                       '30m': 'Every 30m', '1h': 'Hourly', '1d': 'Daily'}.get(mode, mode)
@@ -910,8 +951,10 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
         fields = [
             {'name': 'Credits', 'value': f"${data.get('cash_balance', 0):.2f}", 'inline': True},
             {'name': 'Bonus',   'value': f"${data.get('cash_bonus', 0):.2f}",   'inline': True},
-            {'name': 'Change',  'value': f"{sign}${diff:.2f}",                  'inline': True},
+            {'name': 'Credit Change',  'value': f"{sign}${diff:.2f}",           'inline': True},
         ]
+        if diff > 0:
+            fields.append({'name': 'AUD Loaded', 'value': f"~${estimate_aud_loaded(diff, ctype):.2f}", 'inline': True})
         # Calculate all-time spending as cumulative balance drops. Top-ups and
         # other balance increases are ignored.
         try:
@@ -930,7 +973,7 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
                         alltime_spent += prev_total_spend - total_spend
                     prev_total_spend = total_spend
                 if abs(alltime_spent) >= 0.01:
-                    fields.append({'name': 'All-Time Spent', 'value': f"${alltime_spent:.2f}", 'inline': True})
+                    fields.append({'name': 'All-Time Credits Used', 'value': f"${alltime_spent:.2f}", 'inline': True})
         except: pass
         payload = {
             'embeds': [{
@@ -2373,19 +2416,32 @@ def api_history(card_id):
     user = get_current_user()
     period = request.args.get('period','day')
     conn = get_db()
-    if not conn.execute('SELECT id FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone():
+    card = conn.execute('SELECT id, card_type FROM cards WHERE id=? AND user_id=?', (card_id, user['id'])).fetchone()
+    if not card:
         conn.close(); return jsonify({'error': 'Not found'}), 404
     if period == 'all':
         rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND cash_balance IS NOT NULL ORDER BY recorded_at ASC',
             (card_id,)).fetchall()
+        movement_rows = rows
     else:
         since = datetime.utcnow() - ({'day': timedelta(hours=24), 'week': timedelta(days=7), 'month': timedelta(days=30)}.get(period, timedelta(hours=24)))
+        since_str = since.strftime('%Y-%m-%d %H:%M:%S')
         rows = conn.execute('SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at>=? AND cash_balance IS NOT NULL ORDER BY recorded_at ASC',
-            (card_id, since.strftime('%Y-%m-%d %H:%M:%S'))).fetchall()
+            (card_id, since_str)).fetchall()
+        movement_rows = list(rows)
+        before = conn.execute(
+            'SELECT cash_balance,cash_bonus,points,recorded_at,description FROM balance_history WHERE card_id=? AND recorded_at<? AND cash_balance IS NOT NULL ORDER BY recorded_at DESC LIMIT 1',
+            (card_id, since_str)
+        ).fetchone()
+        if before:
+            movement_rows.insert(0, before)
+    movement = summarize_balance_movements(movement_rows, card['card_type']) if len(movement_rows) >= 2 else {'arcade_used': 0.0, 'aud_loaded': 0.0}
     conn.close()
     return jsonify({'labels':[r['recorded_at'] for r in rows], 'cash_balance':[r['cash_balance'] for r in rows],
                     'cash_bonus':[r['cash_bonus'] for r in rows], 'points':[r['points'] for r in rows],
-                    'descriptions':[r['description'] for r in rows]})
+                    'descriptions':[r['description'] for r in rows],
+                    'arcade_used': movement['arcade_used'],
+                    'aud_loaded': movement['aud_loaded']})
 
 @app.route('/api/cards/<int:card_id>/stats')
 @login_required
@@ -2397,8 +2453,20 @@ def api_stats(card_id):
     latest = conn.execute('SELECT * FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1', (card_id,)).fetchone()
     count = conn.execute('SELECT COUNT(*) as c FROM balance_history WHERE card_id=?', (card_id,)).fetchone()['c']
     since_24h = (datetime.utcnow()-timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
-    first_24h = conn.execute('SELECT cash_balance,cash_bonus FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC LIMIT 1',
-        (card_id, since_24h)).fetchone()
+    rows_24h = list(conn.execute(
+        'SELECT cash_balance,cash_bonus,recorded_at FROM balance_history WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC',
+        (card_id, since_24h)
+    ).fetchall())
+    before_24h = conn.execute(
+        'SELECT cash_balance,cash_bonus,recorded_at FROM balance_history WHERE card_id=? AND recorded_at<? ORDER BY recorded_at DESC LIMIT 1',
+        (card_id, since_24h)
+    ).fetchone()
+    if before_24h:
+        rows_24h.insert(0, before_24h)
+    rows_alltime = conn.execute(
+        'SELECT cash_balance,cash_bonus,recorded_at FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC',
+        (card_id,)
+    ).fetchall()
     conn.close()
 
     history = None
@@ -2408,20 +2476,18 @@ def api_stats(card_id):
             bearer, _, cookies, _ = token_info
             history = fetch_timezone_history(bearer, str(card['card_number']), cookies)
 
-    spent_24h = None
-    if first_24h and latest:
-        spent_24h = round(((first_24h['cash_balance'] or 0)+(first_24h['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
-    # All-time spending: difference between first ever reading and latest
-    spent_alltime = None
-    first_ever = conn2_first = None
-    try:
-        conn2 = get_db()
-        first_ever = conn2.execute('SELECT cash_balance,cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC LIMIT 1', (card_id,)).fetchone()
-        conn2.close()
-    except: pass
-    if first_ever and latest:
-        spent_alltime = round(((first_ever['cash_balance'] or 0)+(first_ever['cash_bonus'] or 0))-((latest['cash_balance'] or 0)+(latest['cash_bonus'] or 0)), 2)
-    return jsonify({'total_readings': count, 'latest': dict(latest) if latest else None, 'spent_24h': spent_24h, 'spent_alltime': spent_alltime, 'card_type': card['card_type'], 'history': history or []})
+    movement_24h = summarize_balance_movements(rows_24h, card['card_type']) if len(rows_24h) >= 2 else {'arcade_used': 0.0, 'aud_loaded': 0.0}
+    movement_alltime = summarize_balance_movements(rows_alltime, card['card_type']) if len(rows_alltime) >= 2 else {'arcade_used': 0.0, 'aud_loaded': 0.0}
+    return jsonify({
+        'total_readings': count,
+        'latest': dict(latest) if latest else None,
+        'spent_24h': movement_24h['arcade_used'],
+        'spent_alltime': movement_alltime['arcade_used'],
+        'aud_loaded_24h': movement_24h['aud_loaded'],
+        'aud_loaded_alltime': movement_alltime['aud_loaded'],
+        'card_type': card['card_type'],
+        'history': history or []
+    })
 
 @app.route('/api/dashboard/overview')
 @login_required

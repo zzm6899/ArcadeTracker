@@ -166,10 +166,11 @@ def db_get_spent(user_id, days=1):
         if before:
             rows.insert(0, before)
         if len(rows) < 2:
-            results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': 0.0})
+            results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': 0.0, 'aud_loaded': 0.0})
             continue
         spent = _sum_balance_drops(rows)
-        results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
+        aud_loaded = _sum_aud_loaded(rows, card['card_type'])
+        results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent, 'aud_loaded': aud_loaded})
     conn.close()
     return results
 
@@ -184,7 +185,8 @@ def db_get_spent_alltime(user_id):
             (card['id'],)
         ).fetchall()
         spent = _sum_balance_drops(rows) if len(rows) >= 2 else 0.0
-        results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
+        aud_loaded = _sum_aud_loaded(rows, card['card_type']) if len(rows) >= 2 else 0.0
+        results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent, 'aud_loaded': aud_loaded})
     conn.close()
     return results
 
@@ -197,6 +199,16 @@ def _sum_balance_drops(rows):
             spent += prev_total - total
         prev_total = total
     return round(spent, 2)
+
+def _sum_aud_loaded(rows, card_type):
+    aud_loaded = 0.0
+    prev_total = None
+    for row in rows:
+        total = (row['cash_balance'] or 0) + (row['cash_bonus'] or 0)
+        if prev_total is not None and total > prev_total:
+            aud_loaded += estimate_aud_loaded(total - prev_total, card_type)
+        prev_total = total
+    return round(aud_loaded, 2)
 
 def db_get_stats_for_status():
     """Privacy-safe aggregate stats for bot status messages."""
@@ -229,6 +241,24 @@ def tier_emoji(tier):
 
 def card_emoji(ctype):
     return '🕹️' if ctype == 'timezone' else '🎮'
+
+KOKO_TOPUP_PACKAGES = [
+    (10.0, 10.0),
+    (30.0, 40.0),
+    (60.0, 90.0),
+    (100.0, 160.0),
+    (200.0, 340.0),
+]
+
+def estimate_aud_loaded(credit_delta, card_type='koko'):
+    if credit_delta <= 0:
+        return 0.0
+    if card_type != 'koko':
+        return round(credit_delta, 2)
+    for paid, loaded in sorted(KOKO_TOPUP_PACKAGES, reverse=True):
+        if paid * 0.9 <= credit_delta <= loaded + 0.25:
+            return paid
+    return round(credit_delta, 2)
 
 # ─── Bot ──────────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -922,8 +952,11 @@ async def cmd_info(interaction: discord.Interaction):
 
         alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
         total_alltime = sum(r['spent'] for r in alltime)
+        total_loaded = sum(r.get('aud_loaded', 0) for r in alltime)
         if abs(total_alltime) >= 0.01:
-            embed.add_field(name="📉 All-Time Spent", value=f"${total_alltime:.2f}", inline=True)
+            embed.add_field(name="📉 Credits Used", value=f"${total_alltime:.2f}", inline=True)
+        if abs(total_loaded) >= 0.01:
+            embed.add_field(name="💳 AUD Loaded", value=f"~${total_loaded:.2f}", inline=True)
 
         embed.add_field(name="🏆 Leaderboard", value="Opted In" if user['leaderboard_opt_in'] else "Opted Out", inline=True)
     else:
@@ -1010,6 +1043,7 @@ async def cmd_cards(interaction: discord.Interaction):
 
     alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
     alltime_map = {r['id']: r['spent'] for r in alltime}
+    loaded_map = {r['id']: r.get('aud_loaded', 0) for r in alltime}
 
     embed = discord.Embed(title=f"🎮 {user['username']}'s Cards", color=0x6366f1)
     for card in cards:
@@ -1019,9 +1053,12 @@ async def cmd_cards(interaction: discord.Interaction):
         last  = card['last_updated'][:16] if card['last_updated'] else 'Never'
         pts_label = 'e-Tickets' if card['card_type'] == 'timezone' else 'pts'
         at_spent = alltime_map.get(card['id'], 0)
+        at_loaded = loaded_map.get(card['id'], 0)
         at_str = ''
         if abs(at_spent) >= 0.01:
-            at_str = f"\n📉 All-time spent: ${at_spent:.2f}"
+            at_str += f"\n📉 All-time credits used: ${at_spent:.2f}"
+        if abs(at_loaded) >= 0.01:
+            at_str += f"\n💳 All-time AUD loaded: ~${at_loaded:.2f}"
         val = (f"💰 **${total:.2f}** · ${card['cash_balance'] or 0:.2f} + ${card['cash_bonus'] or 0:.2f} bonus\n"
                f"🎫 {card['points'] or 0:,} {pts_label}{at_str}\n"
                f"🕐 {last}")
@@ -1076,21 +1113,23 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
         await interaction.followup.send("No spending data available.", ephemeral=ephem); return
 
     total_spent = sum(r['spent'] for r in results)
-    color = 0xef4444 if total_spent > 0 else 0x22c55e
+    total_loaded = sum(r.get('aud_loaded', 0) for r in results)
+    color = 0xef4444 if total_spent > 0 or total_loaded > 0 else 0x22c55e
     embed = discord.Embed(
         title=f"📊 Spending — {label_map[period]}",
-        description="Top-ups and balance increases are ignored.",
+        description="Credits used are arcade balance drops. AUD loaded estimates real cash spent on top-ups.",
         color=color
     )
     for r in results:
         spent = r['spent']
+        aud_loaded = r.get('aud_loaded', 0)
         color_ind = '🔴' if spent > 0 else '🟢'
         embed.add_field(
             name=f"{card_emoji(r['card_type'])} {r['label']}",
-            value=f"{color_ind} **${spent:.2f} spent**",
-            inline=True
+            value=f"{color_ind} Credits used: **${spent:.2f}**\n💳 AUD loaded: **~${aud_loaded:.2f}**",
+            inline=False
         )
-    embed.set_footer(text=f"Total spent: ${total_spent:.2f} in {label_map[period]}")
+    embed.set_footer(text=f"Totals: ${total_spent:.2f} credits used · ~${total_loaded:.2f} AUD loaded")
     await interaction.followup.send(embed=embed, ephemeral=ephem)
 
 
