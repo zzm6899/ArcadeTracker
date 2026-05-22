@@ -905,6 +905,7 @@ def send_admin_webhook(card, data, prev, username):
         ]
         if data.get('tier'):
             fields.append({'name': 'Tier', 'value': data['tier'], 'inline': True})
+        fields.append({'name': 'Website', 'value': f'[Open dashboard]({APP_URL})', 'inline': False})
 
         color = 0x6366f1  # indigo default
         change_str = ''
@@ -928,6 +929,7 @@ def send_admin_webhook(card, data, prev, username):
         payload = {
             'embeds': [{
                 'title': f'{emoji} {action or "Balance Update"} — {label}',
+                'url': APP_URL,
                 'color': color,
                 'fields': fields,
                 'footer': {'text': f'Total: ${new_total:.2f}  ·  Admin Monitor ({mode_label})'},
@@ -975,9 +977,11 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
                 if abs(alltime_spent) >= 0.01:
                     fields.append({'name': 'All-Time Credits Used', 'value': f"-${alltime_spent:.2f}", 'inline': True})
         except: pass
+        fields.append({'name': 'Website', 'value': f'[Open dashboard]({APP_URL})', 'inline': False})
         payload = {
             'embeds': [{
                 'title': f'{emoji} {label}',
+                'url': APP_URL,
                 'description': action,
                 'color': color,
                 'fields': fields,
@@ -2081,8 +2085,12 @@ def test_webhook():
         payload = {
             'embeds': [{
                 'title': '🎮 Balance Tracker — Test',
+                'url': APP_URL,
                 'description': 'Webhook connected successfully!',
                 'color': 0x6366f1,
+                'fields': [
+                    {'name': 'Website', 'value': f'[Open dashboard]({APP_URL})', 'inline': False},
+                ],
                 'footer': {'text': f'From: {user["username"]}'},
                 'timestamp': datetime.utcnow().isoformat() + 'Z'
             }]
@@ -2286,6 +2294,7 @@ def admin_webhook_test():
         payload = {
             'embeds': [{
                 'title': '🔔 Admin Webhook Test',
+                'url': APP_URL,
                 'description': 'Balance Tracker admin webhook is configured correctly.',
                 'color': 0x6366f1,
                 'fields': [
@@ -2295,6 +2304,7 @@ def admin_webhook_test():
                     {'name': 'Credits', 'value': '$42.00',          'inline': True},
                     {'name': 'Bonus',   'value': '$8.00',           'inline': True},
                     {'name': 'Points',  'value': '1337',            'inline': True},
+                    {'name': 'Website', 'value': f'[Open dashboard]({APP_URL})', 'inline': False},
                 ],
                 'footer': {'text': 'Admin Monitor — Test message'},
                 'timestamp': datetime.utcnow().isoformat() + 'Z',
