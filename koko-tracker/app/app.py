@@ -912,14 +912,23 @@ def send_discord_webhook(webhook_url, card, data, prev_total, new_total):
             {'name': 'Bonus',   'value': f"${data.get('cash_bonus', 0):.2f}",   'inline': True},
             {'name': 'Change',  'value': f"{sign}${diff:.2f}",                  'inline': True},
         ]
-        # Calculate all-time spending
+        # Calculate all-time spending as cumulative balance drops. Top-ups and
+        # other balance increases are ignored.
         try:
             conn = get_db()
-            first = conn.execute('SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC LIMIT 1', (card['id'],)).fetchone()
+            rows = conn.execute(
+                'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC',
+                (card['id'],)
+            ).fetchall()
             conn.close()
-            if first:
-                first_total = (first['cash_balance'] or 0) + (first['cash_bonus'] or 0)
-                alltime_spent = first_total - new_total
+            if len(rows) >= 2:
+                alltime_spent = 0.0
+                prev_total_spend = None
+                for row in rows:
+                    total_spend = (row['cash_balance'] or 0) + (row['cash_bonus'] or 0)
+                    if prev_total_spend is not None and total_spend < prev_total_spend:
+                        alltime_spent += prev_total_spend - total_spend
+                    prev_total_spend = total_spend
                 if abs(alltime_spent) >= 0.01:
                     fields.append({'name': 'All-Time Spent', 'value': f"${alltime_spent:.2f}", 'inline': True})
         except: pass

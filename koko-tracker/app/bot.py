@@ -143,60 +143,60 @@ def db_set_command_privacy(user_id, cmd, ephemeral):
     conn.commit(); conn.close()
 
 def db_get_spent(user_id, days=1):
-    """Get spending per card for the last N days."""
+    """Get spending per card for the last N days.
+
+    Spending is the sum of balance drops between readings. Balance increases are
+    top-ups/adjustments and are intentionally ignored.
+    """
     since = (datetime.utcnow() - timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
     conn = get_db()
     cards = conn.execute('SELECT id, card_label, card_number, card_type FROM cards WHERE user_id=? AND active=1', (user_id,)).fetchall()
     results = []
     for card in cards:
-        rows = conn.execute(
+        rows = list(conn.execute(
             'SELECT cash_balance, cash_bonus, recorded_at FROM balance_history '
             'WHERE card_id=? AND recorded_at>=? ORDER BY recorded_at ASC',
             (card['id'], since)
-        ).fetchall()
+        ).fetchall())
+        before = conn.execute(
+            'SELECT cash_balance, cash_bonus, recorded_at FROM balance_history '
+            'WHERE card_id=? AND recorded_at<? ORDER BY recorded_at DESC LIMIT 1',
+            (card['id'], since)
+        ).fetchone()
+        if before:
+            rows.insert(0, before)
         if len(rows) < 2:
-            before = conn.execute(
-                'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? AND recorded_at<? ORDER BY recorded_at DESC LIMIT 1',
-                (card['id'], since)
-            ).fetchone()
-            latest = conn.execute(
-                'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1',
-                (card['id'],)
-            ).fetchone()
-            if before and latest:
-                first_total = (before['cash_balance'] or 0) + (before['cash_bonus'] or 0)
-                last_total  = (latest['cash_balance'] or 0) + (latest['cash_bonus'] or 0)
-                spent = first_total - last_total
-                results.append({'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
+            results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': 0.0})
             continue
-        first_total = (rows[0]['cash_balance'] or 0) + (rows[0]['cash_bonus'] or 0)
-        last_total  = (rows[-1]['cash_balance'] or 0) + (rows[-1]['cash_bonus'] or 0)
-        spent = first_total - last_total
-        results.append({'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
+        spent = _sum_balance_drops(rows)
+        results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
     conn.close()
     return results
 
 def db_get_spent_alltime(user_id):
-    """Get all-time spending per card (first reading vs latest reading)."""
+    """Get all-time spending per card as cumulative balance drops."""
     conn = get_db()
     cards = conn.execute('SELECT id, card_label, card_number, card_type FROM cards WHERE user_id=? AND active=1', (user_id,)).fetchall()
     results = []
     for card in cards:
-        first = conn.execute(
-            'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC LIMIT 1',
+        rows = conn.execute(
+            'SELECT cash_balance, cash_bonus, recorded_at FROM balance_history WHERE card_id=? ORDER BY recorded_at ASC',
             (card['id'],)
-        ).fetchone()
-        latest = conn.execute(
-            'SELECT cash_balance, cash_bonus FROM balance_history WHERE card_id=? ORDER BY recorded_at DESC LIMIT 1',
-            (card['id'],)
-        ).fetchone()
-        if first and latest:
-            first_total = (first['cash_balance'] or 0) + (first['cash_bonus'] or 0)
-            last_total  = (latest['cash_balance'] or 0) + (latest['cash_bonus'] or 0)
-            spent = first_total - last_total
-            results.append({'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
+        ).fetchall()
+        spent = _sum_balance_drops(rows) if len(rows) >= 2 else 0.0
+        results.append({'id': card['id'], 'label': card['card_label'] or card['card_number'], 'card_type': card['card_type'], 'spent': spent})
     conn.close()
     return results
+
+def _sum_balance_drops(rows):
+    spent = 0.0
+    prev_total = None
+    for row in rows:
+        total = (row['cash_balance'] or 0) + (row['cash_bonus'] or 0)
+        if prev_total is not None and total < prev_total:
+            spent += prev_total - total
+        prev_total = total
+    return round(spent, 2)
 
 def db_get_stats_for_status():
     """Privacy-safe aggregate stats for bot status messages."""
@@ -849,51 +849,54 @@ bot = BalanceBot()
 async def cmd_help(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await asyncio.to_thread(db_touch_last_seen, interaction.user.id)
-    embed = discord.Embed(
+    embeds = []
+    main_embed = discord.Embed(
         title="📖 Balance Tracker — Commands",
         color=0x6366f1,
         description="Track your Koko & Timezone arcade card balances."
     )
-    embed.add_field(name="🔗 /link", value="Link your Discord account", inline=True)
-    embed.add_field(name="🎮 /cards", value="Show all card balances", inline=True)
-    embed.add_field(name="💰 /balance", value="Quick total balance", inline=True)
-    embed.add_field(name="📊 /spent", value="Spending over time", inline=True)
-    embed.add_field(name="🔄 /refresh", value="Force poll all cards", inline=True)
-    embed.add_field(name="🏆 /leaderboard", value="Public balance rankings", inline=True)
-    embed.add_field(name="➕ /addcard", value="Add a Koko or Timezone card", inline=True)
-    embed.add_field(name="🔒 /privacy", value="Toggle public/private per command", inline=True)
-    embed.add_field(name="ℹ️ /info", value="Bot & account info", inline=True)
-    embed.add_field(name="🛠 /setup", value="Quick start guide", inline=True)
+    main_embed.add_field(name="🔗 /link", value="Link your Discord account", inline=True)
+    main_embed.add_field(name="🎮 /cards", value="Show all card balances", inline=True)
+    main_embed.add_field(name="💰 /balance", value="Quick total balance", inline=True)
+    main_embed.add_field(name="📊 /spent", value="Spending over time", inline=True)
+    main_embed.add_field(name="🔄 /refresh", value="Force poll all cards", inline=True)
+    main_embed.add_field(name="🏆 /leaderboard", value="Public balance rankings", inline=True)
+    main_embed.add_field(name="➕ /addcard", value="Add a Koko or Timezone card", inline=True)
+    main_embed.add_field(name="🔒 /privacy", value="Toggle public/private per command", inline=True)
+    main_embed.add_field(name="ℹ️ /info", value="Bot & account info", inline=True)
+    main_embed.add_field(name="🛠 /setup", value="Quick start guide", inline=True)
+    embeds.append(main_embed)
     if REMINDERS_ENABLED:
-        embed.add_field(name="\u200b", value="**🔔 Reminders**", inline=False)
-        embed.add_field(
+        reminder_embed = discord.Embed(title="🔔 Reminder Commands", color=0x6366f1)
+        reminder_embed.add_field(
             name="🔔 /reminder set",
             value='Set a timed reminder — `"in 10 minutes"`, `"in 2 hours"`, `"30"`',
             inline=False,
         )
-        embed.add_field(name="📋 /reminder list", value="List your pending reminders", inline=True)
-        embed.add_field(name="🗑️ /reminder delete", value="Cancel a reminder by ID", inline=True)
+        reminder_embed.add_field(name="📋 /reminder list", value="List your pending reminders", inline=True)
+        reminder_embed.add_field(name="🗑️ /reminder delete", value="Cancel a reminder by ID", inline=True)
+        embeds.append(reminder_embed)
     if TRANSPORT_ENABLED:
-        embed.add_field(name="\u200b", value="**🚆 NSW Transport**", inline=False)
-        embed.add_field(
+        transport_embed = discord.Embed(title="🚆 NSW Transport Commands", color=0xF15A22)
+        transport_embed.add_field(
             name="⚡ /transport go",
             value='Natural-language planner — `"rhodes to chatswood"`, `"central to parramatta bus"`',
             inline=False,
         )
-        embed.add_field(name="🚆 /transport train", value="Plan a trip — pick stops interactively", inline=True)
-        embed.add_field(name="🚏 /transport departures", value="Live departures + platform, origin & stats", inline=True)
-        embed.add_field(name="📌 /transport next", value='Quick check saved route — `"1"` or `"morning commute"`', inline=False)
-        embed.add_field(name="🔍 /transport find-stop", value="Search stop/station by name → get ID", inline=True)
-        embed.add_field(name="🗺️ /transport my-trips", value="List all saved routes & stops with slot numbers", inline=True)
-        embed.add_field(name="\u200b", value="**Saving & managing**", inline=False)
-        embed.add_field(name="⭐ Save buttons", value="After any trip result — select option then press Save", inline=True)
-        embed.add_field(name="🔔 Remind me buttons", value="On any departure board or trip detail — get a DM before it leaves", inline=True)
-        embed.add_field(name="🚂 Track this train", value="On trip detail — pick a stop to be alerted when train approaches", inline=True)
-        embed.add_field(name="🗑️ /transport delete-trip / delete-stop", value="Remove a saved route or stop by ID", inline=True)
-        embed.add_field(name="📡 /transport track-status", value="List active vehicle tracking sessions", inline=True)
-        embed.add_field(name="🛑 /transport stop-tracking", value="Cancel an active tracking session by ID", inline=True)
-    embed.set_footer(text=f"Dashboard: {APP_URL}")
-    await interaction.followup.send(embed=embed, ephemeral=True)
+        transport_embed.add_field(name="🚆 /transport train", value="Plan a trip — pick stops interactively", inline=True)
+        transport_embed.add_field(name="🚏 /transport departures", value="Live departures + platform, origin & stats", inline=True)
+        transport_embed.add_field(name="📌 /transport next", value='Quick check saved route — `"1"` or `"morning commute"`', inline=False)
+        transport_embed.add_field(name="🔍 /transport find-stop", value="Search stop/station by name → get ID", inline=True)
+        transport_embed.add_field(name="🗺️ /transport my-trips", value="List all saved routes & stops with slot numbers", inline=True)
+        transport_embed.add_field(name="⭐ Save buttons", value="After any trip result — select option then press Save", inline=True)
+        transport_embed.add_field(name="🔔 Remind me buttons", value="On any departure board or trip detail — get a DM before it leaves", inline=True)
+        transport_embed.add_field(name="🚂 Track this train", value="On trip detail — pick a stop to be alerted when train approaches", inline=True)
+        transport_embed.add_field(name="🗑️ /transport delete-trip / delete-stop", value="Remove a saved route or stop by ID", inline=True)
+        transport_embed.add_field(name="📡 /transport track-status", value="List active vehicle tracking sessions", inline=True)
+        transport_embed.add_field(name="🛑 /transport stop-tracking", value="Cancel an active tracking session by ID", inline=True)
+        embeds.append(transport_embed)
+    embeds[-1].set_footer(text=f"Dashboard: {APP_URL}")
+    await interaction.followup.send(embeds=embeds, ephemeral=True)
 
 
 @bot.tree.command(name="info", description="Bot info and your account status")
@@ -920,8 +923,7 @@ async def cmd_info(interaction: discord.Interaction):
         alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
         total_alltime = sum(r['spent'] for r in alltime)
         if abs(total_alltime) >= 0.01:
-            sign = '-' if total_alltime > 0 else '+'
-            embed.add_field(name="📉 All-Time Spent", value=f"{sign}${abs(total_alltime):.2f}", inline=True)
+            embed.add_field(name="📉 All-Time Spent", value=f"${total_alltime:.2f}", inline=True)
 
         embed.add_field(name="🏆 Leaderboard", value="Opted In" if user['leaderboard_opt_in'] else "Opted Out", inline=True)
     else:
@@ -1007,7 +1009,7 @@ async def cmd_cards(interaction: discord.Interaction):
         await interaction.followup.send("No cards found.", ephemeral=ephem); return
 
     alltime = await asyncio.to_thread(db_get_spent_alltime, user['id'])
-    alltime_map = {r['label']: r['spent'] for r in alltime}
+    alltime_map = {r['id']: r['spent'] for r in alltime}
 
     embed = discord.Embed(title=f"🎮 {user['username']}'s Cards", color=0x6366f1)
     for card in cards:
@@ -1016,11 +1018,10 @@ async def cmd_cards(interaction: discord.Interaction):
         label = card['card_label'] or 'Card'
         last  = card['last_updated'][:16] if card['last_updated'] else 'Never'
         pts_label = 'e-Tickets' if card['card_type'] == 'timezone' else 'pts'
-        at_spent = alltime_map.get(label, 0)
+        at_spent = alltime_map.get(card['id'], 0)
         at_str = ''
         if abs(at_spent) >= 0.01:
-            at_sign = '-' if at_spent > 0 else '+'
-            at_str = f"\n📉 All-time: {at_sign}${abs(at_spent):.2f}"
+            at_str = f"\n📉 All-time spent: ${at_spent:.2f}"
         val = (f"💰 **${total:.2f}** · ${card['cash_balance'] or 0:.2f} + ${card['cash_bonus'] or 0:.2f} bonus\n"
                f"🎫 {card['points'] or 0:,} {pts_label}{at_str}\n"
                f"🕐 {last}")
@@ -1078,19 +1079,18 @@ async def cmd_spent(interaction: discord.Interaction, period: str = "day"):
     color = 0xef4444 if total_spent > 0 else 0x22c55e
     embed = discord.Embed(
         title=f"📊 Spending — {label_map[period]}",
+        description="Top-ups and balance increases are ignored.",
         color=color
     )
     for r in results:
         spent = r['spent']
-        sign = '-' if spent > 0 else '+'
         color_ind = '🔴' if spent > 0 else '🟢'
         embed.add_field(
             name=f"{card_emoji(r['card_type'])} {r['label']}",
-            value=f"{color_ind} **{sign}${abs(spent):.2f}**",
+            value=f"{color_ind} **${spent:.2f} spent**",
             inline=True
         )
-    summary = f"-${total_spent:.2f}" if total_spent > 0 else f"+${abs(total_spent):.2f}"
-    embed.set_footer(text=f"Total: {summary} in {label_map[period]}")
+    embed.set_footer(text=f"Total spent: ${total_spent:.2f} in {label_map[period]}")
     await interaction.followup.send(embed=embed, ephemeral=ephem)
 
 
