@@ -33,6 +33,22 @@ class PollingTests(unittest.TestCase):
         self.addCleanup(cache.stop)
         tracker.init_db()
 
+    def test_direct_koko_qr_links_skip_request_to_scanned_host(self):
+        client = tracker.app.test_client()
+        balance = {'cash_balance': 5}
+        for host in ('estore.kokoamusement.com.au', 'customer.kokoamusement.com.au'):
+            with self.subTest(host=host), \
+                    patch.object(tracker, 'get_current_user', return_value={'id': 1}), \
+                    patch.object(tracker.requests, 'get') as get, \
+                    patch.object(tracker, 'fetch_koko_balance', return_value=balance) as fetch_balance:
+                url = f'https://{host}/BalanceMobile/BalanceMobile.aspx?locale=en&i=example-token#details'
+                response = client.post('/api/cards/resolve-qr', json={'url': url})
+
+                get.assert_not_called()
+                fetch_balance.assert_called_once_with('example-token')
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json(), {'success': True, 'token': 'example-token', 'balance': balance})
+
     def test_koko_timeout_defers_other_koko_cards_and_polling_recovers(self):
         with closing(tracker.get_db()) as conn, conn:
             conn.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'user', 'unused')")

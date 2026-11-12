@@ -33,6 +33,7 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 import requests
 from bs4 import BeautifulSoup
 import re
+from urllib.parse import parse_qs, urlsplit
 
 DB_PATH = os.environ.get('DB_PATH', '/data/koko.db')
 
@@ -83,7 +84,7 @@ app.config['SESSION_COOKIE_SECURE'] = True  # requires HTTPS
 
 DEFAULT_POLL_INTERVAL = int(os.environ.get('POLL_INTERVAL', 300))
 TIMEZONE_POLL_INTERVAL = int(os.environ.get('TIMEZONE_POLL_INTERVAL', 900))
-KOKO_BASE_URL = 'https://estore.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
+KOKO_BASE_URL = 'https://customer.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx'
 TEEG_API = 'https://api.teeg.cloud'
 ADMIN_USERNAME    = os.environ.get('ADMIN_USERNAME', '')
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', '')
@@ -323,7 +324,7 @@ def admin_required(f):
 # ─── Koko scraper ─────────────────────────────────────────────────────────────
 def fetch_koko_balance(token, *, raise_connect_timeout=False):
     try:
-        resp = requests.get(f"{KOKO_BASE_URL}?i={token}", timeout=15, headers={
+        resp = requests.get(KOKO_BASE_URL, params={'i': token}, timeout=15, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -2485,16 +2486,19 @@ def resolve_qr():
     url = data.get('url', '').strip()
     if not url: return jsonify({'error': 'No URL'}), 400
     try:
-        resp = requests.get(url, timeout=10, allow_redirects=True, headers={'User-Agent': 'Mozilla/5.0'})
-        final_url = resp.url
-        m = re.search(r'[?&]i=([^&]+)', final_url)
-        if m:
-            token = m.group(1)
+        parsed_url = urlsplit(url)
+        balance_url = urlsplit(KOKO_BASE_URL)
+        if (parsed_url.hostname not in (balance_url.hostname, 'estore.kokoamusement.com.au')
+                or parsed_url.path.lower() != balance_url.path.lower()):
+            resp = requests.get(url, timeout=10, allow_redirects=True, headers={'User-Agent': 'Mozilla/5.0'})
+            parsed_url = urlsplit(resp.url)
+        token = parse_qs(parsed_url.query).get('i', [None])[0]
+        if token:
             balance = fetch_koko_balance(token)
             if balance and any(v is not None for v in [balance.get('cash_balance'), balance.get('cash_bonus'), balance.get('points')]):
                 return jsonify({'success': True, 'token': token, 'balance': balance})
             return jsonify({'error': 'Token found but could not fetch balance'}), 400
-        return jsonify({'error': f'Could not extract token from: {final_url}'}), 400
+        return jsonify({'error': 'Could not extract a Koko card token from that URL'}), 400
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

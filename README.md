@@ -112,7 +112,7 @@ The app will be available at `http://localhost:5055` (or your configured port).
 ### 4. Add Cards
 
 **Koko cards:**
-1. Find your card's QR code URL (usually `https://estore.kokoamusement.com.au/...?i=TOKEN`)
+1. Find your card's QR code URL (usually `https://customer.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx?i=TOKEN`)
 2. Go to Dashboard → Add Card → Koko, paste the token
 3. Or use `/addcard` in Discord
 

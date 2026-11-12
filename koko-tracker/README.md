@@ -51,10 +51,10 @@ Then open: **http://YOUR_TRUENAS_IP:5055**
 
 Your card URL looks like:
 ```
-https://estore.kokomusement.com.au/BalanceMobile/BalanceMobile.aspx?i=1ag9ukYM
+https://customer.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx?i=TOKEN
 ```
 
-The token is everything after `?i=` → in this case: **`1ag9ukYM`**
+The card token is the value of the `i` query parameter.
 
 You can find this by:
 - Scanning the QR code on your card and copying the URL
