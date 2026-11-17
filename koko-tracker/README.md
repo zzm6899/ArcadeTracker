@@ -1,15 +1,14 @@
-# 🎮 Koko Tracker
+# Koko Tracker
 
-Self-hosted app to track your **Koko Amusement** game card balance history over time, with graphs for day/week/month trends.
+Koko Tracker records the balance on your **Koko Amusement** game cards. It runs on your own server and charts how your balance changes by day, week or month.
 
 ## Features
 
-- 🔄 **Auto-polls** your card balance every 60 seconds (configurable)
-- 📊 **Charts** — Cash Balance, Cash Bonus, and Points over 24h / 7 days / 30 days
-- 👥 **Multi-user** — each person logs in and tracks their own cards
-- 🃏 **Multi-card** — add multiple cards per account
-- 💾 **SQLite** database — zero-config, data persists in a Docker volume
-- 🐳 **Docker-ready** for TrueNAS (or any Linux host)
+- The app checks balances every 60 seconds by default. You can change the interval.
+- Charts show cash balance, cash bonus and points over 24 hours, 7 days or 30 days.
+- Each person signs in and can track multiple cards on their own account.
+- SQLite needs no setup and keeps its data in a Docker volume.
+- Run the Docker container on TrueNAS or another Linux host.
 
 ---
 
@@ -25,12 +24,12 @@ Self-hosted app to track your **Koko Amusement** game card balance history over 
 docker-compose up -d
 ```
 
-Then open: **http://YOUR_TRUENAS_IP:5055**
+Open **http://YOUR_TRUENAS_IP:5055** in your browser.
 
 ### Option B: TrueNAS Apps UI (Custom App)
 
 1. Go to **Apps → Discover Apps → Custom App**
-2. Set image to your built image OR use docker-compose manually via SSH
+2. Select the image you built. You can also run Docker Compose over SSH.
 3. Map port `5000` → any host port (e.g. `5055`)
 4. Add a host path volume: `/mnt/tank/koko-data` → `/data`
 5. Set environment variable `SECRET_KEY` to a random string
@@ -56,9 +55,7 @@ https://customer.kokoamusement.com.au/BalanceMobile/BalanceMobile.aspx?i=TOKEN
 
 The card token is the value of the `i` query parameter.
 
-You can find this by:
-- Scanning the QR code on your card and copying the URL
-- Checking your Koko app/email for a balance link
+Scan the QR code on your card and copy the URL, or find a balance link in the Koko app or an email from Koko.
 
 ---
 

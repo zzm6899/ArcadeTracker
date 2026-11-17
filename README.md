@@ -1,6 +1,6 @@
 # ArcadeTracker
 
-Self-hosted balance tracker for **Koko Amusement** and **Timezone** arcade cards in Australia. Monitor your credits, bonus balance, points, and spending over time — with a web dashboard, Discord bot, and automated polling.
+ArcadeTracker checks **Koko Amusement** and **Timezone** arcade cards in Australia. It records credits, bonus balances, points and spending over time. Host it yourself and check your cards from the web dashboard or Discord.
 
 ![Docker](https://img.shields.io/badge/docker-ready-blue?logo=docker)
 ![Python](https://img.shields.io/badge/python-3.10+-yellow?logo=python)
@@ -10,49 +10,45 @@ Self-hosted balance tracker for **Koko Amusement** and **Timezone** arcade cards
 
 ## Features
 
-### 📊 Web Dashboard
-- **Balance history charts** — view cash, bonus, and points over 24h / 7 days / 30 days / all time
-- **Spending tracker** — see how much you've spent per card over any time period, dynamically synced with chart selection
-- **All-time spending** — first-ever reading vs latest, always visible at a glance
-- **Multi-card support** — track unlimited Koko and Timezone cards per account
-- **Overview chart** — combined balance view across all your cards
-- **Transaction history** — imported rolling transaction log for Timezone cards (descriptions, timestamps, deltas)
-- **Mobile-friendly** — dark theme, responsive layout
+### Web dashboard
+- Chart cash, bonus balances and points over 24 hours, 7 days, 30 days or all time.
+- See spending per card for the selected chart period. An all-time figure based on the first and latest readings stays visible.
+- Add as many Koko and Timezone cards as you like. The overview chart combines their balances.
+- Review imported Timezone transactions with descriptions, timestamps and balance changes.
+- The dashboard has a dark theme and adapts to phone screens.
 
-### 🤖 Discord Bot
-- **`/cards`** — show all card balances with all-time spending
-- **`/balance`** — quick total balance summary
-- **`/spent`** — spending breakdown by period (24h / 7d / 30d / all time)
-- **`/refresh`** — force poll all cards immediately
-- **`/addcard`** — add Koko (QR token) or Timezone (linked session) cards
-- **`/leaderboard`** — public balance rankings (server only)
-- **`/privacy`** — toggle public/private per command
-- **`/help`** — command reference
-- **`/info`** — account status and global stats
-- **`/setup`** — context-aware onboarding guide
-- **`/link`** — connect Discord to your web account
-- Works in servers, DMs, and group chats (user-installable)
+### Discord bot
+- `/cards` shows each card's balance and all-time spending.
+- `/balance` shows your total balance.
+- `/spent` breaks down spending over 24 hours, 7 days, 30 days or all time.
+- `/refresh` checks all your cards immediately.
+- `/addcard` adds a Koko card with a QR token or a Timezone card from a linked session.
+- `/leaderboard` shows public balance rankings in servers.
+- `/privacy` switches individual commands between public and private responses.
+- `/help` lists the commands.
+- `/info` shows account status and global stats.
+- `/setup` gives setup instructions based on your account.
+- `/link` connects Discord to your web account.
 
-### 🔄 Automated Polling
-- **Koko cards** — scrapes balance from the Koko eStore page every 5 minutes (configurable)
-- **Timezone cards** — uses the TEEG API with automatic token refresh (Azure B2C OAuth)
-- **Quiet hours** — configurable polling pause window (e.g. 11 PM – 6 AM) with timezone support
-- **Transaction import** — captures Timezone's rolling 20-transaction window on each poll before it scrolls out
+Users can install the bot for servers, direct messages and group chats.
 
-### 🛡️ Admin Panel
-- User management — rename, delete, promote/demote admin, toggle leaderboard
-- Card overview — all active cards with last balance and update time
-- Timezone session status — connected / error / stale / needs reconnect
-- Quiet hours config — enable/disable, set start/end hour, select timezone
-- Admin webhook — Discord webhook with configurable fire modes (live / 5m / 10m / 30m / 1h / daily)
-- Last seen tracking — see when each user last interacted (web or Discord)
-- Live logs — in-memory log viewer for debugging
+### Scheduled checks
+- The tracker reads Koko balances from the Koko eStore every 5 minutes by default. You can change the interval.
+- Timezone checks use the TEEG API and refresh Azure B2C OAuth tokens automatically. Each check saves Timezone's rolling window of 20 transactions before older entries drop out.
+- Set quiet hours in your timezone to pause checks, for example from 11 PM to 6 AM.
 
-### 🔗 Integrations
-- **Discord OAuth** — login and account creation via Discord
-- **Discord webhooks** — per-user and admin-wide balance change notifications
-- **Timezone portal** — one-click session capture via bookmarklet
-- **Email** — password reset support (SMTP)
+### Admin panel
+- Rename or delete users, grant or remove admin access, and toggle leaderboard participation.
+- View active cards with their last balance and update time. See whether each Timezone session is connected, has an error, is stale, or needs to reconnect.
+- Turn quiet hours on or off, set the start and end hours, and choose a timezone.
+- Set the admin Discord webhook to send live, every 5, 10 or 30 minutes, hourly, or daily.
+- See when users last interacted on the web or Discord. Use the live in-memory logs to debug problems.
+
+### Integrations
+- Sign in or create an account with Discord OAuth.
+- Use Discord webhooks to send balance change notifications to individual users or admins.
+- Capture a Timezone portal session in one click with the bookmarklet.
+- Send password reset emails through SMTP.
 
 ---
 
@@ -170,7 +166,7 @@ ArcadeTracker/
 | `APP_URL` | No | `http://localhost:5055` | Public URL for bot messages and OAuth redirects |
 | `POLL_INTERVAL` | No | `300` | Default Koko poll interval in seconds |
 | `TIMEZONE_POLL_INTERVAL` | No | `900` | Default Timezone poll interval in seconds |
-| `TFNSW_API_KEY` | No | — | TfNSW Open Data Hub API key for Transport NSW commands — obtain from [opendata.transport.nsw.gov.au](https://opendata.transport.nsw.gov.au) |
+| `TFNSW_API_KEY` | No | — | TfNSW Open Data Hub API key for Transport NSW commands. Get a key at [opendata.transport.nsw.gov.au](https://opendata.transport.nsw.gov.au). |
 | `MAIL_SERVER` | No | — | SMTP server for password reset emails |
 | `MAIL_PORT` | No | `587` | SMTP port |
 | `MAIL_USERNAME` | No | — | SMTP username |
@@ -185,7 +181,7 @@ ArcadeTracker/
 2. Enable the **applications.commands** scope
 3. Set `DISCORD_BOT_TOKEN` and optionally `DISCORD_GUILD_ID`
 4. Invite the bot to your server with the OAuth2 URL generator (scopes: `bot`, `applications.commands`)
-5. The bot supports user-install — members can add it to their DMs too
+5. Members can install the bot in their DMs too.
 
 For Discord OAuth login, also create an OAuth2 redirect URL pointing to `{APP_URL}/auth/discord/callback`.
 
@@ -205,7 +201,7 @@ For Discord OAuth login, also create an OAuth2 redirect URL pointing to `{APP_UR
 
 ## Contributing
 
-Pull requests welcome. The codebase is a single Flask app (`app.py`) and Discord bot (`bot.py`) — no build step required.
+Pull requests are welcome. You can run the Flask app (`app.py`) and Discord bot (`bot.py`) without a build step.
 
 ```bash
 # Local dev (no Docker)
